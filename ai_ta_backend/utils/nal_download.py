@@ -37,7 +37,7 @@ def main():
     data = [1, 2, 3]
     # fetch records from SQL
     while len(data) > 0:
-        response = SUPABASE_CLIENT.table("nal_publications").select("doi_number, publisher, metadata").eq("ingested", False).eq("downloadable", True).neq("publisher", "Wiley").limit(1000).execute()
+        response = SUPABASE_CLIENT.table("nal_publications").select("doi_number, publisher, metadata").eq("ingested", False).eq("downloadable", True).eq("publisher", "Wiley").limit(1000).execute()
         data = response.data
         print("No. of records: ", len(data))
         for record in data:
@@ -48,7 +48,6 @@ def main():
             elif 'Wiley' in record['publisher']:
                 # route to wiley download
                 print('Wiley')
-                continue
                 result = downloadWileyPDF(doi=record['doi_number'], metadata=record['metadata'])
                 time.sleep(10) # sleep for 10 seconds to avoid rate limiting
             elif 'Elsevier' in record['publisher']:
