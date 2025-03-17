@@ -176,14 +176,14 @@ def update_tracking_files(successful_batch: List[str], failed_batch: List[str], 
         except Exception as e:
             print(f"Error updating failed tracking file: {e}")
 
-def speed_test_fitz_extraction(bucket, prefix, batch_size=1_000, max_concurrent_workers=None, resume=True):
+def speed_test_fitz_extraction(bucket, prefix, batch_size=10_000, max_concurrent_workers=None, resume=True):
     """Speed test pymupdf text extraction with batched streaming processing and resume capability"""
     start_time = time.time()
     total_processed = 0
     
-    # Set default concurrent workers (or use provided value)
     if max_concurrent_workers is None:
-        max_concurrent_workers = max(1, multiprocessing.cpu_count() - 1)
+        # overprovision to help saturate the network, more parallel downloads
+        max_concurrent_workers = max(1, multiprocessing.cpu_count() + 4)
     
     # Create output directory for batch results
     output_dir = "extraction_results"
@@ -210,33 +210,45 @@ def speed_test_fitz_extraction(bucket, prefix, batch_size=1_000, max_concurrent_
             
             # Get batch of PDF keys directly from S3 with pagination
             pdf_keys_batch = []
-            list_kwargs = {'Bucket': bucket, 'Prefix': prefix, 'MaxKeys': batch_size}
             
-            if continuation_token:
-                list_kwargs['ContinuationToken'] = continuation_token
+            # Accumulate keys until we reach the desired batch size
+            # S3 has a limit of 1000 keys per request, so we need to make multiple requests for larger batches
+            while len(pdf_keys_batch) < batch_size:
+                # Use 1000 as MaxKeys (S3 limit) or remaining keys needed to reach batch_size, whichever is smaller
+                max_keys = min(1000, batch_size - len(pdf_keys_batch))
+                list_kwargs = {'Bucket': bucket, 'Prefix': prefix, 'MaxKeys': max_keys}
                 
-            response = s3_client.list_objects_v2(**list_kwargs)
-            
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    key = obj['Key']
-                    if key.endswith('.pdf'):
-                        # Skip files that have already been processed if resuming
-                        if resume and (key in processed_successful or key in processed_failed):
-                            continue
-                        pdf_keys_batch.append(key)
-            
-            # Update continuation token for next batch
-            if response.get('IsTruncated', False):
-                continuation_token = response.get('NextContinuationToken')
-            else:
-                continuation_token = None
+                if continuation_token:
+                    list_kwargs['ContinuationToken'] = continuation_token
+                    
+                response = s3_client.list_objects_v2(**list_kwargs)
+                
+                # Process the contents of the response
+                if 'Contents' in response:
+                    for obj in response['Contents']:
+                        key = obj['Key']
+                        if key.endswith('.pdf'):
+                            # Skip files that have already been processed if resuming
+                            if resume and (key in processed_successful or key in processed_failed):
+                                continue
+                            pdf_keys_batch.append(key)
+                            # Break early if we've reached the batch size
+                            if len(pdf_keys_batch) >= batch_size:
+                                break
+                
+                # Update continuation token for next batch
+                if response.get('IsTruncated', False):
+                    continuation_token = response.get('NextContinuationToken')
+                else:
+                    continuation_token = None
+                    break  # No more objects available
+                
+                # If we've gathered enough keys or there are no more objects, break the loop
+                if len(pdf_keys_batch) >= batch_size or continuation_token is None:
+                    break
             
             if not pdf_keys_batch:
-                if not continuation_token:
-                    break  # No more objects to process
-                else:
-                    continue  # No PDFs in this batch, but more objects exist
+                break  # No more PDFs to process
             
             print(f"Batch {batch_num}: Processing {len(pdf_keys_batch)} PDF files...")
             
