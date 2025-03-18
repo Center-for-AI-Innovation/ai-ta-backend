@@ -1205,7 +1205,7 @@ class Ingest():
         context.metadata['doc_groups'] = kwargs.get('groups', [])
 
       openai_embeddings_key = os.getenv('VLADS_OPENAI_KEY')
-      if metadatas[0].get('course_name') == 'cropwizard-1.5':
+      if metadatas[0].get('course_name') in ['cropwizard-1.5', 'ag-research']:
         print("Using Cropwizard OpenAI key")
         openai_embeddings_key = os.getenv('CROPWIZARD_OPENAI_KEY')
 
@@ -1245,6 +1245,12 @@ class Ingest():
           print("Uploading to cropwizard collection...")
           self.cropwizard_qdrant_client.upsert(
               collection_name='cropwizard',
+              points=vectors,
+          )
+        elif metadatas[0].get('course_name') == 'ag-research':
+          print("Uploading to ag-research collection...")
+          self.cropwizard_qdrant_client.upsert(
+              collection_name='ag-research',
               points=vectors,
           )
         else:
@@ -1458,6 +1464,17 @@ class Ingest():
             print("Deleting from cropwizard collection...")
             self.cropwizard_qdrant_client.delete(
                 collection_name='cropwizard',
+                points_selector=models.Filter(must=[
+                    models.FieldCondition(
+                        key="s3_path",
+                        match=models.MatchValue(value=s3_path),
+                    ),
+                ]),
+            )
+          elif course_name == 'ag-research':
+            print("Deleting from ag-research collection...")
+            self.cropwizard_qdrant_client.delete(
+                collection_name='ag-research',
                 points_selector=models.Filter(must=[
                     models.FieldCondition(
                         key="s3_path",
