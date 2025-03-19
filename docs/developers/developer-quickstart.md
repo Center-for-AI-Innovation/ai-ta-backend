@@ -69,6 +69,26 @@ Frontend repo: [https://github.com/CAII-NCSA/uiuc-chat-frontend](https://github.
 git clone git@github.com:CAII-NCSA/uiuc-chat-frontend.git
 ```
 
+<details>
+
+<summary>❌ Seeing an error? git@github.com: Permission denied (publickey).</summary>
+
+If you see an error like this:&#x20;
+
+```
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+Then you have to **add your local `ssh`key to your Github account** here: [https://github.com/settings/keys](https://github.com/settings/keys)
+
+Finally, attempt cloning the repo again.
+
+</details>
+
 ### (1/2) Install dev dependencies
 
 {% hint style="warning" %}
@@ -92,7 +112,7 @@ Install dev dependencies
 
 ```bash
 # navigate to the root of the github
-cd path/to/ai-ta-frontend
+cd uiuc-chat-frontend
 
 # install all necessary dependencies 
 npm i 
@@ -102,7 +122,7 @@ npm i
 
 ```bash
 # navigate to the root of the github
-cd path/to/ai-ta-frontend
+cd uiuc-chat-frontend
 
 infisical login
 # ⭐️ --> select "Self Hosting"
@@ -152,6 +172,26 @@ Backend repo: [https://github.com/UIUC-Chatbot/ai-ta-backend](https://github.com
 git clone git@github.com:UIUC-Chatbot/ai-ta-backend.git
 ```
 
+<details>
+
+<summary>❌ Seeing an error? git@github.com: Permission denied (publickey).</summary>
+
+If you see an error like this:&#x20;
+
+```
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+Then you have to **add your local `ssh`key to your Github account** here: [https://github.com/settings/keys](https://github.com/settings/keys)
+
+Finally, attempt cloning the repo again.
+
+</details>
+
 ### (1/2) Install dev dependencies
 
 Use a python virtual environment, here I'll use `conda`.
@@ -160,11 +200,19 @@ Use a python virtual environment, here I'll use `conda`.
 
 Use <mark style="color:yellow;">python 3.10</mark>.
 
+1. Create and activate Conda env
+
 ```bash
-conda create --name ai-ta-backend python=3.10 -y
+conda create --name ai-ta-backend python=3.10 -y && conda activate ai-ta-backend
+```
 
-conda activate ai-ta-backend
+2. Install dependencies
 
+```bash
+# navigate to the root of the github
+cd ai-ta-backend
+
+# install dependencies
 pip install -r requirements.txt
 ```
 

@@ -132,28 +132,28 @@ def getTopContexts(service: RetrievalService) -> Response:
 
 
 @app.route('/llm-monitor-message', methods=['POST'])
-def llm_monitor_message(service: RetrievalService) -> Response:
+def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorInterface) -> Response:
   """
-  
+  Analyze a message from a conversation and store the results in the database.
   """
   start_time = time.monotonic()
   data = request.get_json()
-  messages: List[str] = data.get('messages', [])
+  # messages: List[str] = data.get('messages', [])
   course_name: str = data.get('course_name', None)
   conversation_id: str = data.get('conversation_id', None)
+  user_email: str = data.get('user_email', None)
+  model_name: str = data.get('model_name', None)
 
-  if course_name == '' or messages == []:
+  if course_name == '':
     # proper web error "400 Bad request"
-    abort(
-        400,
-        description=
-        f"Missing one or more required parameters: 'course_name' and 'messages' must be provided. Course name: `{course_name}`"
-    )
+    abort(400,
+          description=
+          f"Missing one or more required parameters: 'course_name' must be provided. Course name: `{course_name}`")
 
-  found_documents = service.llm_monitor_message(messages, course_name, conversation_id)
-  response = jsonify(found_documents)
+  flaskExecutor.submit(service.llm_monitor_message, course_name, conversation_id, user_email, model_name)
+  response = jsonify({"outcome": "Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
-  print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")
+  print(f"⏰ Runtime of /llm-monitor-message in main.py: {(time.monotonic() - start_time):.2f} seconds")
 
   return response
 
@@ -559,19 +559,21 @@ def switch_workflow(service: WorkflowService) -> Response:
 
 @app.route('/getConversationStats', methods=['GET'])
 def get_conversation_stats(service: RetrievalService) -> Response:
-  """
-  Retrieves statistical metrics about conversations for a specific course.
-  """
-  course_name = request.args.get('course_name', default='', type=str)
+    """
+    Retrieves statistical metrics about conversations for a specific course.
+    """
+    course_name = request.args.get('course_name', default='', type=str)
+    from_date = request.args.get('from_date', default='', type=str)
+    to_date = request.args.get('to_date', default='', type=str)
 
-  if course_name == '':
-    abort(400, description="Missing required parameter: 'course_name' must be provided.")
+    if course_name == '':
+        abort(400, description="Missing required parameter: 'course_name' must be provided.")
 
-  conversation_stats = service.getConversationStats(course_name)
+    conversation_stats = service.getConversationStats(course_name, from_date, to_date)
 
-  response = jsonify(conversation_stats)
-  response.headers.add('Access-Control-Allow-Origin', '*')
-  return response
+    response = jsonify(conversation_stats)
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
 
 
 @app.route('/run_flow', methods=['POST'])

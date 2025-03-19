@@ -204,7 +204,7 @@ class RetrievalService:
 
     return distinct_dicts
 
-  def llm_monitor_message(self, messages: List[str], course_name: str, conversation_id: str) -> List[Dict]:
+  def llm_monitor_message(self, course_name: str, conversation_id: str, user_email: str, model_name: str) -> List[Dict]:
     """
     Will store categories in DB, send email if an alert is triggered.
     """
@@ -215,27 +215,39 @@ class RetrievalService:
 
     from ai_ta_backend.utils.email.send_transactional_email import send_email
 
+    # client = OllamaClient(host=os.environ['GPU_RIG_OLLAMA_SERVER_URL'])
     client = OllamaClient(os.environ['OLLAMA_SERVER_URL'])
+
+    messages = self.sqlDb.getMessagesFromConvoID(conversation_id).data
 
     # analyze message using Ollama
     for message in messages:
-      try:
-        message_content = message['content'][0]['text'] if isinstance(message.get('content'),
-                                                                      list) else message['content']
-      except:
-        message_content = message['content']
+      if message['llm-monitor-tags']:
+        # Don't analyze messages that have already been flagged
+        continue
+
+      message_content = message['content_text']
+
+      if message['role']:
+        message_content = "Message from " + message['role'] + ":\n" + message_content
+
+      monitor_llm_ollama_model = 'qwen2.5:14b-instruct-fp16'
+      # monitor_llm_ollama_model = 'qwen2.5:32b'
 
       analysis_result = client.chat(
-          model='qwen2.5:14b-instruct-fp16',
+          model=monitor_llm_ollama_model,
+          options={"num_ctx": 20_000},
           messages=[{
               'role':
                   'system',
               'content':
                   '''You are analyzing messages from users interacting with an educational AI assistant. This assistant helps students and educators with questions related to homework questions and learning materials.
-                  
-                  Your task is to categorize these messages to help maintain appropriate usage and improve the system. Each message should be evaluated across multiple categories of concern (NSFW content, anger, factual corrections), and you can flag multiple categories when appropriate.
 
-                  These categorizations help our team understand user interactions, address concerns, and continuously improve the provided educational experience.'''
+Your task is to categorize these messages to help maintain appropriate usage and improve the system. Each message should be evaluated across multiple categories of concern (NSFW content, anger, factual corrections), and you can flag multiple categories when appropriate.
+
+Keep in mind when you're reviewing a `user` message, it's from a student. If you're reviewing an `assistant` message, it's from the AI assistant.
+
+These categorizations help our team understand user interactions, address concerns, and continuously improve the provided educational experience.'''
           }, {
               'role': 'user',
               'content': message_content
@@ -267,8 +279,8 @@ class RetrievalService:
                           'categorize_as_anger',
                       'description':
                           '''Identify content expressing clear anger through aggressive language, hostile tone, multiple exclamation marks, ALL CAPS YELLING, or explicitly angry statements aimed toward the AI system or its responses. 
-                          
-                          ONLY flag messages where the user is explicitly directing anger, frustration, or hostility TOWARD THE AI ASSISTANT ITSELF.''',
+ONLY flag messages where the user is explicitly directing anger, frustration, or hostility TOWARD THE AI ASSISTANT ITSELF.
+Be careful not to flag messages about programming that may have keywords like "error", "incorrect", "wrong", etc.''',
                       'parameters': {
                           'type': 'object',
                           'properties': {
@@ -290,23 +302,23 @@ class RetrievalService:
                           'categorize_as_incorrect',
                       'description':
                           '''This category is SPECIFICALLY for when the user indicates that the AI SYSTEM provided factually wrong information.
-                          
-                          We use this category to identify when our AI makes factual errors so we can improve its knowledge.
-                          
-                          Words like "wrong", "incorrect", "error", "mistake" can be misleading. The critical factor is WHO made the error. Some examples are:
-                          
-                          SHOULD BE FLAGGED (AI made errors):
-                          "You are wrong"
-                          "Your answer contains incorrect information"
-                          "That is not right"
-                          "The information you gave is wrong"
 
-                          SHOULD NOT BE FLAGGED (user asking about their own errors):
-                          "What's wrong with my code?"
-                          "Why is my answer incorrect?"
-                          "Can you explain the error in my essay?"
-                          "Help me fix the mistakes in my assignment"
-                          "What's wrong with this formula?"''',
+We use this category to identify when our AI makes factual errors so we can improve its knowledge.
+
+Words like "wrong", "incorrect", "error", "mistake" can be misleading. The critical factor is WHO made the error. Some examples are:
+
+SHOULD BE FLAGGED (AI made errors):
+"You are wrong"
+"Your answer contains incorrect information"
+"That is not right"
+"The information you gave is wrong"
+
+SHOULD NOT BE FLAGGED (user asking about their own errors):
+"What's wrong with my code?"
+"Why is my answer incorrect?"
+"Can you explain the error in my essay?"
+"Help me fix the mistakes in my assignment"
+"What's wrong with this formula?"''',
                       'parameters': {
                           'type': 'object',
                           'properties': {
@@ -319,15 +331,15 @@ class RetrievalService:
                       },
                   },
               },
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_good',
-                      'description':
-                          'Classify content as appropriate and constructive if it contains normal questions, feedback, discussion, or requests without triggering any of the above categories.',
-                  },
-              },
+              # {
+              #     'type': 'function',
+              #     'function': {
+              #         'name':
+              #             'categorize_as_good',
+              #         'description':
+              #             'Classify content as appropriate and constructive if it contains normal questions, feedback, discussion, or requests without triggering any of the above categories.',
+              #     },
+              # },
           ],
       )
 
@@ -353,6 +365,13 @@ class RetrievalService:
 
         alert_body = "\n".join([
             "LLM Monitor Alert",
+            "------------------------",
+            f"Course Name: {course_name}",
+            f"User Email: {user_email}",
+            f"Conversation Model Name: {model_name}",
+            f"LLM Monitor Model Name: {monitor_llm_ollama_model}",
+            f"Convo ID: {conversation_id}",
+            "------------------------",
             "Alerts triggered:",
             "\n".join(alert_details),
             "Details:",
@@ -369,6 +388,21 @@ class RetrievalService:
                    sender="hi@uiuc.chat",
                    recipients=["kvday2@illinois.edu", "hbroome@illinois.edu", "rohan13@illinois.edu"],
                    bcc_recipients=[])
+
+        # Update the message with the triggered categories
+        llm_monitor_tags = {
+            "has_been_analyzed": True,
+            "monitor_llm_ollama_model": monitor_llm_ollama_model,
+            "tags": triggered,
+        }
+        self.sqlDb.updateMessageFromLlmMonitor(conversation_id, llm_monitor_tags)
+      else:
+        # No alerts triggered, but still record that it's been analyzed
+        llm_monitor_tags = {
+            "has_been_analyzed": True,
+            "monitor_llm_ollama_model": monitor_llm_ollama_model,
+        }
+        self.sqlDb.updateMessageFromLlmMonitor(conversation_id, llm_monitor_tags)
 
       return "Success"
 
@@ -692,91 +726,94 @@ class RetrievalService:
         } for doc in found_docs
     ]
 
-  def getConversationStats(self, course_name: str):
+  def getConversationStats(self, course_name: str, from_date: str = '', to_date: str = ''):
     """
     Fetches conversation data from the database and groups them by day, hour, and weekday.
+    
+    Args:
+        course_name (str): Name of the course
+        from_date (str, optional): Start date in ISO format
+        to_date (str, optional): End date in ISO format
     """
     try:
-      conversations, total_count = self.sqlDb.getConversationsCreatedAtByCourse(course_name)
+        conversations, total_count = self.sqlDb.getConversationsCreatedAtByCourse(course_name, from_date, to_date)
 
-      # Initialize with empty data (all zeros)
-      response_data = {
-          'per_day': {},
-          'per_hour': {
-              str(hour): 0 for hour in range(24)
-          },  # Convert hour to string for consistency
-          'per_weekday': {
-              day: 0 for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-          },
-          'heatmap': {
-              day: {
-                  str(hour): 0 for hour in range(24)
-              } for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-          },
-          'total_count': 0
-      }
+        response_data = {
+            'per_day': {},
+            'per_hour': {
+                str(hour): 0 for hour in range(24)
+            },
+            'per_weekday': {
+                day: 0 for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            },
+            'heatmap': {
+                day: {
+                    str(hour): 0 for hour in range(24)
+                } for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            },
+            'total_count': 0
+        }
 
-      if not conversations:
-        return response_data
+        if not conversations:
+            return response_data
 
-      central_tz = pytz.timezone('America/Chicago')
-      grouped_data = {
-          'per_day': defaultdict(int),
-          'per_hour': defaultdict(int),
-          'per_weekday': defaultdict(int),
-          'heatmap': defaultdict(lambda: defaultdict(int)),
-      }
+        central_tz = pytz.timezone('America/Chicago')
+        grouped_data = {
+            'per_day': defaultdict(int),
+            'per_hour': defaultdict(int),
+            'per_weekday': defaultdict(int),
+            'heatmap': defaultdict(lambda: defaultdict(int)),
+        }
 
-      for record in conversations:
-        try:
-          created_at = record['created_at']
-          parsed_date = parser.parse(created_at).astimezone(central_tz)
+        for record in conversations:
+            try:
+                created_at = record['created_at']
+                parsed_date = parser.parse(created_at).astimezone(central_tz)
 
-          day = parsed_date.date()
-          hour = parsed_date.hour
-          day_of_week = parsed_date.strftime('%A')
+                day = parsed_date.date()
+                hour = parsed_date.hour
+                day_of_week = parsed_date.strftime('%A')
 
-          grouped_data['per_day'][str(day)] += 1
-          grouped_data['per_hour'][str(hour)] += 1  # Convert hour to string
-          grouped_data['per_weekday'][day_of_week] += 1
-          grouped_data['heatmap'][day_of_week][str(hour)] += 1  # Convert hour to string
-        except Exception as e:
-          print(f"Error processing record: {str(e)}")
-          continue
+                grouped_data['per_day'][str(day)] += 1
+                grouped_data['per_hour'][str(hour)] += 1
+                grouped_data['per_weekday'][day_of_week] += 1
+                grouped_data['heatmap'][day_of_week][str(hour)] += 1
+            except Exception as e:
+                print(f"Error processing record: {str(e)}")
+                continue
 
-      return {
-          'per_day': dict(grouped_data['per_day']),
-          'per_hour': {
-              str(k): v for k, v in grouped_data['per_hour'].items()
-          },
-          'per_weekday': dict(grouped_data['per_weekday']),
-          'heatmap': {
-              day: {
-                  str(h): count for h, count in hours.items()
-              } for day, hours in grouped_data['heatmap'].items()
-          },
-          'total_count': total_count
-      }
+        return {
+            'per_day': dict(grouped_data['per_day']),
+            'per_hour': {
+                str(k): v for k, v in grouped_data['per_hour'].items()
+            },
+            'per_weekday': dict(grouped_data['per_weekday']),
+            'heatmap': {
+                day: {
+                    str(h): count for h, count in hours.items()
+                } for day, hours in grouped_data['heatmap'].items()
+            },
+            'total_count': total_count
+        }
 
     except Exception as e:
-      print(f"Error in getConversationStats for course {course_name}: {str(e)}")
-      self.sentry.capture_exception(e)
-      # Return empty data structure on error
-      return {
-          'per_day': {},
-          'per_hour': {
-              str(hour): 0 for hour in range(24)
-          },
-          'per_weekday': {
-              day: 0 for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-          },
-          'heatmap': {
-              day: {
-                  str(hour): 0 for hour in range(24)
-              } for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-          },
-          'total_count': 0
-      }
+        print(f"Error in getConversationStats for course {course_name}: {str(e)}")
+        self.sentry.capture_exception(e)
+        return {
+            'per_day': {},
+            'per_hour': {
+                str(hour): 0 for hour in range(24)
+            },
+            'per_weekday': {
+                day: 0 for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            },
+            'heatmap': {
+                day: {
+                    str(hour): 0 for hour in range(24)
+                } for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            },
+            'total_count': 0
+        }
 
   def getProjectStats(self, project_name: str) -> ProjectStats:
     """
