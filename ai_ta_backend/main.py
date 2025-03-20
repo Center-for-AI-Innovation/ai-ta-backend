@@ -753,7 +753,17 @@ def graphRetrieval(service: RetrievalService) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+@app.route('/getPrimeKGContexts', methods=['GET'])
+def getPrimeKGContexts(service: RetrievalService) -> Response:
+  user_query = request.args.get('user_query', default='', type=str)
 
+  if user_query == '':
+    abort(400, description="Missing required parameter: 'user_query' must be provided.")
+
+  results = service.getPrimeKGContexts(user_query)
+  response = jsonify(results)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
