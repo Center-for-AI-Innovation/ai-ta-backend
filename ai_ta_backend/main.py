@@ -734,6 +734,17 @@ def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+@app.route('/checkCourseAccess', methods=['GET'])
+def check_course_access(service: RetrievalService) -> Response:
+  course_id = request.args.get('course_id', default=0, type=int)
+  if course_id == 0:
+    abort(400, description="Missing required parameter: 'course_id' must be provided.")
+  access = service.check_course_access(course_id)
+  response = jsonify({"access": access})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
 
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
