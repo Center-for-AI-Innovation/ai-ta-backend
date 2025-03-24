@@ -2,9 +2,10 @@
 
 The key priority of this architecture is developer velocity.
 
-* Vercel + Railway + Supabase + Beam has been a fantastic combo.
+* For hosted offerings, Vercel + Railway + Supabase + Beam has been a fantastic combo.
+* We also self host much of our stack with Docker.
 
-<figure><img src="../.gitbook/assets/CleanShot 2024-05-01 at 09.59.59.png" alt=""><figcaption><p>System architecture as of May 1st, 2024.</p></figcaption></figure>
+<figure><img src="../.gitbook/assets/CleanShot 2025-03-04 at 12.59.19.png" alt=""><figcaption><p>Architecture as of March 2025. Every grey line item is a Docker container.</p></figcaption></figure>
 
 ### Our entire stack
 

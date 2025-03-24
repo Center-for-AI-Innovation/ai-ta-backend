@@ -22,7 +22,7 @@ cryptography==42.0.7
 # Utils
 tiktoken==0.5.1
 python-dotenv==1.0.1
-pydantic==2.8.2 # updated to resolve nomic errors
+pydantic==2.9.0 # updated again to resolve Ollama, was updated to resolve nomic errors (was 2.8.2)
 flask-executor==1.0.0
 retry==0.9.2
 XlsxWriter==3.2.0
@@ -44,7 +44,7 @@ redis[hiredis]
 posthog==3.1.0
 sentry-sdk==1.39.1
 
-ollama==0.2.1
+ollama==0.4.7
 
 # Not currently supporting coursera ingest
 # cs-dlp @ git+https://github.com/raffaem/cs-dlp.git@0.12.0b0 # previously called coursera-dl

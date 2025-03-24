@@ -40,7 +40,9 @@ Short and sweet introduction to UIUC.chat
 
 ## Creating a new project
 
-{% embed url="https://youtu.be/m0y6xRABGvI" %}
+
+
+{% embed url="https://www.loom.com/share/d89971aa285e4008939a6704528f3ab4?sid=d11803e1-1992-4fcb-a70d-c15f6462859e" %}
 
 ## Connecting canvas&#x20;
 
@@ -56,25 +58,15 @@ You must invite our bot for your course as a TA. The email address is `uiuc.chat
 
 For a great experience bring your own OpenAI API key. We also support Azure OpenAI, and Anthropic.&#x20;
 
-{% embed url="https://www.youtube.com/watch?v=XNf1zBywDRo" %}
+
+
+{% embed url="https://www.loom.com/share/a94b76216672482ea6a3c9010bc2632a?sid=cbaea12b-e19b-4270-94b3-50accbea49b7" %}
 
 ## How to set up a tutor mode&#x20;
 
 These series of walkthroughs are about system prompt and different ways you can customize them. The very first one is a helpful teaching assistant. We call this prompt "tutor mode".
 
 {% embed url="https://www.youtube.com/watch?v=t1vu0nPUA9M" %}
-
-## Document-Based References Only System Prompt
-
-Restricts AI to use only information from the provided documents.
-
-{% embed url="https://youtu.be/r4-BmIDhP50" %}
-
-## Bypassing UIUC.chat's internal prompting&#x20;
-
-Bypasses internal prompting and citations.
-
-{% embed url="https://youtu.be/P9ZmpnOg0VI" %}
 
 ## Using the API
 

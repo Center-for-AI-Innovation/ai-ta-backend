@@ -129,6 +129,9 @@ ourSecrets = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "POSTHOG_API_KEY",
+    "CROPWIZARD_QDRANT_URL",
+    "CROPWIZARD_QDRANT_API_KEY",
+    "CROPWIZARD_OPENAI_KEY",
     # "AZURE_OPENAI_KEY",
     # "AZURE_OPENAI_ENGINE",
     # "AZURE_OPENAI_KEY",
@@ -145,6 +148,13 @@ def loader():
   # vector DB
   qdrant_client = QdrantClient(
       url=os.getenv('QDRANT_URL'),
+      api_key=os.getenv('QDRANT_API_KEY'),
+  )
+
+  cropwizard_qdrant_client = QdrantClient(
+      url=os.getenv('CROPWIZARD_QDRANT_URL'),
+      port=443,
+      https=True,
       api_key=os.getenv('QDRANT_API_KEY'),
   )
 
@@ -178,7 +188,7 @@ def loader():
 
   posthog = Posthog(sync_mode=True, project_api_key=os.environ['POSTHOG_API_KEY'], host='https://app.posthog.com')
 
-  return qdrant_client, vectorstore, s3_client, supabase_client, posthog
+  return qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog
 
 
 # Triggers determine how your app is deployed
@@ -197,7 +207,7 @@ def loader():
     image=image,
     autoscaler=autoscaler)
 def ingest(context, **inputs: Dict[str | List[str], Any]):
-  qdrant_client, vectorstore, s3_client, supabase_client, posthog = context.on_start_value
+  qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog = context.on_start_value
   course_name: List[str] | str = inputs.get('course_name', '')
   s3_paths: List[str] | str = inputs.get('s3_paths', '')
   url: List[str] | str | None = inputs.get('url', None)
@@ -210,7 +220,7 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
       f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
   )
 
-  ingester = Ingest(qdrant_client, vectorstore, s3_client, supabase_client, posthog)
+  ingester = Ingest(qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog)
 
   def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, groups):
     if content:
@@ -346,8 +356,9 @@ def retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, ba
 
 class Ingest():
 
-  def __init__(self, qdrant_client, vectorstore, s3_client, supabase_client, posthog):
+  def __init__(self, qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog):
     self.qdrant_client = qdrant_client
+    self.cropwizard_qdrant_client = cropwizard_qdrant_client
     self.vectorstore = vectorstore
     self.s3_client = s3_client
     self.supabase_client = supabase_client
@@ -1326,12 +1337,17 @@ class Ingest():
         context.metadata['chunk_index'] = i
         context.metadata['doc_groups'] = kwargs.get('groups', [])
 
+      openai_embeddings_key = os.getenv('VLADS_OPENAI_KEY')
+      if metadatas[0].get('course_name') == 'cropwizard-1.5':
+        print("Using Cropwizard OpenAI key")
+        openai_embeddings_key = os.getenv('CROPWIZARD_OPENAI_KEY')
+
       print("Starting to call embeddings API")
       embeddings_start_time = time.monotonic()
       oai = OpenAIAPIProcessor(
           input_prompts_list=input_texts,
           request_url='https://api.openai.com/v1/embeddings',
-          api_key=os.getenv('VLADS_OPENAI_KEY'),
+          api_key=openai_embeddings_key,
           # request_url='https://uiuc-chat-canada-east.openai.azure.com/openai/deployments/text-embedding-ada-002/embeddings?api-version=2023-05-15',
           # api_key=os.getenv('AZURE_OPENAI_KEY'),
           max_requests_per_minute=10_000,
@@ -1355,10 +1371,20 @@ class Ingest():
             PointStruct(id=str(uuid.uuid4()), vector=embeddings_dict[context.page_content], payload=upload_metadata))
 
       try:
-        self.qdrant_client.upsert(
-            collection_name=os.environ['QDRANT_COLLECTION_NAME'],  # type: ignore
-            points=vectors,  # type: ignore
-        )
+        # ----------------------------
+        # SPECIAL CASE FOR CROPWIZARD INGEST
+        # ----------------------------
+        if metadatas[0].get('course_name') == 'cropwizard-1.5':
+          print("Uploading to cropwizard collection...")
+          self.cropwizard_qdrant_client.upsert(
+              collection_name='cropwizard',
+              points=vectors,
+          )
+        else:
+          self.qdrant_client.upsert(
+              collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+              points=vectors,
+          )
       except Exception as e:
         logging.error("Error in QDRANT upload: ", exc_info=True)
         err = f"Error in QDRANT upload: {e}"
@@ -1561,15 +1587,27 @@ class Ingest():
         # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
         # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
         try:
-          self.qdrant_client.delete(
-              collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-              points_selector=models.Filter(must=[
-                  models.FieldCondition(
-                      key="s3_path",
-                      match=models.MatchValue(value=s3_path),
-                  ),
-              ]),
-          )
+          if course_name == 'cropwizard-1.5':
+            print("Deleting from cropwizard collection...")
+            self.cropwizard_qdrant_client.delete(
+                collection_name='cropwizard',
+                points_selector=models.Filter(must=[
+                    models.FieldCondition(
+                        key="s3_path",
+                        match=models.MatchValue(value=s3_path),
+                    ),
+                ]),
+            )
+          else:
+            self.qdrant_client.delete(
+                collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+                points_selector=models.Filter(must=[
+                    models.FieldCondition(
+                        key="s3_path",
+                        match=models.MatchValue(value=s3_path),
+                    ),
+                ]),
+            )
         except Exception as e:
           if "timed out" in str(e):
             # Timed out is fine. Still deletes.
