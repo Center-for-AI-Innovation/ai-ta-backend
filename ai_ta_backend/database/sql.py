@@ -339,10 +339,40 @@ class SQLDatabase:
     return self.supabase_client.table("projects").select(field_name).eq("course_name", course_name).execute()
 
   def getConversationsFromLast24Hours(self):
-    """Caution: will start to miss results if >1,500 per day"""
-    return self.supabase_client.table("llm-convo-monitor").select("*").gte("created_at",
-                                                                           datetime.now() -
-                                                                           timedelta(days=1)).execute()
+    """Get conversations and their messages from the last 24 hours"""
+    # First get conversations from the last 24 hours
+    conversations = self.supabase_client.table("conversations").select("id").gte(
+        "created_at",
+        datetime.now() - timedelta(days=1)).limit(1500).execute()
+
+    if not conversations or not hasattr(conversations, 'data') or not conversations.data:
+      return conversations
+
+    # Get the conversation IDs
+    conversation_ids = [conv['id'] for conv in conversations.data]
+
+    # Then get the messages for these conversations
+    messages = self.supabase_client.table("messages").select("conversation_id, content_text, role").in_(
+        "conversation_id", conversation_ids).limit(1500).execute()
+
+    # Group messages by conversation_id
+    if messages and hasattr(messages, 'data'):
+      grouped_conversations = {}
+      for message in messages.data:
+        conv_id = message['conversation_id']
+        if conv_id not in grouped_conversations:
+          grouped_conversations[conv_id] = {'id': conv_id, 'messages': []}
+        grouped_conversations[conv_id]['messages'].append({
+            'role': message['role'],
+            'content_text': message['content_text']
+        })
+
+      # Convert to list of conversations
+      result = messages
+      result.data = list(grouped_conversations.values())
+      return result
+
+    return messages
 
   # def getMessagesFromConversations(self, conversations):
   #   return self.supabase_client.table("messages").select("*").in_("conversation_id", [conversation['id'] for conversation in conversations]).execute()
