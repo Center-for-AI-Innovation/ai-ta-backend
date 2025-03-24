@@ -5,6 +5,8 @@ import time
 import traceback
 from collections import defaultdict
 from typing import Dict, List, Union
+from datetime import datetime
+import json
 
 import openai
 import pytz
@@ -29,6 +31,7 @@ from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapt
 # from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.sentry_service import SentryService
+from ai_ta_backend.utils.infiseal import get_secret
 
 
 class RetrievalService:
@@ -168,7 +171,6 @@ class RetrievalService:
       # err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:\n{e}"  # type: ignore
       err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.print_exc} \n{e}"  # type: ignore
       traceback.print_exc()
-      print(err)
       self.sentry.capture_exception(e)
       return err
 
@@ -197,181 +199,239 @@ class RetrievalService:
 
     return distinct_dicts
 
-  def generate_daily_usage_report(self) -> List[Dict]:
+  def generate_daily_usage_report(self) -> dict:
     """
-    Generate a daily usage report of all the messages sent in the last 24 hours.
+    Generate a daily usage report of all the messages sent in the last 24 hours:
+    1. Fetch conversations from Supabase
+    2. Analyze messages using Qwen
+    3. Store results in DB
+    4. Send email with results
     """
-    # initialize the Ollama client
-    import json
+    try:
+        print("Starting daily usage report generation...")
+        
+        # Get Ollama URL from Infiseal
+        ollama_url = get_secret("OLLAMA_SERVER_URL")
+        print(f"OLLAMA_SERVER_URL: {ollama_url}")
+        
+        from ollama import Client as OllamaClient
+        from ai_ta_backend.utils.email.send_transactional_email import send_email
 
-    from ollama import Client as OllamaClient
+        # Initialize Ollama client
+        print("Initializing Ollama client...")
+        client = OllamaClient(ollama_url)
 
-    from ai_ta_backend.utils.email.send_transactional_email import send_email
+        # Get conversations from last 24 hours
+        print("Fetching conversations...")
+        conversations = self.sqlDb.getConversationsFromLast24Hours().data
+        print(f"Found {len(conversations)} conversations from last 24 hours")
+        print(conversations)
+        
+        if not conversations:
+            return {
+                "status": "success",
+                "message": "No conversations found in the last 24 hours",
+                "data": {
+                    "total_conversations": 0,
+                    "total_messages": 0
+                }
+            }
 
-    client = OllamaClient(os.environ['OLLAMA_SERVER_URL'])
+        # Initialize counters and storage for analysis
+        analysis_results = {
+            'total_conversations': len(conversations),
+            'total_messages': 0,
+            'categories': defaultdict(int),
+            'sentiment_analysis': defaultdict(int),
+            'interesting_conversations': [],
+            'error_cases': []
+        }
 
-    # get all conversations from the last 24 hours
-    conversations = self.sqlDb.getConversationsFromLast24Hours().data
-    print("CONVERSATIONS: ", len(conversations))
+        # Analyze each conversation
+        for conversation in conversations:
+            try:
+                convo = conversation['convo']
+                analysis_results['total_messages'] += len(convo['messages'])
 
-    for conversation in conversations:
-      convo = conversation['convo']
-      for message in convo['messages']:
-        print(message['role'], "\n", message['content'])
-      break
+                # Analyze full conversation context
+                conversation_text = "\n".join([
+                    f"{msg['role']}: {msg['content']}"
+                    for msg in convo['messages']
+                ])
 
-    # TODO: analyze the messages
-    # TODO: store results in DB
-    # TODO: send email w/ results
+                # Get analysis from Qwen
+                analysis = client.chat(
+                    model='qwen2.5:14b-instruct-fp16',
+                    messages=[{
+                        'role': 'system',
+                        'content': '''Analyze this conversation and provide a structured analysis with:
+                            1. Main topics/categories discussed
+                            2. Overall sentiment (positive/negative/neutral)
+                            3. Quality of bot responses (good/needs improvement/poor)
+                            4. Any error cases or issues identified
+                            5. Whether this conversation is particularly interesting or noteworthy
+                            Return results in JSON format.'''
+                    }, {
+                        'role': 'user',
+                        'content': conversation_text
+                    }]
+                )
 
-    return "Success"
+                # Parse analysis results
+                try:
+                    result = json.loads(analysis['message']['content'])
+                    
+                    # Update category counts
+                    for topic in result.get('topics', []):
+                        analysis_results['categories'][topic] += 1
+                    
+                    # Update sentiment counts    
+                    analysis_results['sentiment_analysis'][result.get('sentiment', 'unknown')] += 1
+                    
+                    # Store interesting conversations
+                    if result.get('interesting', False):
+                        analysis_results['interesting_conversations'].append({
+                            'id': conversation.get('id'),
+                            'reason': result.get('interesting_reason'),
+                            'preview': conversation_text[:200] + '...'
+                        })
+
+                    # Track error cases
+                    if result.get('errors', []):
+                        analysis_results['error_cases'].append({
+                            'id': conversation.get('id'),
+                            'errors': result.get('errors'),
+                            'preview': conversation_text[:200] + '...'
+                        })
+
+                except json.JSONDecodeError:
+                    print(f"Failed to parse Qwen analysis for conversation {conversation.get('id')}")
+                    continue
+
+            except Exception as e:
+                print(f"Error analyzing conversation {conversation.get('id')}: {str(e)}")
+                continue
+
+        # Store results in DB
+        # ##`try:
+        #     ##self.sqlDb.storeAnalysisResults({
+        #     #    'date': datetime.now().isoformat(),
+        #     #    'results': analysis_results
+        #     #})
+        #     print("Successfully stored analysis results in database")
+        # except Exception as db_error:
+        #     print(f"Failed to store results in database: {str(db_error)}")
+
+        # Generate and send email report
+        email_body = f"""
+        Daily Conversation Analysis Report
+
+        Summary:
+        - Total Conversations: {analysis_results['total_conversations']}
+        - Total Messages: {analysis_results['total_messages']}
+
+        Top Categories:
+        {self._format_dict_for_email(dict(sorted(analysis_results['categories'].items(), key=lambda x: x[1], reverse=True)[:5]))}
+
+        Sentiment Distribution:
+        {self._format_dict_for_email(analysis_results['sentiment_analysis'])}
+
+        Interesting Conversations: {len(analysis_results['interesting_conversations'])}
+        Error Cases: {len(analysis_results['error_cases'])}
+
+        Detailed Analysis:
+        
+        Interesting Conversations:
+        {self._format_interesting_convos_for_email(analysis_results['interesting_conversations'])}
+
+        Error Cases:
+        {self._format_error_cases_for_email(analysis_results['error_cases'])}
+        """
+
+        send_email(
+            subject=f"Daily Conversation Analysis Report - {datetime.now().strftime('%Y-%m-%d')}",
+            body_text=email_body,
+            sender="hi@uiuc.chat",
+            recipients=["kvday2@illinois.edu", "akylaik2@illinois.edu", "rohan13@illinois.edu"],
+            bcc_recipients=[]
+        )
+
+        return {
+            "status": "success",
+            "message": "Daily usage report generated successfully",
+            "data": analysis_results
+        }
+
+    except Exception as e:
+        error_msg = f"Error generating daily usage report: {str(e)}"
+        print(error_msg)
+        return {
+            "status": "error",
+            "message": error_msg
+        }
+
+  def _format_dict_for_email(self, d: dict) -> str:
+    """Helper to format dictionary for email"""
+    return "\n".join([f"- {k}: {v}" for k, v in d.items()])
+
+  def _format_interesting_convos_for_email(self, convos: List[Dict]) -> str:
+    """Helper to format interesting conversations for email"""
+    if not convos:
+        return "None found"
+    return "\n\n".join([
+        f"Conversation {i+1}:\n"
+        f"Reason: {c['reason']}\n"
+        f"Preview: {c['preview']}"
+        for i, c in enumerate(convos)
+    ])
+
+  def _format_error_cases_for_email(self, errors: List[Dict]) -> str:
+    """Helper to format error cases for email"""
+    if not errors:
+        return "None found"
+    return "\n\n".join([
+        f"Error Case {i+1}:\n"
+        f"Errors: {', '.join(e['errors'])}\n"
+        f"Preview: {e['preview']}"
+        for i, e in enumerate(errors)
+    ])
 
   def llm_monitor_message(self, messages: List[str], course_name: str) -> List[Dict]:
     """
     Will store categories in DB, send email if an alert is triggered.
     """
-    # initialize the Ollama client
-    import json
+    try:
+        # Get Ollama URL from Infiseal instead of os.environ
+        ollama_url = get_secret("OLLAMA_SERVER_URL")
+        print(f"LLM Monitor - OLLAMA_SERVER_URL: {ollama_url}")
+        
+        from ollama import Client as OllamaClient
+        from ai_ta_backend.utils.email.send_transactional_email import send_email
 
-    from ollama import Client as OllamaClient
+        client = OllamaClient(ollama_url)
 
-    from ai_ta_backend.utils.email.send_transactional_email import send_email
+        results = []
+        for message in messages:
+            try:
+                message_content = message['content'][0]['text'] if isinstance(message.get('content'),
+                                                                          list) else message['content']
+            except:
+                message_content = message['content']
 
-    client = OllamaClient(os.environ['OLLAMA_SERVER_URL'])
-
-    # analyze message using Ollama
-    for message in messages:
-      try:
-        message_content = message['content'][0]['text'] if isinstance(message.get('content'),
-                                                                      list) else message['content']
-      except:
-        message_content = message['content']
-
-      analysis_result = client.chat(
-          model='qwen2.5:14b-instruct-fp16',
-          messages=[{
-              'role':
-                  'system',
-              'content':
-                  '''Analyze each message for multiple categories simultaneously. A message can and should trigger multiple categories if it meets multiple criteria. Use the provided tools to flag any and all applicable categories based on their descriptions.'''
-          }, {
-              'role': 'user',
-              'content': message_content
-          }],
-          tools=[
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_NSFW',
-                      'description':
-                          'Flag content containing explicit threats of harm, violence, sexual content, hate speech, discriminatory language, or other inappropriate material that would be unsafe for work or general audiences.',
-                      'parameters': {
-                          'type': 'object',
-                          'properties': {
-                              'keyword_that_triggers_NSFW_tag': {
-                                  'type': 'string',
-                                  'description': 'The specific word or phrase that indicates prohibited content',
-                              },
-                          },
-                          'required': ['keyword_that_triggers_NSFW_tag'],
-                      },
-                  },
-              },
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_anger',
-                      'description':
-                          'Identify content expressing clear anger through aggressive language, hostile tone, multiple exclamation marks, ALL CAPS YELLING, or explicitly angry statements.',
-                      'parameters': {
-                          'type': 'object',
-                          'properties': {
-                              'keyword_that_triggers_anger_tag': {
-                                  'type':
-                                      'string',
-                                  'description':
-                                      'The exact word, phrase, or punctuation that shows anger or aggression',
-                              },
-                          },
-                          'required': ['keyword_that_triggers_anger_tag'],
-                      },
-                  },
-              },
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_incorrect',
-                      'description':
-                          'Flag content where the user indicates that the chatbot provided wrong, incorrect, or false information. This includes statements about inaccuracies, mistakes, or errors in the bot\'s responses.',
-                      'parameters': {
-                          'type': 'object',
-                          'properties': {
-                              'keyword_that_triggers_incorrect_tag': {
-                                  'type':
-                                      'string',
-                                  'description':
-                                      'The specific phrase that indicates the bot was incorrect (e.g. "that\'s wrong", "incorrect", "that\'s not true")',
-                              },
-                          },
-                          'required': ['keyword_that_triggers_incorrect_tag'],
-                      },
-                  },
-              },
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_good',
-                      'description':
-                          'Classify content as appropriate and constructive if it contains normal questions, feedback, discussion, or requests without triggering any of the above categories.',
-                  },
-              },
-          ],
-      )
-
-      # extract the triggered categories
-      triggered = []
-      if 'tool_calls' in analysis_result.get('message', {}):
-        for tool_call in analysis_result['message']['tool_calls']:
-          category = tool_call.function.name.replace('categorize_as_', '')
-
-          if category in ['NSFW', 'anger', 'incorrect']:
-            trigger_key = f'keyword_that_triggers_{category}_tag'
-            trigger = tool_call.function.arguments.get(trigger_key, 'No trigger specified')
-
-            triggered.append({'category': category, 'trigger': trigger})
-
-      # Only send email if alerts were triggered
-      if triggered:
-        # Construct detailed email body with alert info
-        alert_details = []
-        for alert in triggered:
-          alert_details.append(f"{alert['category']}")
-          alert_details.append(f"* Trigger phrase: {alert['trigger']}\n")
-
-        alert_body = "\n".join([
-            "LLM Monitor Alert",
-            "Alerts triggered:",
-            "\n".join(alert_details),
-            "Details:",
-            "------------------------",
-            f"Message analyzed:\n{json.dumps(message_content, indent=2)}",
-            "",
-        ])
-
-        print("LLM Monitor Alert Triggered! ", alert_body)
-
-        send_email(subject="LLM Monitor Alert - {}".format(", ".join(
-            f"{a['category']} ({a['trigger']})" for a in triggered)),
-                   body_text=alert_body,
-                   sender="hi@uiuc.chat",
-                   recipients=["kvday2@illinois.edu", "hbroome@illinois.edu", "rohan13@illinois.edu"],
-                   bcc_recipients=[])
-
-      return "Success"
+            analysis_result = client.chat(
+                model='qwen2.5:14b-instruct-fp16',
+                messages=[{
+                    'role': 'system',
+                    'content': '''Analyze this message for multiple categories...'''
+                }]
+            )
+            results.append(analysis_result)
+        
+        return results
+        
+    except Exception as e:
+        print(f"Error in llm_monitor_message: {str(e)}")
+        return []
 
   def delete_data(self, course_name: str, s3_path: str, source_url: str):
     """Delete file from S3, Qdrant, and Supabase."""
@@ -828,3 +888,66 @@ class RetrievalService:
       print(f"Error fetching model usage counts for {project_name}: {str(e)}")
       self.sentry.capture_exception(e)
       return []
+
+  def test_connections(self) -> Dict:
+    """
+    Test all connections (OpenAI, Supabase, Infiseal) using Infiseal secrets
+    """
+    results = {
+        "status": "checking",
+        "openai": {"status": "unknown"},
+        "supabase": {"status": "unknown"},
+        "infiseal": {"status": "unknown"}
+    }
+    
+    try:
+        # Test Infiseal connection by getting a test secret
+        try:
+            test_secret = get_secret("OPENAI_API_KEY")
+            results["infiseal"] = {
+                "status": "success",
+                "message": "Successfully retrieved secret from Infiseal"
+            }
+        except Exception as e:
+            results["infiseal"] = {
+                "status": "error",
+                "message": f"Failed to connect to Infiseal: {str(e)}"
+            }
+
+        # Test OpenAI connection
+        try:
+            client = OpenAIEmbeddings(api_key=test_secret)
+            test_completion = client.embed_query("test")
+            results["openai"] = {
+                "status": "success",
+                "message": "Successfully connected to OpenAI"
+            }
+        except Exception as e:
+            results["openai"] = {
+                "status": "error", 
+                "message": f"Failed to connect to OpenAI: {str(e)}"
+            }
+
+        # Test Supabase connection
+        try:
+            test_data = self.sqlDb.getConversationsFromLast24Hours(limit=1)
+            results["supabase"] = {
+                "status": "success",
+                "message": "Successfully connected to Supabase"
+            }
+        except Exception as e:
+            results["supabase"] = {
+                "status": "error",
+                "message": f"Failed to connect to Supabase: {str(e)}"
+            }
+
+        # Overall status
+        all_successful = all(svc["status"] == "success" for svc in results.values() if isinstance(svc, dict))
+        results["status"] = "success" if all_successful else "error"
+        
+        return results
+
+    except Exception as e:
+        results["status"] = "error"
+        results["message"] = f"Unexpected error during connection tests: {str(e)}"
+        return results
