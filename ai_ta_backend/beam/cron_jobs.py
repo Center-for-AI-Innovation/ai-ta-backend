@@ -19,7 +19,7 @@ def task():
   try:
     response = requests.get(url, timeout=30)
     if response.status_code == 200:
-      print("Conversation maps updated successfully")
+      print("Conversation maps updated successfully!")
     else:
       print(f"Failed to update conversation maps - Status code: {response.status_code}")
       print(f"Response text: {response.text}")
@@ -31,7 +31,7 @@ def task():
   try:
     response = requests.get(url, timeout=30)
     if response.status_code == 200:
-      print("Document maps updated successfully")
+      print("Document maps updated successfully!")
     else:
       print(f"Failed to update document maps - Status code: {response.status_code}")
       print(f"Response text: {response.text}")
