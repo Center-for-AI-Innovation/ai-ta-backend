@@ -400,6 +400,7 @@ class Ingest():
             "chunk_type": chunk.get('type', 'text'),
             "content": chunk.get('text', ''),
             "table_html": chunk.get('table_html', None),
+            "table_image_paths": chunk.get('table_image_paths', []),
             "chunk_metadata": chunk.get('metadata', {}),
             "orig_elements": chunk.get('orig_elements', None),
             "created_at": datetime.now().isoformat()
@@ -1002,7 +1003,7 @@ class Ingest():
                                      infer_table_structure=True,
                                      extract_images_in_pdf=True,
                                      extract_image_block_types=["Image", "Table"],
-                                     extract_image_block_to_payload=True,
+                                     extract_image_block_to_payload=False,
                                      extract_image_block_output_dir=str(image_output_dir),
                                      include_metadata=True,
                                      include_original_elements=True)
@@ -1010,12 +1011,13 @@ class Ingest():
             if not elements:
               raise ValueError("No elements extracted from PDF")
 
-            # Process elements into chunks
+            # Create chunks for elements (text, tables, etc.)
             chunks = []
             for element in elements:
               chunk = {
                   'type': element.type,
                   'text': element.text if hasattr(element, 'text') else '',
+                  'table_image_paths': [],  # Initialize for all chunks
                   'metadata': {
                       'coordinates': element.coordinates if hasattr(element, 'coordinates') else None,
                       'filename': element.filename if hasattr(element, 'filename') else None,
@@ -1030,24 +1032,53 @@ class Ingest():
 
               chunks.append(chunk)
 
-            # Upload extracted images to S3 and add as chunks
+            # Upload images to S3 and map them to appropriate chunks
+            original_filename = Path(s3_path).stem
             image_paths = list(image_output_dir.glob('**/*.[jJ][pP][gG]'))
+
+            # Extract page numbers for all images and organize by page
+            image_map_by_page = {}
             for img_path in image_paths:
-              s3_img_path = f"{Path(s3_path).parent}/images/{img_path.name}"
+              image_name = img_path.name
+              s3_img_path = f"{Path(s3_path).parent}/images/{original_filename}/{image_name}"
+              page_num = None
+
+              # Extract page number from filename
+              parts = image_name.split('-')
+              if len(parts) >= 2 and parts[1].isdigit():
+                page_num = int(parts[1])
+
+              # Upload image to S3
               with open(img_path, 'rb') as f:
                 self.s3_client.upload_fileobj(f, os.getenv('S3_BUCKET_NAME'), s3_img_path)
 
-              # Add image reference to chunks
-              chunks.append({
-                  'type': 'Image',
-                  'text': f"Image extracted from PDF: {img_path.name}",
-                  'metadata': {
-                      's3_path': s3_img_path,
-                      'original_name': img_path.name,
-                      'page_number': chunks[-1]['metadata']['page_number']
-                                     if chunks else 1  # Use last chunk's page number or default to 1
-                  }
+              # Store by page number for later assignment
+              if page_num not in image_map_by_page:
+                image_map_by_page[page_num] = []
+
+              image_map_by_page[page_num].append({
+                  's3_path': s3_img_path,
+                  'name': image_name,
+                  'is_table': image_name.startswith('table')
               })
+
+            # Assign images to appropriate chunks
+            for chunk in chunks:
+              page_num = chunk['metadata'].get('page_number')
+              if page_num is not None and page_num in image_map_by_page:
+                # Get all images for this page
+                page_images = image_map_by_page[page_num]
+
+                if chunk['type'] == 'Table':
+                  # For tables, assign table images
+                  for img in page_images:
+                    if img['is_table']:
+                      chunk['table_image_paths'].append(img['s3_path'])
+                else:
+                  # For text chunks, assign non-table images
+                  for img in page_images:
+                    if not img['is_table']:
+                      chunk['table_image_paths'].append(img['s3_path'])
 
             # Insert chunks into cedar_chunks table
             self._insert_cedar_chunks(doc_id, chunks)
@@ -1061,8 +1092,6 @@ class Ingest():
               # Create searchable text based on chunk type
               if chunk['type'] == 'Table':
                 search_text = f"Table from PDF: {chunk.get('table_html', '')}"
-              elif chunk['type'] == 'Image':
-                search_text = f"Image in PDF: {chunk['text']}"
               else:
                 search_text = chunk['text']
 
