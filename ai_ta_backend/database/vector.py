@@ -82,7 +82,7 @@ class VectorDatabase():
     )
 
     return search_results
-    
+
   def pubmed_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
@@ -107,24 +107,24 @@ class VectorDatabase():
       response = requests.post(api_url, json={"ids": context_ids}, timeout=30)
 
       if not response.ok:
-        print(f"Error in bulk API request: {response.status_code}")
+        print(f"Error in retrieving Pubmed text details: {response.status_code}")
         return []
+      else:
+        # Create mapping of context_id to text from response
+        context_texts = response.json()
 
-      # Create mapping of context_id to text from response
-      context_texts = response.json()
+        # Update search results with texts from bulk response
+        updated_results = []
+        for result in search_results:
+          context_id = result.payload['context_id']
+          if context_id in context_texts:
+            result.payload['page_content'] = context_texts[context_id]['page_content']
+            result.payload['readable_filename'] = context_texts[context_id]['readable_filename']
+            result.payload['s3_path'] = str(result.payload['minio_path']).replace('pubmed/', '')  # remove bucket name
+            result.payload['course_name'] = course_name
+            updated_results.append(result)
 
-      # Update search results with texts from bulk response
-      updated_results = []
-      for result in search_results:
-        context_id = result.payload['context_id']
-        if context_id in context_texts:
-          result.payload['page_content'] = context_texts[context_id]['page_content']
-          result.payload['readable_filename'] = context_texts[context_id]['readable_filename']
-          result.payload['s3_path'] = str(result.payload['minio_path']).replace('pubmed/', '')  # remove bucket name
-          result.payload['course_name'] = course_name
-          updated_results.append(result)
-
-      return updated_results
+        return updated_results
 
     except Exception as e:
       print(f"Error in pubmed_vector_search: {e}")
@@ -135,8 +135,7 @@ class VectorDatabase():
     """
     Search the vector database for a given query.
     """
-    # top_n = 10
-    # Search the vector database
+    # Search the pubmed vector database
     search_results = self.vyriad_qdrant_client.search(
         collection_name='embedding',  # Pubmed embeddings
         with_vectors=False,
@@ -154,11 +153,10 @@ class VectorDatabase():
       # response = requests.post(api_url, json={"ids": context_ids}, timeout=30)
 
       # if not response.ok:
-      #   print(f"Error in bulk API request: {response.status_code}")
-      #   return []
-
-      # # Create mapping of context_id to text from response
-      # context_texts = response.json()
+      #   print(f"Error in retrieving Pubmed text details: {response.status_code}")
+      # else:
+        # # Create mapping of context_id to text from response
+        # context_texts = response.json()
 
       # # Update search results with texts from bulk response
       # updated_results = []

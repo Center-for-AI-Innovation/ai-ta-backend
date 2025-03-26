@@ -15,8 +15,8 @@
 ***
 
 * [CropWizard](cropwizard/README.md)
-  * [Pest Detection Tool](cropwizard/pest-detection-tool.md)
   * [CropWizard Documents](cropwizard/cropwizard-documents.md)
+  * [Pest Detection Tool](cropwizard/pest-detection-tool.md)
   * [CropWizard Document License Information](cropwizard/cropwizard-document-license-information.md)
 
 ## API

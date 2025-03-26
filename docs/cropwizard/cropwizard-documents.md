@@ -1,6 +1,6 @@
 # CropWizard Documents
 
-The CropWizard document database consists of over 400K publications, blogs, newsletters, and articles from extension websites belonging to over 55 US land grant universities.&#x20;
+The CropWizard document database consists of over 400K publications, blogs, newsletters, and articles from three categories of sources.  First — and the largest category — are extension websites belonging to over 55 US land grant universities.  Second are a small number of similar documents from other Universities in the US and abroad. Third — and growing — are open-access research publications from a wide range of scientific journals relevant to agriculture. &#x20;
 
 ## Cropwizard Database Overview
 

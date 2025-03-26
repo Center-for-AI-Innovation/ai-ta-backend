@@ -4,7 +4,7 @@ description: Quickstart on how to get the most out of Cropwizard.
 
 # CropWizard
 
-CropWizard is a cutting-edge AI agronomy assistant that answers agricultural questions with expert precision. It consults over 450,000 selected online publications, including Extension resources from US land-grant universities and a growing set of open-access research publications. It can be used as:
+CropWizard is a cutting-edge AI agronomy assistant that answers agricultural questions with expert precision. It consults over 400,000 selected online publications, including Extension resources from US land-grant universities and a growing set of open-access research publications. It can be used as:
 
 * **a "virtual agronomist":** to obtain farming advice;
 * **a research assistant:** to find the most relevant online publications for a topic of interest;
@@ -87,6 +87,8 @@ Example: _Give me a detailed explanation of hairy vetch as a cover crop. Explain
   * _**Final Response:**_ Final response is generated encapsulating information from user prompt, image description, retrieved documents and all tool outputs.
 
 For detailed information about the Pest Detection tool, check out the [Pest Detection Tool page](https://app.gitbook.com/o/SfApyd80yHo8lLe0r7PA/s/vdrzNTxffjmyrhd2NKsD/~/changes/87/cropwizard/pest-detection-tool).
+
+For detailed information on how tools work on Illinois Chat, check out the [tool-use-in-conversation.md](../features/tool-use-in-conversation.md "mention") page.
 
 ### Example Questions
 
