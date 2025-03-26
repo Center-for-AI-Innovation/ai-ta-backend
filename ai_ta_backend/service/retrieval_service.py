@@ -872,33 +872,8 @@ SHOULD NOT BE FLAGGED (user asking about their own errors):
     try:
         start_time = time.monotonic()
         
-        # For specific types of queries, we can add custom instructions
-        if "side effect" in user_query.lower() or "adverse" in user_query.lower():
-            additional_instructions = """
-            For queries about side effects or adverse reactions:
-            1. Focus on HAS_SIDE_EFFECT or CAUSES relationships
-            2. Include severity information if available
-            3. Group side effects by system (e.g., cardiovascular, neurological)
-            """
-            print("in side effect")
-            custom_chain = self.graphDb.create_chain_with_custom_prompt(additional_instructions)
-            response = custom_chain.invoke({"query": user_query})
-        elif "interaction" in user_query.lower():
-            additional_instructions = """
-            For drug interaction queries:
-            1. Focus on INTERACTS_WITH relationships
-            2. Include interaction severity if available
-            3. Explain the mechanism of interaction if present in the data
-            """
-            print("in interaction")
-            custom_chain = self.graphDb.create_chain_with_custom_prompt(additional_instructions)
-            response = custom_chain.invoke({"query": user_query})
-        else:
-            # Use the default chain for most queries
-            print("in else")
-            custom_chain = self.graphDb.create_chain_with_custom_prompt()
-            response = self.graphDb.ckg_chain.invoke({"query": user_query})
-            #response = custom_chain.invoke({"query": user_query})
+        custom_chain = self.graphDb.create_chain_with_custom_prompt()
+        response = self.graphDb.ckg_chain.invoke({"query": user_query})
         
         execution_time = time.monotonic() - start_time
         print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")

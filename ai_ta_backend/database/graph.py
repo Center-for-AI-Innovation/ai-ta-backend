@@ -27,6 +27,12 @@ class GraphDatabase:
         # Create the chain with the clinical KG system prompt
         self.ckg_chain = self._create_clinical_kg_chain()
         self.prime_kg_chain = self._create_prime_kg_chain()
+
+    def refresh_schema(self, graph):
+        """Refresh the schema and update the chain with the new schema information."""
+        graph.refresh_schema()
+        
+        return "Schema refreshed successfully"
     
     def _get_schema_info(self, graph):
         """Extract schema information from the Neo4j database."""
@@ -75,6 +81,33 @@ class GraphDatabase:
             system_message=system_prompt,
         )
     
+    def _create_prime_kg_chain(self):
+        """Create a GraphCypherQAChain with a prime KG system prompt."""
+        schema_info = self.prime_kg_schema_info
+        system_prompt = f"""
+        You are a prime knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
+        
+        SCHEMA INFORMATION:
+        {schema_info}
+        
+        GUIDELINES FOR GENERATING CYPHER QUERIES:
+        1. Always use the correct node labels and relationship types from the schema above
+        2. For clinical entities, prefer to use specific node types like Disease, Drug, Symptom, etc.
+        3. When searching for treatments, use relationships like TREATS, PRESCRIBED_FOR, etc.
+        4. For finding side effects, use relationships like CAUSES, HAS_SIDE_EFFECT, etc.
+        5. When querying for interactions, look for INTERACTS_WITH relationships
+        6. Limit results to a reasonable number (e.g., LIMIT 10) for readability
+        """
+        
+        return GraphCypherQAChain.from_llm(
+            ChatOpenAI(temperature=0, model="gpt-4o"),
+            graph=self.prime_kg_graph,
+            verbose=False,
+            allow_dangerous_requests=True,
+            system_message=system_prompt,
+        )
+    
+    # extra function to create a chain with a custom prompt
     def create_chain_with_custom_prompt(self, additional_instructions=""):
         """
         Create a new chain with a custom prompt that includes additional instructions.
@@ -119,39 +152,6 @@ class GraphDatabase:
         return GraphCypherQAChain.from_llm(
             ChatOpenAI(temperature=0, model="gpt-4o"),
             graph=self.clinical_kg_graph,
-            verbose=False,
-            allow_dangerous_requests=True,
-            system_message=system_prompt,
-        )
-    
-    def refresh_schema(self, graph):
-        """Refresh the schema and update the chain with the new schema information."""
-        graph.refresh_schema()
-        schema_info = self._get_schema_info(graph)
-        chain = self._create_clinical_kg_chain()
-        return "Schema refreshed successfully"
-    
-    def _create_prime_kg_chain(self):
-        """Create a GraphCypherQAChain with a prime KG system prompt."""
-        schema_info = self.prime_kg_schema_info
-        system_prompt = f"""
-        You are a prime knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
-        
-        SCHEMA INFORMATION:
-        {schema_info}
-        
-        GUIDELINES FOR GENERATING CYPHER QUERIES:
-        1. Always use the correct node labels and relationship types from the schema above
-        2. For clinical entities, prefer to use specific node types like Disease, Drug, Symptom, etc.
-        3. When searching for treatments, use relationships like TREATS, PRESCRIBED_FOR, etc.
-        4. For finding side effects, use relationships like CAUSES, HAS_SIDE_EFFECT, etc.
-        5. When querying for interactions, look for INTERACTS_WITH relationships
-        6. Limit results to a reasonable number (e.g., LIMIT 10) for readability
-        """
-        
-        return GraphCypherQAChain.from_llm(
-            ChatOpenAI(temperature=0, model="gpt-4o"),
-            graph=self.prime_kg_graph,
             verbose=False,
             allow_dangerous_requests=True,
             system_message=system_prompt,
