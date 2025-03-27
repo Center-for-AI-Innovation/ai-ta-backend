@@ -1,6 +1,6 @@
 import os
 from typing import List
-
+import json
 import requests
 from injector import inject
 from langchain_openai import OpenAIEmbeddings
@@ -186,26 +186,43 @@ class VectorDatabase():
       #   result.payload['course_name'] = course_name
 
       # ---- Add clinical KG context -----
-      knowledge_graph_contexts = {} 
+      updated_results = []
       clinical_kg_docs = self.getKnowledgeGraphContexts(search_query) 
       print(f"Clinical KG docs: {clinical_kg_docs}")
+      print(f"Clinical KG docs type: {type(clinical_kg_docs)}")
 
-      for doc in clinical_kg_docs:
-        knowledge_graph_contexts['page_content'] = doc['result']
-        knowledge_graph_contexts['readable_filename'] = "Clinical KG"
-        knowledge_graph_contexts['course_name'] = course_name
-
+      if clinical_kg_docs and 'result' in clinical_kg_docs:
+          clinical_kg_result = {
+              'id': hash("clinical_kg_" + search_query),  # Generate a unique ID
+              'version': 1,  # Default version number
+              'payload': {
+                  'page_content': clinical_kg_docs['result'],
+                  'readable_filename': "Clinical KG",
+                  'course_name': course_name
+              },
+              'score': 1.0  # Adding a default score
+          }
+          updated_results.append(models.ScoredPoint(**clinical_kg_result))
 
       # ---- Add Prime KG context -----
       prime_kg_docs = self.getPrimeKGContexts(search_query)
       print(f"Prime KG docs: {prime_kg_docs}")
+      print(f"Prime KG docs type: {type(prime_kg_docs)}")
 
-      for doc in prime_kg_docs:
-        knowledge_graph_contexts['page_content'] = doc['result']
-        knowledge_graph_contexts['readable_filename'] = "Prime KG"
-        knowledge_graph_contexts['course_name'] = course_name
-
-      return updated_results + prime_kg_triplets 
+      if prime_kg_docs and 'result' in prime_kg_docs:
+          prime_kg_result = {
+              'id': hash("prime_kg_" + search_query),  # Generate a unique ID
+              'version': 1,  # Default version number
+              'payload': {
+                  'page_content': prime_kg_docs['result'],
+                  'readable_filename': "Prime KG",
+                  'course_name': course_name
+              },
+              'score': 1.0  # Adding a default score
+          }
+          updated_results.append(models.ScoredPoint(**prime_kg_result))
+      print(f"Updated results: {updated_results}")
+      return updated_results
 
     except Exception as e:
       print(f"Error in _vyriad_special_case: {e}")
