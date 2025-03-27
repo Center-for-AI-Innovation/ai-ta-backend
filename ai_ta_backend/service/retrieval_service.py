@@ -224,129 +224,45 @@ class RetrievalService:
       if message['role']:
         message_content = "Message from " + message['role'] + ":\n" + message_content
 
-      monitor_llm_ollama_model = 'qwen2.5:14b-instruct-fp16'
-      # monitor_llm_ollama_model = 'qwen2.5:32b'
+      monitor_llm_ollama_model = 'llama-guard3:8b'
 
+      # Call Llama Guard 3 for safety classification instead of using function calling
       analysis_result = client.chat(
-          model=monitor_llm_ollama_model,
-          options={"num_ctx": 20_000},
-          messages=[{
-              'role':
-                  'system',
-              'content':
-                  '''You are analyzing messages from users interacting with an educational AI assistant. This assistant helps students and educators with questions related to homework questions and learning materials.
-
-Your task is to categorize these messages to help maintain appropriate usage and improve the system. Each message should be evaluated across multiple categories of concern (NSFW content, anger, factual corrections), and you can flag multiple categories when appropriate.
-
-Keep in mind when you're reviewing a `user` message, it's from a student. If you're reviewing an `assistant` message, it's from the AI assistant.
-
-These categorizations help our team understand user interactions, address concerns, and continuously improve the provided educational experience.'''
-          }, {
-              'role': 'user',
-              'content': message_content
-          }],
-          tools=[
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_NSFW',
-                      'description':
-                          'Flag content involving any user interaction that includes illegal activity, violence, sexual content, hate speech, or discriminatory language inappropriate for education.',
-                      'parameters': {
-                          'type': 'object',
-                          'properties': {
-                              'keyword_that_triggers_NSFW_tag': {
-                                  'type': 'string',
-                                  'description': 'The specific word or phrase that indicates prohibited content',
-                              },
-                          },
-                          'required': ['keyword_that_triggers_NSFW_tag'],
-                      },
-                  },
-              },
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_anger',
-                      'description':
-                          '''Identify content expressing clear anger through aggressive language, hostile tone, multiple exclamation marks, ALL CAPS YELLING, or explicitly angry statements aimed toward the AI system or its responses. 
-ONLY flag messages where the user is explicitly directing anger, frustration, or hostility TOWARD THE AI ASSISTANT ITSELF.
-Be careful not to flag messages about programming that may have keywords like "error", "incorrect", "wrong", etc.''',
-                      'parameters': {
-                          'type': 'object',
-                          'properties': {
-                              'keyword_that_triggers_anger_tag': {
-                                  'type':
-                                      'string',
-                                  'description':
-                                      'The exact word, phrase, or punctuation that shows anger or aggression',
-                              },
-                          },
-                          'required': ['keyword_that_triggers_anger_tag'],
-                      },
-                  },
-              },
-              {
-                  'type': 'function',
-                  'function': {
-                      'name':
-                          'categorize_as_incorrect',
-                      'description':
-                          '''This category is SPECIFICALLY for when the user indicates that the AI SYSTEM provided factually wrong information.
-
-We use this category to identify when our AI makes factual errors so we can improve its knowledge.
-
-Words like "wrong", "incorrect", "error", "mistake" can be misleading. The critical factor is WHO made the error. Some examples are:
-
-SHOULD BE FLAGGED (AI made errors):
-"You are wrong"
-"Your answer contains incorrect information"
-"That is not right"
-"The information you gave is wrong"
-
-SHOULD NOT BE FLAGGED (user asking about their own errors):
-"What's wrong with my code?"
-"Why is my answer incorrect?"
-"Can you explain the error in my essay?"
-"Help me fix the mistakes in my assignment"
-"What's wrong with this formula?"''',
-                      'parameters': {
-                          'type': 'object',
-                          'properties': {
-                              'keyword_that_triggers_incorrect_tag': {
-                                  'type': 'string',
-                                  'description': 'The specific phrase that indicates the bot was incorrect',
-                              },
-                          },
-                          'required': ['keyword_that_triggers_incorrect_tag'],
-                      },
-                  },
-              },
-              # {
-              #     'type': 'function',
-              #     'function': {
-              #         'name':
-              #             'categorize_as_good',
-              #         'description':
-              #             'Classify content as appropriate and constructive if it contains normal questions, feedback, discussion, or requests without triggering any of the above categories.',
-              #     },
-              # },
-          ],
+        model=monitor_llm_ollama_model,
+        messages=[{
+          'role': 'user',
+          'content': message_content
+        }]
       )
+      
+      # Extract safety classifications from Llama Guard's response
+      response_content = analysis_result['message']['content']
 
-      # extract the triggered categories
       triggered = []
-      if 'tool_calls' in analysis_result.get('message', {}):
-        for tool_call in analysis_result['message']['tool_calls']:
-          category = tool_call.function.name.replace('categorize_as_', '')
-
-          if category in ['NSFW', 'anger', 'incorrect']:
-            trigger_key = f'keyword_that_triggers_{category}_tag'
-            trigger = tool_call.function.arguments.get(trigger_key, 'No trigger specified')
-
-            triggered.append({'category': category, 'trigger': trigger})
+      if 'unsafe' in response_content.lower():
+        safety_categories = {
+          'S1': 'Violent Crimes',
+          'S2': 'Non-Violent Crimes',
+          'S3': 'Sex-Related Crimes',
+          'S4': 'Child Sexual Exploitation',
+          'S5': 'Defamation',
+          'S6': 'Specialized Advice',
+          'S7': 'Privacy',
+          'S8': 'Intellectual Property',
+          'S9': 'Indiscriminate Weapons',
+          'S10': 'Hate',
+          'S11': 'Suicide & Self-Harm',
+          'S12': 'Sexual Content',
+          'S13': 'Elections'
+        }
+        
+        # Check which categories were triggered in the response
+        for category_code, category_name in safety_categories.items():
+          if category_code in response_content:
+            triggered.append({
+                'category': category_name,
+                'trigger': f"Detected {category_name}"
+            })
 
       # Only send email if alerts were triggered
       if triggered:
@@ -354,46 +270,45 @@ SHOULD NOT BE FLAGGED (user asking about their own errors):
         alert_details = []
         for alert in triggered:
           alert_details.append(f"{alert['category']}")
-          alert_details.append(f"* Trigger phrase: {alert['trigger']}\n")
+          alert_details.append(f"* Trigger: {alert['trigger']}\n")
 
         alert_body = "\n".join([
-            "LLM Monitor Alert",
-            "------------------------",
-            f"Course Name: {course_name}",
-            f"User Email: {user_email}",
-            f"Conversation Model Name: {model_name}",
-            f"LLM Monitor Model Name: {monitor_llm_ollama_model}",
-            f"Convo ID: {conversation_id}",
-            "------------------------",
-            "Alerts triggered:",
-            "\n".join(alert_details),
-            "Details:",
-            "------------------------",
-            f"Message analyzed:\n{json.dumps(message_content, indent=2)}",
-            "",
+          "LLM Monitor Alert",
+          "------------------------",
+          f"Course Name: {course_name}",
+          f"User Email: {user_email}",
+          f"Conversation Model Name: {model_name}",
+          f"LLM Monitor Model Name: {monitor_llm_ollama_model}",
+          f"Convo ID: {conversation_id}",
+          "------------------------",
+          "Alerts triggered:",
+          "\n".join(alert_details),
+          "------------------------",
+          f"Message analyzed:\n{json.dumps(message_content, indent=2)}",
+          "",
         ])
 
         print("LLM Monitor Alert Triggered! ", alert_body)
 
         send_email(subject="LLM Monitor Alert - {}".format(", ".join(
-            f"{a['category']} ({a['trigger']})" for a in triggered)),
-                   body_text=alert_body,
-                   sender="hi@uiuc.chat",
-                   recipients=["kvday2@illinois.edu", "hbroome@illinois.edu", "rohan13@illinois.edu"],
-                   bcc_recipients=[])
+          f"{a['category']}" for a in triggered)),
+            body_text=alert_body,
+            sender="hi@uiuc.chat",
+            recipients=["kvday2@illinois.edu", "hbroome@illinois.edu", "rohan13@illinois.edu"],
+            bcc_recipients=[])
 
         # Update the message with the triggered categories
         llm_monitor_tags = {
-            "has_been_analyzed": True,
-            "monitor_llm_ollama_model": monitor_llm_ollama_model,
-            "tags": triggered,
+          "has_been_analyzed": True,
+          "monitor_llm_ollama_model": monitor_llm_ollama_model,
+          "tags": triggered,
         }
         self.sqlDb.updateMessageFromLlmMonitor(conversation_id, llm_monitor_tags)
       else:
         # No alerts triggered, but still record that it's been analyzed
         llm_monitor_tags = {
-            "has_been_analyzed": True,
-            "monitor_llm_ollama_model": monitor_llm_ollama_model,
+          "has_been_analyzed": True,
+          "monitor_llm_ollama_model": monitor_llm_ollama_model,
         }
         self.sqlDb.updateMessageFromLlmMonitor(conversation_id, llm_monitor_tags)
 
