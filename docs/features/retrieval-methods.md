@@ -43,11 +43,64 @@ Mirroring the human research process, we let the LLM decide if the retrieved con
 
 LLM Guided retrieval thrives with structured data.&#x20;
 
-### Scientific PDF parsing
+### Scientific PDF Parsing
 
-* Grobid (using [doc2json](https://github.com/allenai/s2orc-doc2json) package to convert research paper to S2ORC JSON. It is good with parsing sections, references, and tables when given formal research papers.)
-* Nougut&#x20;
-* Oreo
+{% hint style="info" %}
+TL;DR:
+
+1. Start with **Grobid**. Excellent at parsing `sections`, `references`.&#x20;
+2. Re-run with **Unstructured**. Replace all figures and tables from Grobid with Unstructured, we find their `yolox` model is best at parsing tables accurately.
+3. For math (LaTeX), use Nougout.
+{% endhint %}
+
+***
+
+Based on our empirical testing, and conversations with domain experts from NCSA and Argonne, this is our PDF parsing pipeline for Pumbed, Arxiv, and any typical scientific PDFs.&#x20;
+
+* [**Grobid**](https://github.com/kermitt2/grobid) **is the best at creating outlines from scientific PDFs.** The [Full-Text module](https://grobid.readthedocs.io/en/latest/training/fulltext/) properly segments articles into sections, like `1. introduction, 1.1 background on LLMs, 2. methods... etc.` Precise outlines is crucial to LLM-guided-retrieval, for the LLM to properly request other sections of the paper.
+  * We highly recommend the [doc2json wrapper around Grobid](https://github.com/allenai/s2orc-doc2json) to make it easier to use the outputs.
+* [**Unstructured**](https://github.com/Unstructured-IO/unstructured) **is the best at parsing tables.** In our experiments with tricky PDFs, YOLOX is slightly superior to Detectron2.&#x20;
+
+<pre class="language-python"><code class="lang-python">from unstructured.partition.auto import partition
+
+<strong>elements = partition(filename="path/to/file.pdf",
+</strong>                     strategy="hi_res",
+                     hi_res_model_name="yolox")
+</code></pre>
+
+<details>
+
+<summary>Example of a complex table parsed with Unstructured vs Grobid</summary>
+
+Here's a tricky table to parse. We want to capture all this info into a markdown-like format.&#x20;
+
+* We find Grobid really struggles with this; often misses the table entirerly.
+* Unstructured w/ `yolox` does a near-perfect job. In this case, the only problem is the `+/-` symbols are usually parsed into `+` symbols. Although readability is overall satisfactory.
+
+![](<../.gitbook/assets/CleanShot 2024-07-01 at 11.01.24.png>)
+
+
+
+</details>
+
+* [**Nougut**](https://github.com/facebookresearch/nougat) **is the best at parsing mathematical symbols.** Excellent at parsing "rendered LaTeX symbols back raw LaTeX code." This method uses an encoder-decoder Transformer model, so realistically it requires a GPU to run.&#x20;
+
+### Infrastructure & System Architecture
+
+**Storage infra**
+
+1. Store PDFs in an object store, like Minio (a self-hosted S3 alternative).
+2. Store processed text in SQLite, a phenomenal database for this purpose.
+
+**Processing Infra**
+
+* Python main process
+  * Use a [Queue](https://docs.python.org/3/library/queue.html) of PDFs to process.&#x20;
+  * Use a [`ProcessPoolExecutor`](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor) to parallelize processing.
+  * Use TempFile objects to prevent the machine's disk from saturating.
+* Grobid - host an endpoint on a capable server, GPU recommended but not critical.
+* Unstructured - create a Flask/FastAPI endpoint on a capable server.&#x20;
+* Nougat - create a Flask/FastAPI endpoint on a capable server.
 
 ### Data layout in SQLite
 
@@ -79,11 +132,19 @@ The base unit of text. Each context must fit within an LLM embedding model's con
 
 <table><thead><tr><th width="105">NanoID</th><th>Text</th><th width="127">Section title</th><th width="156">Section number</th><th width="125">Num tokens</th><th width="204">embedding-nomic_1.5</th><th width="142">Page number</th><th>stop reason</th></tr></thead><tbody><tr><td></td><td>&#x3C;Raw text></td><td></td><td></td><td></td><td></td><td></td><td>"Section" or "Token limit" if the section is larger than our embedding model context window.</td></tr></tbody></table>
 
-#### SQL details
+#### Example SQLite DB of pubmed articles
 
-SQLite, and most SQL implementations, don't allow for a single field to point to an array of foreign keys, so we use the "Junction table" pattern for our one-to-many relationships.
+Here's a full SQLite database you can download to explore the final form of our documents. I recommend using [DB Browser for SQLite](https://sqlitebrowser.org/) to view the tables.
 
-Junction tables simply allow one article to have **many** `sections` and one `section` to have **many** `contexts`.
+{% file src="../.gitbook/assets/Pubmed_Example_extraction.db" %}
+A SQLite database containing an example of a single article in the following format.&#x20;
+{% endfile %}
+
+#### SQL implementation details
+
+SQLite, and most SQL implementations, don't allow for a single field to point to an array of foreign keys, so we use the _**Junction table**_ pattern for our one-to-many relationships.
+
+_**Junction tables**_ simply allow one article to have **many** `sections` and one `section` to have **many** `contexts`.
 
 * `Article_Sections` table
 

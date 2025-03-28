@@ -1,6 +1,8 @@
 # Table of contents
 
-* [Welcome](README.md)
+* [Quick start](README.md)
+* [Video walkthroughs](video-walkthroughs.md)
+* [FAQs](faqs.md)
 
 ## Features
 
@@ -9,6 +11,13 @@
 * [Web Crawling Details](features/web-crawling-details.md)
 * [Bulk Export Documents or Conversation History](features/bulk-export-documents-or-conversation-history.md)
 * [Duplication in Ingested Documents](features/duplication-in-ingested-documents.md)
+
+***
+
+* [CropWizard](cropwizard/README.md)
+  * [CropWizard Documents](cropwizard/cropwizard-documents.md)
+  * [Pest Detection Tool](cropwizard/pest-detection-tool.md)
+  * [CropWizard Document License Information](cropwizard/cropwizard-document-license-information.md)
 
 ## API
 
@@ -19,3 +28,7 @@
 
 * [System Architecture](technical/system-architecture.md)
 * [Cost of Service](technical/cost-of-service.md)
+
+## Developers
+
+* [Developer Quickstart](developers/developer-quickstart.md)

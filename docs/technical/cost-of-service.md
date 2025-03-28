@@ -14,6 +14,10 @@ Railway.app hosts our Python Flask backend. You pay per second of CPU and Memory
 
 As of January 2024, our web crawling service is a separate Railway deployment. It costs $1-2/mo during idle periods for background memory usage. Too early to tell the long-term cost of web scraping, but it should be minimal. I deployed it to Railway instead of serverless functions like Lambda because the Chrome browser is too large for Vercel's serverless. It is workable on Lambda, but my Illinois AWS account is blocked from that service.
 
+Recent average $70/mo&#x20;
+
+<figure><img src="../.gitbook/assets/CleanShot 2024-08-07 at 21.08.43.png" alt=""><figcaption></figcaption></figure>
+
 <figure><img src="../.gitbook/assets/CleanShot 2024-03-26 at 17.46.24.png" alt=""><figcaption><p>Railway payment history.</p></figcaption></figure>
 
 #### Supabase
@@ -34,6 +38,12 @@ S3 stores user-uploaded content that's not text, like PDFs, Word, PowerPoint, Vi
 
 Currently this cost about $10/mo in storage + data egress fees.&#x20;
 
+#### Beam Serverless functions&#x20;
+
+We run highly scalable jobs, primarily document ingest, on Beam.cloud. It's [wonderfully cheap and reliable](https://x.com/KastanDay/status/1790066477372158196). Highly recommend. Steady-state average of $5/mo so far.&#x20;
+
+<figure><img src="../.gitbook/assets/CleanShot 2024-08-07 at 21.05.32.png" alt=""><figcaption></figcaption></figure>
+
 ### Frontend
 
 The frontend is React on Next.js, hosted on Vercel. We're still comfortably inside the free tier. If our usage increases a lot, we could pay $20/mo for everything we need.
@@ -43,6 +53,7 @@ The frontend is React on Next.js, hosted on Vercel. We're still comfortably insi
 * [Sentry.io](https://sentry.io/) for error and latency monitoring. Free tier.&#x20;
 * [Posthog.com](https://posthog.com/) for usage monitoring and custom logs. Free tier... mostly.
 * [Nomic](https://www.nomic.ai/) for maps of embedding spaces. Educational free tier.
+  * As of August 2024 we started an Educational enterprise tier at $99/mo.
 * [GitBook](https://www.gitbook.com/) for public documentation. Free tier.
 
 
@@ -52,8 +63,8 @@ The frontend is React on Next.js, hosted on Vercel. We're still comfortably insi
 | Category              | Cost per Month |
 | --------------------- | -------------- |
 | Frontend              | $0             |
-| Backend               | $235           |
-| Services              | $0             |
+| Backend               | $260           |
+| Services              | $99            |
 | --------------------- | -------------  |
-| TOTAL                 | $235/mo        |
+| TOTAL                 | $359/mo        |
 

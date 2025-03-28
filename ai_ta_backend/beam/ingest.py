@@ -1,60 +1,77 @@
 """
-To deploy: beam deploy ingest.py --profile caii-ncsa
+To deploy: beam deploy ingest.py:ingest
 Use CAII gmail to auth.
 """
-import asyncio
-import inspect
-import json
-import logging
-import mimetypes
-import os
-import re
-import shutil
-import time
-import traceback
-import uuid
-from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Any, Callable, Dict, List, Optional, Union
+
+from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 import beam
-import boto3
-import fitz
-import openai
-import pdfplumber
-import pytesseract
-import sentry_sdk
-import supabase
-from beam import App, QueueDepthAutoscaler, Runtime  # RequestLatencyAutoscaler,
-from bs4 import BeautifulSoup
-from git.repo import Repo
-from langchain.document_loaders import (
-    Docx2txtLoader,
-    GitLoader,
-    PythonLoader,
-    TextLoader,
-    UnstructuredExcelLoader,
-    UnstructuredPowerPointLoader,
-)
-from langchain.document_loaders.csv_loader import CSVLoader
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import Qdrant
-from nomic_logging import delete_from_document_map, log_to_document_map, rebuild_map
-from OpenaiEmbeddings import OpenAIAPIProcessor
-from PIL import Image
-from posthog import Posthog
-from pydub import AudioSegment
-from qdrant_client import QdrantClient, models
-from qdrant_client.models import PointStruct
+from beam import BotContext  # To obtain task_id
+from beam import QueueDepthAutoscaler  # RequestLatencyAutoscaler,
 
-# from langchain.schema.output_parser import StrOutputParser
-# from langchain.chat_models import AzureChatOpenAI
+if beam.env.is_remote():
+  # Only import these in the Cloud container, not when building the container.
+  import asyncio
+  import inspect
+  import json
+  import logging
+  import mimetypes
+  import os
+  import re
+  import shutil
+  import subprocess
+  import time
+  import traceback
+  import uuid
+  from pathlib import Path
+  from tempfile import NamedTemporaryFile
+
+  # from typing import Any, Callable, Dict, List, Optional, Union
+  import beam
+  import boto3
+  import fitz
+  import openai
+  import pdfplumber
+  import pytesseract
+  import sentry_sdk
+  import supabase
+  from bs4 import BeautifulSoup
+  from git.repo import Repo
+  from langchain.document_loaders import (
+      Docx2txtLoader,
+      GitLoader,
+      PythonLoader,
+      TextLoader,
+      UnstructuredExcelLoader,
+      UnstructuredPowerPointLoader,
+  )
+  from langchain.document_loaders.csv_loader import CSVLoader
+  from langchain.embeddings.openai import OpenAIEmbeddings
+  from langchain.schema import Document
+  from langchain.text_splitter import RecursiveCharacterTextSplitter
+  from langchain.vectorstores import Qdrant
+  from OpenaiEmbeddings import OpenAIAPIProcessor
+  from PIL import Image
+  from posthog import Posthog
+  from pydub import AudioSegment
+  from qdrant_client import QdrantClient, models
+  from qdrant_client.models import PointStruct
+  from requests.exceptions import Timeout
+  from supabase.client import ClientOptions
+
+  sentry_sdk.init(
+      dsn=os.getenv("SENTRY_DSN"),
+      # Set traces_sample_rate to 1.0 to capture 100% of transactions for performance monitoring.
+      traces_sample_rate=1.0,
+      # Set profiles_sample_rate to 1.0 to profile 100% of sampled transactions.
+      # We recommend adjusting this value in production.
+      profiles_sample_rate=1.0,
+      enable_tracing=True)
 
 requirements = [
     "openai<1.0",
-    "supabase==2.0.2",
+    "pandas",
+    "supabase==2.5.3",
     "tiktoken==0.5.1",
     "boto3==1.28.79",
     "qdrant-client==1.7.3",
@@ -67,29 +84,47 @@ requirements = [
     "ffprobe==0.5",
     "ffmpeg==1.4",
     "PyMuPDF==1.23.6",
-    "pytesseract==0.3.10",  # image OCR"
-    "openpyxl==3.1.2",  # excel"
-    "networkx==3.2.1",  # unused part of excel partitioning :("
+    "pytesseract==0.3.10",  # image OCR
+    "openpyxl==3.1.2",  # excel
+    "networkx==3.2.1",  # unused part of excel partitioning :(
     "python-pptx==0.6.23",
-    "unstructured==0.10.29",
+    "unstructured==0.15.12",
     "GitPython==3.1.40",
     "beautifulsoup4==4.12.2",
     "sentry-sdk==1.39.1",
-    "nomic==2.0.14",
     "pdfplumber==0.11.0",  # PDF OCR, better performance than Fitz/PyMuPDF in my Gies PDF testing.
 ]
 
-# TODO: consider adding workers. They share CPU and memory https://docs.beam.cloud/deployment/autoscaling#worker-use-cases
-app = App("ingest",
-          runtime=Runtime(
-              cpu=1,
-              memory="3Gi",
-              image=beam.Image(
-                  python_version="python3.10",
-                  python_packages=requirements,
-                  commands=["apt-get update && apt-get install -y ffmpeg tesseract-ocr"],
-              ),
-          ))
+image = (beam.Image(
+    python_version="python3.10",
+    commands=(["apt-get update && apt-get install -y ffmpeg tesseract-ocr"]),
+    python_packages=requirements,
+))
+
+# autoscaler = RequestLatencyAutoscaler(desired_latency=30, max_replicas=2)
+autoscaler = QueueDepthAutoscaler(tasks_per_container=300, max_containers=3)
+
+ourSecrets = [
+    "SUPABASE_URL",
+    "SUPABASE_API_KEY",
+    "VLADS_OPENAI_KEY",
+    "REFACTORED_MATERIALS_SUPABASE_TABLE",
+    "S3_BUCKET_NAME",
+    "QDRANT_URL",
+    "QDRANT_API_KEY",
+    "QDRANT_COLLECTION_NAME",
+    "OPENAI_API_TYPE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "POSTHOG_API_KEY",
+    "CROPWIZARD_QDRANT_URL",
+    "CROPWIZARD_QDRANT_API_KEY",
+    "CROPWIZARD_OPENAI_KEY",
+    # "AZURE_OPENAI_KEY",
+    # "AZURE_OPENAI_ENGINE",
+    # "AZURE_OPENAI_KEY",
+    # "AZURE_OPENAI_ENDPOINT",
+]
 
 
 def loader():
@@ -101,6 +136,13 @@ def loader():
   # vector DB
   qdrant_client = QdrantClient(
       url=os.getenv('QDRANT_URL'),
+      api_key=os.getenv('QDRANT_API_KEY'),
+  )
+
+  cropwizard_qdrant_client = QdrantClient(
+      url=os.getenv('CROPWIZARD_QDRANT_URL'),
+      port=443,
+      https=True,
       api_key=os.getenv('QDRANT_API_KEY'),
   )
 
@@ -120,7 +162,9 @@ def loader():
 
   # Create a Supabase client
   supabase_client = supabase.create_client(  # type: ignore
-      supabase_url=os.environ['SUPABASE_URL'], supabase_key=os.environ['SUPABASE_API_KEY'])
+      supabase_url=os.environ['SUPABASE_URL'],
+      supabase_key=os.environ['SUPABASE_API_KEY'],
+      options=ClientOptions(postgrest_client_timeout=60,))
 
   # llm = AzureChatOpenAI(
   #     temperature=0,
@@ -131,113 +175,178 @@ def loader():
   #     openai_api_type=OPENAI_API_TYPE)
 
   posthog = Posthog(sync_mode=True, project_api_key=os.environ['POSTHOG_API_KEY'], host='https://app.posthog.com')
-  sentry_sdk.init(
-      dsn=os.getenv("SENTRY_DSN"),
-      # Set traces_sample_rate to 1.0 to capture 100% of transactions for performance monitoring.
-      traces_sample_rate=1.0,
-      # Set profiles_sample_rate to 1.0 to profile 100% of sampled transactions.
-      # We recommend adjusting this value in production.
-      profiles_sample_rate=1.0,
-      enable_tracing=True)
 
-  return qdrant_client, vectorstore, s3_client, supabase_client, posthog
-
-
-# autoscaler = RequestLatencyAutoscaler(desired_latency=30, max_replicas=2)
-autoscaler = QueueDepthAutoscaler(max_tasks_per_replica=300, max_replicas=3)
+  return qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog
 
 
 # Triggers determine how your app is deployed
 # @app.rest_api(
-@app.task_queue(
+@beam.task_queue(
+    name='ingest_task_queue',
     workers=4,
-    callback_url='https://uiuc-chat-git-ingestprogresstracking-kastanday.vercel.app/api/UIUC-api/ingestTaskCallback',
+    cpu=1,
+    memory=3_072,
     max_pending_tasks=15_000,
-    max_retries=3,
-    timeout=60 * 5,
-    loader=loader,
+    # DEPRICATED, not needed -- callback_url='https://uiuc.chat/api/UIUC-api/ingestTaskCallback',
+    timeout=60 * 25,
+    retries=1,
+    secrets=ourSecrets,
+    on_start=loader,
+    image=image,
     autoscaler=autoscaler)
-def ingest(**inputs: Dict[str, Any]):
-
-  qdrant_client, vectorstore, s3_client, supabase_client, posthog = inputs["context"]
-
+def ingest(context, **inputs: Dict[str | List[str], Any]):
+  qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog = context.on_start_value
   course_name: List[str] | str = inputs.get('course_name', '')
   s3_paths: List[str] | str = inputs.get('s3_paths', '')
   url: List[str] | str | None = inputs.get('url', None)
   base_url: List[str] | str | None = inputs.get('base_url', None)
   readable_filename: List[str] | str = inputs.get('readable_filename', '')
-  content: str | None = inputs.get('content', None)  # is webtext if content exists
+  content: str | List[str] | None = inputs.get('content', None)
+  doc_groups: List[str] | str = inputs.get('groups', [])
 
   print(
-      f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}"
+      f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
   )
 
-  ingester = Ingest(qdrant_client, vectorstore, s3_client, supabase_client, posthog)
+  ingester = Ingest(qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog)
 
-  def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content):
+  def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, groups):
     if content:
-      return ingester.ingest_single_web_text(course_name, base_url, url, content, readable_filename)
+      return ingester.ingest_single_web_text(course_name, base_url, url, content, readable_filename, groups=groups)
     elif readable_filename == '':
-      return ingester.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url)
+      return ingester.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url, groups=groups)
     else:
       return ingester.bulk_ingest(course_name,
                                   s3_paths,
                                   readable_filename=readable_filename,
                                   base_url=base_url,
-                                  url=url)
+                                  url=url,
+                                  groups=groups)
 
   # First try
-  success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content)
+  # Full Exception is unexpected, don't bother retrying
+  # If success_fail_dict has failures, then enter retry loop
+  success_fail_dict = {}
+  try:
+    success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, doc_groups)
+  except Exception as e:
+    # Don't bother retrying
+    print("Exception in main ingest", e)
+    success_fail_dict = {'failure_ingest': str(e)}
+    handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
 
-  # retries
-  num_retires = 5
-  for retry_num in range(1, num_retires):
-    if isinstance(success_fail_dict, str):
-      print(f"STRING ERROR: {success_fail_dict = }")
-      success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content)
-      time.sleep(13 * retry_num)  # max is 65
-    elif success_fail_dict['failure_ingest']:
-      print(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
-      # s3_paths = success_fail_dict['failure_ingest'] # retry only failed paths.... what if this is a URL instead?
-      success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content)
-      time.sleep(13 * retry_num)  # max is 65
+  # Catch failed ingest that is not unexpected exception
+  if isinstance(success_fail_dict, str):
+    success_fail_dict = {'failure_ingest': success_fail_dict}
+
+  # Retry failed ingests (but not unexpected exceptions)
+  if success_fail_dict.get('failure_ingest'):
+    success_fail_dict = retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url,
+                                     readable_filename, content, doc_groups)
+    if isinstance(success_fail_dict, str) or success_fail_dict.get('failure_ingest'):
+      error = str(success_fail_dict if isinstance(success_fail_dict, str) else success_fail_dict['failure_ingest'])
+      handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error)
+
+  # Cleanup: Remove from docs_in_progress table
+  try:
+    if base_url:
+      print('Removing URL-based document from in_progress')
+      supabase_client.table('documents_in_progress').delete()\
+          .eq('url', url)\
+          .eq('base_url', base_url)\
+          .execute()
     else:
-      break
+      supabase_client.table('documents_in_progress').delete()\
+          .eq('course_name', course_name)\
+          .eq('s3_path', s3_paths)\
+          .eq('readable_filename', readable_filename)\
+          .execute()
+  except Exception as e:
+    print(f"Error cleaning up documents_in_progress: {e}")
+    sentry_sdk.capture_exception(e)
 
-  # Final failure / success check
-  if success_fail_dict['failure_ingest']:
-    print(f"INGEST FAILURE -- About to send to supabase. success_fail_dict: {success_fail_dict}")
-    document = {
-        "course_name":
-            course_name,
-        "s3_path":
-            s3_paths,
-        "readable_filename":
-            readable_filename,
-        "url":
-            url,
-        "base_url":
-            base_url,
-        "error":
-            success_fail_dict['failure_ingest']['error']
-            if isinstance(success_fail_dict['failure_ingest'], dict) else success_fail_dict['failure_ingest']
-    }
-    response = supabase_client.table('documents_failed').insert(document).execute()  # type: ignore
-    print(f"Supabase ingest failure response: {response}")
-  else:
-    # Success case: rebuild nomic document map after all ingests are done
-    # rebuild_status = rebuild_map(str(course_name), map_type='document')
-    pass
+  if success_fail_dict.get('success_ingest'):
+    posthog.capture('distinct_id_of_the_user',
+                    event='ingest_success',
+                    properties={
+                        'course_name': course_name,
+                        's3_path': s3_paths,
+                        's3_paths': s3_paths,
+                        'url': url,
+                        'base_url': base_url,
+                        'readable_filename': readable_filename,
+                        'content': content,
+                        'doc_groups': doc_groups,
+                    })
 
   print(f"Final success_fail_dict: {success_fail_dict}")
   sentry_sdk.flush(timeout=20)
   return json.dumps(success_fail_dict)
 
 
+def handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error):
+  document = {
+      "course_name": course_name,
+      "s3_path": s3_paths,
+      "readable_filename": readable_filename,
+      "url": url,
+      "base_url": base_url,
+      "error": str(error)
+  }
+  # Check if document already exists
+  existing = supabase_client.table('documents_failed')\
+      .select('*')\
+      .eq('course_name', course_name)\
+      .eq('s3_path', s3_paths)\
+      .eq('readable_filename', readable_filename)\
+      .eq('url', url)\
+      .eq('base_url', base_url)\
+      .execute()
+
+  # Only insert if no matching document exists
+  if not existing.data:
+    supabase_client.table('documents_failed').insert(document).execute()
+
+  posthog.capture('distinct_id_of_the_user',
+                  event='ingest_failure',
+                  properties={
+                      'course_name': course_name,
+                      's3_path': s3_paths,
+                      'url': url,
+                      'base_url': base_url,
+                      'readable_filename': readable_filename,
+                      'error': str(error)
+                  })
+
+
+def retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url, readable_filename, content,
+                 doc_groups):
+  num_retries = 3
+  last_error = None
+
+  for retry_num in range(1, num_retries):
+    try:
+      success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, doc_groups)
+      if isinstance(success_fail_dict, str) or success_fail_dict.get('failure_ingest'):
+        print(f"Retry attempt {retry_num}. File: {success_fail_dict}")
+        last_error = success_fail_dict
+        time.sleep(13 * retry_num)
+      else:
+        return success_fail_dict
+    except Exception as e:
+      print(f"Exception in ingest retry loop {retry_num}", e)
+      last_error = {'failure_ingest': str(e)}
+      handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
+      time.sleep(13 * retry_num)
+
+  return last_error or {'failure_ingest': 'All retries failed'}
+
+
 class Ingest():
 
-  def __init__(self, qdrant_client, vectorstore, s3_client, supabase_client, posthog):
+  def __init__(self, qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog):
     self.qdrant_client = qdrant_client
+    self.cropwizard_qdrant_client = cropwizard_qdrant_client
     self.vectorstore = vectorstore
     self.s3_client = s3_client
     self.supabase_client = supabase_client
@@ -245,10 +354,11 @@ class Ingest():
 
   def bulk_ingest(self, course_name: str, s3_paths: Union[str, List[str]],
                   **kwargs) -> Dict[str, None | str | Dict[str, str]]:
-    """
+    """ 
     Bulk ingest a list of s3 paths into the vectorstore, and also into the supabase database.
     -> Dict[str, str | Dict[str, str]]
     """
+    print('s3 path from bulk ingest', s3_paths)
 
     def _ingest_single(ingest_method: Callable, s3_path, *args, **kwargs):
       """Handle running an arbitrary ingest function for an individual file."""
@@ -273,6 +383,16 @@ class Ingest():
         '.pptx': self._ingest_single_ppt,
         '.xlsx': self._ingest_single_excel,
         '.xls': self._ingest_single_excel,
+        '.xlsm': self._ingest_single_excel,
+        '.xlsb': self._ingest_single_excel,
+        '.xltx': self._ingest_single_excel,
+        '.xltm': self._ingest_single_excel,
+        '.xlt': self._ingest_single_excel,
+        '.xml': self._ingest_single_excel,
+        '.xlam': self._ingest_single_excel,
+        '.xla': self._ingest_single_excel,
+        '.xlw': self._ingest_single_excel,
+        '.xlr': self._ingest_single_excel,
         '.csv': self._ingest_single_csv,
         '.png': self._ingest_single_image,
         '.jpg': self._ingest_single_image,
@@ -312,10 +432,11 @@ class Ingest():
         else:
           # No supported ingest... Fallback to attempting utf-8 decoding, otherwise fail.
           try:
-            self._ingest_single_txt(s3_path, course_name)
+            self._ingest_single_txt(s3_path, course_name, **kwargs)
             success_status['success_ingest'] = s3_path
             print(f"No ingest methods -- Falling back to UTF-8 INGEST... s3_path = {s3_path}")
           except Exception as e:
+            sentry_sdk.capture_exception(e)
             print(
                 f"We don't have a ingest method for this filetype: {file_extension}. As a last-ditch effort, we tried to ingest the file as utf-8 text, but that failed too. File is unsupported: {s3_path}. UTF-8 ingest error: {e}"
             )
@@ -343,6 +464,7 @@ class Ingest():
     except Exception as e:
       err = f"❌❌ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )  # type: ignore
+      sentry_sdk.capture_exception(e)
 
       success_status['failure_ingest'] = {'s3_path': s3_path, 'error': f"MAJOR ERROR DURING INGEST: {err}"}
       self.posthog.capture('distinct_id_of_the_user',
@@ -358,7 +480,8 @@ class Ingest():
       print(f"MAJOR ERROR IN /bulk_ingest: {str(e)}")
       return success_status
 
-  def ingest_single_web_text(self, course_name: str, base_url: str, url: str, content: str, readable_filename: str):
+  def ingest_single_web_text(self, course_name: str, base_url: str, url: str, content: str, readable_filename: str,
+                             **kwargs):
     """Crawlee integration
     """
     self.posthog.capture('distinct_id_of_the_user',
@@ -383,7 +506,7 @@ class Ingest():
           'url': url,
           'base_url': base_url,
       }]
-      self.split_and_upload(texts=text, metadatas=metadatas)
+      self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       self.posthog.capture('distinct_id_of_the_user',
                            event='ingest_single_web_text_succeeded',
                            properties={
@@ -392,7 +515,6 @@ class Ingest():
                                'url': url,
                                'title': readable_filename
                            })
-
       success_or_failure['success_ingest'] = url
       return success_or_failure
     except Exception as e:
@@ -406,7 +528,8 @@ class Ingest():
   def _ingest_single_py(self, s3_path: str, course_name: str, **kwargs):
     try:
       file_name = s3_path.split("/")[-1]
-      file_path = "media/" + file_name  # download from s3 to local folder for ingest
+      os.makedirs("../media", exist_ok=True)
+      file_path = "../media/" + file_name  # download from s3 to local folder for ingest
 
       self.s3_client.download_file(os.getenv('S3_BUCKET_NAME'), s3_path, file_path)
 
@@ -422,13 +545,13 @@ class Ingest():
                                           Path(s3_path).name[37:]),
           'pagenumber': '',
           'timestamp': '',
-          'url': '',
-          'base_url': '',
+          'url': kwargs.get('url', ''),
+          'base_url': kwargs.get('base_url', ''),
       } for doc in documents]
       #print(texts)
       os.remove(file_path)
 
-      success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas)
+      success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
       print("Python ingest: ", success_or_failure)
       return success_or_failure
 
@@ -458,11 +581,11 @@ class Ingest():
                                             Path(s3_path).name[37:]),
             'pagenumber': '',
             'timestamp': '',
-            'url': '',
-            'base_url': '',
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
         } for doc in documents]
 
-        success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas)
+        success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return success_or_failure
     except Exception as e:
       err = f"❌❌ Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -475,7 +598,7 @@ class Ingest():
     print(f"IN _ingest_html s3_path `{s3_path}` kwargs: {kwargs}")
     try:
       response = self.s3_client.get_object(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path)
-      raw_html = response['Body'].read().decode('utf-8')
+      raw_html = response['Body'].read().decode('utf-8', errors='ignore')
 
       soup = BeautifulSoup(raw_html, 'html.parser')
       title = s3_path.replace("courses/" + course_name, "")
@@ -496,7 +619,7 @@ class Ingest():
           'timestamp': '',
       }]
 
-      success_or_failure = self.split_and_upload(text, metadata)
+      success_or_failure = self.split_and_upload(text, metadata, **kwargs)
       print(f"_ingest_html: {success_or_failure}")
       return success_or_failure
     except Exception as e:
@@ -523,8 +646,32 @@ class Ingest():
       with NamedTemporaryFile(suffix=file_ext) as video_tmpfile:
         # download from S3 into an video tmpfile
         self.s3_client.download_fileobj(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path, Fileobj=video_tmpfile)
-        # extract audio from video tmpfile
-        mp4_version = AudioSegment.from_file(video_tmpfile.name, file_ext[1:])
+
+        # try with original file first
+        try:
+          mp4_version = AudioSegment.from_file(video_tmpfile.name, file_ext[1:])
+        except Exception as e:
+          print("Applying moov atom fix and retrying...")
+          # Fix the moov atom issue using FFmpeg
+          fixed_video_tmpfile = NamedTemporaryFile(suffix=file_ext, delete=False)
+          try:
+            result = subprocess.run([
+                'ffmpeg', '-y', '-i', video_tmpfile.name, '-c', 'copy', '-movflags', 'faststart',
+                fixed_video_tmpfile.name
+            ],
+                                    check=True,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            #print(result.stdout.decode())
+            #print(result.stderr.decode())
+          except subprocess.CalledProcessError as e:
+            #print(e.stdout.decode())
+            #print(e.stderr.decode())
+            print("Error in FFmpeg command: ", e)
+            raise e
+
+          # extract audio from video tmpfile
+          mp4_version = AudioSegment.from_file(fixed_video_tmpfile.name, file_ext[1:])
 
       # save the extracted audio as a temporary webm file
       with NamedTemporaryFile(suffix=".webm", dir=media_dir, delete=False) as webm_tmpfile:
@@ -575,11 +722,11 @@ class Ingest():
                                           Path(s3_path).name[37:]),
           'pagenumber': '',
           'timestamp': text.index(txt),
-          'url': '',
-          'base_url': '',
+          'url': kwargs.get('url', ''),
+          'base_url': kwargs.get('base_url', ''),
       } for txt in text]
 
-      self.split_and_upload(texts=text, metadatas=metadatas)
+      self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       return "Success"
     except Exception as e:
       err = f"❌❌ Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -604,11 +751,11 @@ class Ingest():
                                             Path(s3_path).name[37:]),
             'pagenumber': '',
             'timestamp': '',
-            'url': '',
-            'base_url': '',
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
         } for doc in documents]
 
-        self.split_and_upload(texts=texts, metadatas=metadatas)
+        self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
       err = f"❌❌ Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -623,7 +770,7 @@ class Ingest():
 
       # NOTE: slightly different method for .txt files, no need for download. It's part of the 'body'
       response = self.s3_client.get_object(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path)
-      raw_text = response['Body'].read().decode('utf-8')
+      raw_text = response['Body'].read().decode('utf-8', errors='ignore')
 
       print("UTF-8 text to ingest as SRT:", raw_text)
       parsed_info = pysrt.from_string(raw_text)
@@ -638,13 +785,13 @@ class Ingest():
                                           Path(s3_path).name[37:]),
           'pagenumber': '',
           'timestamp': '',
-          'url': '',
-          'base_url': '',
+          'url': kwargs.get('url', ''),
+          'base_url': kwargs.get('base_url', ''),
       }]
       if len(text) == 0:
         return "Error: SRT file appears empty. Skipping."
 
-      self.split_and_upload(texts=texts, metadatas=metadatas)
+      self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
       return "Success"
     except Exception as e:
       err = f"❌❌ Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -671,11 +818,11 @@ class Ingest():
                                             Path(s3_path).name[37:]),
             'pagenumber': '',
             'timestamp': '',
-            'url': '',
-            'base_url': '',
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
         } for doc in documents]
 
-        self.split_and_upload(texts=texts, metadatas=metadatas)
+        self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
       err = f"❌❌ Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -708,11 +855,11 @@ class Ingest():
                                             Path(s3_path).name[37:]),
             'pagenumber': '',
             'timestamp': '',
-            'url': '',
-            'base_url': '',
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
         } for doc in documents]
 
-        self.split_and_upload(texts=texts, metadatas=metadatas)
+        self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
       err = f"❌❌ Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -738,11 +885,11 @@ class Ingest():
                                             Path(s3_path).name[37:]),
             'pagenumber': '',
             'timestamp': '',
-            'url': '',
-            'base_url': '',
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
         } for doc in documents]
 
-        self.split_and_upload(texts=texts, metadatas=metadatas)
+        self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
       err = f"❌❌ Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -810,7 +957,7 @@ class Ingest():
         # count the total number of words in the pdf_texts. If it's less than 100, we'll OCR the PDF
         has_words = any(text.strip() for text in pdf_texts)
         if has_words:
-          success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas)
+          success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, **kwargs)
         else:
           print("⚠️ PDF IS EMPTY -- OCR-ing the PDF.")
           success_or_failure = self._ocr_pdf(s3_path=s3_path, course_name=course_name, **kwargs)
@@ -870,7 +1017,7 @@ class Ingest():
         raise ValueError(
             "Failed ingest: Could not detect ANY text in the PDF. OCR did not help. PDF appears empty of text.")
 
-      success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas)
+      success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, **kwargs)
       return success_or_failure
     except Exception as e:
       err = f"❌❌ Error in PDF ingest (with OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -888,10 +1035,11 @@ class Ingest():
         str: "Success" or an error message
     """
     print("In text ingest, UTF-8")
+    print("kwargs", kwargs)
     try:
       # NOTE: slightly different method for .txt files, no need for download. It's part of the 'body'
       response = self.s3_client.get_object(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path)
-      text = response['Body'].read().decode('utf-8')
+      text = response['Body'].read().decode('utf-8', errors='ignore')
       print("UTF-8 text to ignest (from s3)", text)
       text = [text]
 
@@ -902,12 +1050,12 @@ class Ingest():
                                           Path(s3_path).name[37:]),
           'pagenumber': '',
           'timestamp': '',
-          'url': '',
-          'base_url': '',
+          'url': kwargs.get('url', ''),
+          'base_url': kwargs.get('base_url', '')
       }]
       print("Prior to ingest", metadatas)
 
-      success_or_failure = self.split_and_upload(texts=text, metadatas=metadatas)
+      success_or_failure = self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       return success_or_failure
     except Exception as e:
       err = f"❌❌ Error in (TXT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -937,11 +1085,11 @@ class Ingest():
                                             Path(s3_path).name[37:]),
             'pagenumber': '',
             'timestamp': '',
-            'url': '',
-            'base_url': '',
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', '')
         } for doc in documents]
 
-        self.split_and_upload(texts=texts, metadatas=metadatas)
+        self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
       err = f"❌❌ Error in (PPTX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -991,7 +1139,7 @@ class Ingest():
       sentry_sdk.capture_exception(e)
       return err
 
-  def split_and_upload(self, texts: List[str], metadatas: List[Dict[str, Any]]):
+  def split_and_upload(self, texts: List[str], metadatas: List[Dict[str, Any]], **kwargs):
     """ This is usually the last step of document ingest. Chunk & upload to Qdrant (and Supabase.. todo).
     Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to Qdrant.
 
@@ -1002,6 +1150,7 @@ class Ingest():
         metadatas (List[Dict[str, Any]]): _description_
     """
     # return "Success"
+    print(f"In split and upload. Metadatas: {metadatas}")
     self.posthog.capture('distinct_id_of_the_user',
                          event='split_and_upload_invoked',
                          properties={
@@ -1012,15 +1161,20 @@ class Ingest():
                              'base_url': metadatas[0].get('base_url', None),
                          })
 
-    print(f"In split and upload. Metadatas: {metadatas}")
-    print(f"Texts: {texts}")
+    #print(f"In split and upload. Metadatas: {metadatas}")
+    #print(f"Texts: {texts}")
     assert len(texts) == len(
         metadatas
     ), f'must have equal number of text strings and metadata dicts. len(texts) is {len(texts)}. len(metadatas) is {len(metadatas)}'
 
     try:
+      chunk_size = 2_000
+      if metadatas[0].get('course_name') == 'GROWMARK-Crop-Protection-Guide':
+        # Special case for this project, try to embed entire PDF page as 1 chunk (better at tables)
+        chunk_size = 6_000
+
       text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-          chunk_size=1000,
+          chunk_size=chunk_size,
           chunk_overlap=150,
           separators=[
               "\n\n", "\n", ". ", " ", ""
@@ -1045,24 +1199,31 @@ class Ingest():
         return "Success"
 
       # adding chunk index to metadata for parent doc retrieval
+      print("GROUPS: ", kwargs.get('groups', ''))
       for i, context in enumerate(contexts):
         context.metadata['chunk_index'] = i
+        context.metadata['doc_groups'] = kwargs.get('groups', [])
+
+      openai_embeddings_key = os.getenv('VLADS_OPENAI_KEY')
+      if metadatas[0].get('course_name') == 'cropwizard-1.5':
+        print("Using Cropwizard OpenAI key")
+        openai_embeddings_key = os.getenv('CROPWIZARD_OPENAI_KEY')
 
       print("Starting to call embeddings API")
       embeddings_start_time = time.monotonic()
       oai = OpenAIAPIProcessor(
           input_prompts_list=input_texts,
           request_url='https://api.openai.com/v1/embeddings',
-          api_key=os.getenv('VLADS_OPENAI_KEY'),
+          api_key=openai_embeddings_key,
           # request_url='https://uiuc-chat-canada-east.openai.azure.com/openai/deployments/text-embedding-ada-002/embeddings?api-version=2023-05-15',
           # api_key=os.getenv('AZURE_OPENAI_KEY'),
-          max_requests_per_minute=5_000,
-          max_tokens_per_minute=300_000,
-          max_attempts=20,
+          max_requests_per_minute=10_000,
+          max_tokens_per_minute=10_000_000,
+          max_attempts=1_000,
           logging_level=logging.INFO,
-          token_encoding_name='cl100k_base')  # nosec -- reasonable bandit error suppression
+          token_encoding_name='cl100k_base')
       asyncio.run(oai.process_api_requests_from_file())
-      print(f"⏰ embeddings tuntime: {(time.monotonic() - embeddings_start_time):.2f} seconds")
+      print(f"⏰ embeddings runtime: {(time.monotonic() - embeddings_start_time):.2f} seconds")
       # parse results into dict of shape page_content -> embedding
       embeddings_dict: dict[str, List[float]] = {
           item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
@@ -1076,10 +1237,32 @@ class Ingest():
         vectors.append(
             PointStruct(id=str(uuid.uuid4()), vector=embeddings_dict[context.page_content], payload=upload_metadata))
 
-      self.qdrant_client.upsert(
-          collection_name=os.environ['QDRANT_COLLECTION_NAME'],  # type: ignore
-          points=vectors,  # type: ignore
-      )
+      try:
+        # ----------------------------
+        # SPECIAL CASE FOR CROPWIZARD INGEST
+        # ----------------------------
+        if metadatas[0].get('course_name') == 'cropwizard-1.5':
+          print("Uploading to cropwizard collection...")
+          self.cropwizard_qdrant_client.upsert(
+              collection_name='cropwizard',
+              points=vectors,
+          )
+        else:
+          self.qdrant_client.upsert(
+              collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+              points=vectors,
+          )
+      except Exception as e:
+        logging.error("Error in QDRANT upload: ", exc_info=True)
+        err = f"Error in QDRANT upload: {e}"
+        if "timed out" in str(e):
+          # timed out error is fine, task will continue in background
+          pass
+        else:
+          print(err)
+          sentry_sdk.capture_exception(e)
+          raise Exception(err)
+
       ### Supabase SQL ###
       contexts_for_supa = [{
           "text": context.page_content,
@@ -1098,13 +1281,41 @@ class Ingest():
           "contexts": contexts_for_supa,
       }
 
-      response = self.supabase_client.table(
-          os.getenv('SUPABASE_DOCUMENTS_TABLE')).insert(document).execute()  # type: ignore
+      # Calculate the size of the document object in MB
+      document_size_mb = len(json.dumps(document).encode('utf-8')) / (1024 * 1024)
+      print(f"Document size: {document_size_mb:.2f} MB")
 
-      # add to Nomic document map
+      response = self.supabase_client.table(
+          os.getenv('REFACTORED_MATERIALS_SUPABASE_TABLE')).insert(document).execute()  # type: ignore
+
+      # need to update Supabase tables with doc group info
       if len(response.data) > 0:
-        course_name = contexts[0].metadata.get('course_name')
-        log_to_document_map(course_name)
+        # get groups from kwargs
+        groups = kwargs.get('groups', '')
+        if groups:
+          # call the supabase function to add the document to the group
+          if contexts[0].metadata.get('url'):
+            data, count = self.supabase_client.rpc(
+                'add_document_to_group_url', {
+                    "p_course_name": contexts[0].metadata.get('course_name'),
+                    "p_s3_path": contexts[0].metadata.get('s3_path'),
+                    "p_url": contexts[0].metadata.get('url'),
+                    "p_readable_filename": contexts[0].metadata.get('readable_filename'),
+                    "p_doc_groups": groups,
+                }).execute()
+          else:
+            data, count = self.supabase_client.rpc(
+                'add_document_to_group', {
+                    "p_course_name": contexts[0].metadata.get('course_name'),
+                    "p_s3_path": contexts[0].metadata.get('s3_path'),
+                    "p_url": contexts[0].metadata.get('url'),
+                    "p_readable_filename": contexts[0].metadata.get('readable_filename'),
+                    "p_doc_groups": groups,
+                }).execute()
+
+          if len(data) == 0:
+            print("Error in adding to doc groups")
+            raise ValueError("Error in adding to doc groups")
 
       self.posthog.capture('distinct_id_of_the_user',
                            event='split_and_upload_succeeded',
@@ -1123,14 +1334,14 @@ class Ingest():
       print(err)
       sentry_sdk.capture_exception(e)
       sentry_sdk.flush(timeout=20)
-      return err
+      raise Exception(err)
 
   def check_for_duplicates(self, texts: List[Dict], metadatas: List[Dict[str, Any]]) -> bool:
     """
     For given metadata, fetch docs from Supabase based on S3 path or URL.
     If docs exists, concatenate the texts and compare with current texts, if same, return True.
     """
-    doc_table = os.getenv('SUPABASE_DOCUMENTS_TABLE', '')
+    doc_table = os.getenv('REFACTORED_MATERIALS_SUPABASE_TABLE')
     course_name = metadatas[0]['course_name']
     incoming_s3_path = metadatas[0]['s3_path']
     url = metadatas[0]['url']
@@ -1138,28 +1349,29 @@ class Ingest():
     if incoming_s3_path:
       # check if uuid exists in s3_path -- not all s3_paths have uuids!
       incoming_filename = incoming_s3_path.split('/')[-1]
-      print("Full filename: ", incoming_filename)
+      # print("Full filename: ", incoming_filename)
       pattern = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
-                          re.I)  # uuid V4 pattern, and v4 only.
+                           re.I)  # uuid V4 pattern, and v4 only.
       if bool(pattern.search(incoming_filename)):
         # uuid pattern exists -- remove the uuid and proceed with duplicate checking
         original_filename = incoming_filename[37:]
       else:
         # do not remove anything and proceed with duplicate checking
         original_filename = incoming_filename
-      print("Filename after removing uuid: ", original_filename)
-      
+      print(f"Filename after removing uuid: {original_filename}")
+
       supabase_contents = self.supabase_client.table(doc_table).select('id', 'contexts', 's3_path').eq(
           'course_name', course_name).like('s3_path', '%' + original_filename + '%').order('id', desc=True).execute()
       supabase_contents = supabase_contents.data
-      print("No. of S3 path based records retrieved: ", len(supabase_contents)) # multiple records can be retrieved: 3.pdf and 453.pdf
+      print(f"No. of S3 path based records retrieved: {len(supabase_contents)}"
+           )  # multiple records can be retrieved: 3.pdf and 453.pdf
 
     elif url:
       original_filename = url
       supabase_contents = self.supabase_client.table(doc_table).select('id', 'contexts', 'url').eq(
           'course_name', course_name).eq('url', url).order('id', desc=True).execute()
       supabase_contents = supabase_contents.data
-      print("No. of URL-based records retrieved: ", len(supabase_contents))
+      print(f"No. of URL-based records retrieved: {len(supabase_contents)}")
     else:
       original_filename = None
       supabase_contents = []
@@ -1168,7 +1380,7 @@ class Ingest():
     exact_doc_exists = False
     if len(supabase_contents) > 0:  # a doc with same filename exists in Supabase
       for record in supabase_contents:
-        if incoming_s3_path:  
+        if incoming_s3_path:
           curr_filename = record['s3_path'].split('/')[-1]
           older_s3_path = record['s3_path']
           if bool(pattern.search(curr_filename)):
@@ -1180,13 +1392,13 @@ class Ingest():
         elif url:
           print("URL retrieved from SQL: ", record.keys())
           sql_filename = record['url']
-        else: 
+        else:
           continue
         print("Original filename: ", original_filename, "Current SQL filename: ", sql_filename)
-        
-        if original_filename == sql_filename: # compare og s3_path/url with incoming s3_path/url
+
+        if original_filename == sql_filename:  # compare og s3_path/url with incoming s3_path/url
           supabase_contexts = record
-          
+
           exact_doc_exists = True
           print("Exact doc exists in Supabase:", sql_filename)
           break
@@ -1242,15 +1454,27 @@ class Ingest():
         # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
         # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
         try:
-          self.qdrant_client.delete(
-              collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-              points_selector=models.Filter(must=[
-                  models.FieldCondition(
-                      key="s3_path",
-                      match=models.MatchValue(value=s3_path),
-                  ),
-              ]),
-          )
+          if course_name == 'cropwizard-1.5':
+            print("Deleting from cropwizard collection...")
+            self.cropwizard_qdrant_client.delete(
+                collection_name='cropwizard',
+                points_selector=models.Filter(must=[
+                    models.FieldCondition(
+                        key="s3_path",
+                        match=models.MatchValue(value=s3_path),
+                    ),
+                ]),
+            )
+          else:
+            self.qdrant_client.delete(
+                collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+                points_selector=models.Filter(must=[
+                    models.FieldCondition(
+                        key="s3_path",
+                        match=models.MatchValue(value=s3_path),
+                    ),
+                ]),
+            )
         except Exception as e:
           if "timed out" in str(e):
             # Timed out is fine. Still deletes.
@@ -1259,26 +1483,10 @@ class Ingest():
           else:
             print("Error in deleting file from Qdrant:", e)
             sentry_sdk.capture_exception(e)
-        try:
-          # delete from Nomic
-          response = self.supabase_client.from_(
-              os.environ['SUPABASE_DOCUMENTS_TABLE']).select("id, s3_path, contexts").eq('s3_path', s3_path).eq(
-                  'course_name', course_name).execute()
-          data = response.data[0]  #single record fetched
-          nomic_ids_to_delete = []
-          context_count = len(data['contexts'])
-          for i in range(1, context_count + 1):
-            nomic_ids_to_delete.append(str(data['id']) + "_" + str(i))
-
-          # delete from Nomic
-          delete_from_document_map(course_name, nomic_ids_to_delete)
-        except Exception as e:
-          print("Error in deleting file from Nomic:", e)
-          sentry_sdk.capture_exception(e)
 
         try:
-          self.supabase_client.from_(os.environ['SUPABASE_DOCUMENTS_TABLE']).delete().eq('s3_path', s3_path).eq(
-              'course_name', course_name).execute()
+          self.supabase_client.from_(os.environ['REFACTORED_MATERIALS_SUPABASE_TABLE']).delete().eq(
+              's3_path', s3_path).eq('course_name', course_name).execute()
         except Exception as e:
           print("Error in deleting file from supabase:", e)
           sentry_sdk.capture_exception(e)
@@ -1304,26 +1512,11 @@ class Ingest():
           else:
             print("Error in deleting file from Qdrant:", e)
             sentry_sdk.capture_exception(e)
-        try:
-          # delete from Nomic
-          response = self.supabase_client.from_(os.environ['SUPABASE_DOCUMENTS_TABLE']).select("id, url, contexts").eq(
-              'url', source_url).eq('course_name', course_name).execute()
-          data = response.data[0]  #single record fetched
-          nomic_ids_to_delete = []
-          context_count = len(data['contexts'])
-          for i in range(1, context_count + 1):
-            nomic_ids_to_delete.append(str(data['id']) + "_" + str(i))
-
-          # delete from Nomic
-          delete_from_document_map(course_name, nomic_ids_to_delete)
-        except Exception as e:
-          print("Error in deleting file from Nomic:", e)
-          sentry_sdk.capture_exception(e)
 
         try:
           # delete from Supabase
-          self.supabase_client.from_(os.environ['SUPABASE_DOCUMENTS_TABLE']).delete().eq('url', source_url).eq(
-              'course_name', course_name).execute()
+          self.supabase_client.from_(os.environ['REFACTORED_MATERIALS_SUPABASE_TABLE']).delete().eq(
+              'url', source_url).eq('course_name', course_name).execute()
         except Exception as e:
           print("Error in deleting file from supabase:", e)
           sentry_sdk.capture_exception(e)

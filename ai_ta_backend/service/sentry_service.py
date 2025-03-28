@@ -20,3 +20,4 @@ class SentryService:
 
   def capture_exception(self, exception: Exception):
     sentry_sdk.capture_exception(exception)
+    

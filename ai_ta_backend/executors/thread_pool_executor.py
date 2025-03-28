@@ -27,3 +27,9 @@ class ThreadPoolExecutorAdapter(ThreadPoolExecutorInterface):
 
   def map(self, fn, *iterables, timeout=None, chunksize=1):
     return self.executor.map(fn, *iterables, timeout=timeout, chunksize=chunksize)
+
+  def __enter__(self):
+    return self.executor
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    self.executor.shutdown()

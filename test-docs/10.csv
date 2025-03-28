@@ -1,0 +1,130 @@
+question,qdrant_latency_sec,qdrant_latency_sec_2,qdrant_latency_sec_3,openai_embedding_latency_sec,openai_embedding_latency_sec_2,openai_embedding_latency_sec_3,getTopContext_total_latency_sec,getTopContext_total_latency_sec_2,getTopContext_total_latency_sec_3,supabase_fetch_time,time_after_multiprocessing_2,time_after_multiprocessing_3,context_padding_runtime_2,context_padding_runtime_3
+What is CUDA?,0.247857483,0.225064605,0.212917327,0.591101335,0.540430527,0.601722092,1.071341371,5.89005947,4.936329038,3.314769665,1.33250729,3.82420947,4.678279085,3.84048559
+I wonder what is a thread scheduler.,0.12016814,0.230489066,0.139564925,0.070197,0.065060498,0.065202507,0.352566326,4.88168883,1.902045875,3.211707818,1.122135186,1.34788112,4.368474101,1.373647027
+How can I succeed the class not knowing C/C++,0.107688425,0.103337214,0.104569086,0.064855449,0.064335281,0.067980322,0.340819557,5.034840691,1.391410847,3.250742841,1.344473802,1.012015425,4.622823189,1.026039629
+I have no experience when it comes to cuda and processors. What steps should I take to succeed in this class. Give me a week by week description,0.111586584,0.202397785,0.131180851,0.068187669,0.064228697,0.073558961,0.348091303,4.79679058,1.401755617,3.149966382,1.121102381,1.009592443,4.299737988,1.023300956
+Help me with CUDA,0.112170844,0.141499164,0.132568083,0.062648945,0.066148873,0.066727763,0.334907998,4.915194898,5.001104411,3.125844732,1.312179914,4.591697567,4.466035552,4.617281629
+what is cuda,0.11211295,0.143991474,0.137874304,0.063617951,0.066128944,0.066562037,0.33113106,4.556993798,3.224157941,3.010712912,1.060368946,2.839848902,4.10667894,2.854844323
+what is parallel programming,0.124161928,0.15382859,0.145962344,0.067870434,0.066781836,0.067669621,0.355002754,5.401442993,2.386177389,3.817403874,1.10742408,1.994453888,4.950833581,2.007986999
+what is High-performance Computing,0.1247644,0.23121964,0.142166716,0.063758449,0.064312961,0.062673279,0.34851416,5.016571925,1.553821753,3.227862648,1.240325984,1.152546589,4.499399924,1.165463937
+how to install rai on my mac computer,0.10880875,0.185739131,0.119819409,0.152378093,0.072037368,0.064283556,0.418992146,1.144396846,1.772412305,0.142550438,0.509887401,1.384506909,0.676674733,1.396706078
+instruction of coding cuda code,0.112090576,0.133803306,0.135581436,0.06455697,0.070114778,0.064849132,0.341905016,4.994873395,4.194436632,3.151205385,1.389032153,3.820879644,4.566469389,3.834055608
+What is the link to github,0.105649731,0.165015753,0.102786532,0.063773427,0.075132422,0.203209092,0.328096778,4.811894784,1.51923189,3.273621342,1.025703139,1.01970637,4.326628717,1.03672041
+What is applied parallel programming?,0.118513137,0.192358605,0.139397336,0.064268068,0.064810239,0.061440611,0.348057451,4.87330541,1.67762598,3.284638949,1.090531769,1.275256031,4.401484215,1.295387925
+What is cuda programming,0.11935024,0.207084222,0.131162547,0.088662983,0.063532334,0.063517029,0.370493365,5.009694994,5.166956895,3.279417825,1.18413169,4.782791882,4.506644931,4.79600297
+Write code that uses CUDA to do matrix multiplication ,0.148310386,0.224288809,0.210802257,0.066677532,0.066262769,0.062417702,0.381207883,5.159825142,2.478645873,3.341125471,1.284010132,2.025496711,4.650591986,2.040467543
+Implement a tree traveral in cpp,0.114232543,0.192481054,0.143139167,0.070020384,0.067725402,0.061973434,0.3382164,4.758830719,2.440531718,3.158369779,1.091450689,2.031370438,4.271928766,2.054057496
+How do I make a submission on RAI,0.104879458,0.101268105,0.125800132,0.065906031,0.06548057,0.115824005,0.341975428,4.699587572,2.463553499,3.248686869,1.066187628,2.02260969,4.338484908,2.03617365
+I am new to GPUs and Computer Architecture. How can I succeed in this class?,0.135825249,0.131005325,0.154281887,0.065450222,0.065845941,0.066765302,0.369909049,4.784342804,1.453071726,3.20432716,1.138531769,1.032916288,4.37042211,1.04499123
+what is diffusion maps,0.145720193,0.136471926,0.193293418,0.063503016,0.064133065,0.071750558,0.381323018,4.875406441,1.677124856,3.361968726,1.049093121,1.151453977,4.439451847,1.16564948
+what is CUDA exactly,0.113104688,0.13718982,0.200361064,0.065590777,0.065002103,0.065623795,0.345146322,5.23560378,3.952888536,3.203685427,1.578448935,3.454580935,4.810439802,3.473386943
+how to set up rai,0.107475107,0.194878026,0.115886054,0.064844854,0.066971467,0.067837463,0.360912352,1.171061822,1.526411396,0.141435999,0.51956335,1.153830622,0.687387455,1.167953476
+What is Dennard Scaling ,0.114064366,0.224558457,0.143312987,0.066929557,0.064343618,0.063218929,0.34313257,5.095307352,1.382484641,3.311975922,1.247183114,0.981720383,4.591242026,0.996417231
+Why do GPUs not have forwarding or branch prediction?,0.112543307,0.207117941,0.14910943,0.071844219,0.070653682,0.067185951,0.391083725,4.826459873,2.550237273,3.13090095,1.168633972,2.098471263,4.333843029,2.114329166
+"How do I code this: The Problem
+You will be completing a program that prints out your name and age to stdout. All the code you write will go in hello.cpp
+
+TODO:
+
+Create a variable to hold your age
+Create a variable to hold your name
+Initialize the values of these two variables
+Write a function hello that takes no arguments and returns a std::string containing the following text: ""Hello world! My name is your_name and I am your_age years old."" where your_name and your_age are the values of your name and age variables.
+The autograder is not that smart. It will be reasonably accommodating about your name, accept any integer for an age, but the rest of the text must match exactly.
+
+In C++, text is stored in a string type. We haven't gone over that in class yet, but a quick Google search should enlighten you on how to use it.
+
+Testing Your Code
+Run the following commands to compile and execute your code:
+
+make
+./main
+Sample Output
+Let's say your name is Jared, and you're 19 years old. When you run ./main, you should see the following:
+
+Hello world! My name is Jared and I am 19 years old.",0.114431748,0.208543659,0.194121491,0.069118725,0.083524091,0.084172866,0.344196638,4.72937627,3.656317215,3.093627321,1.101247609,3.122720731,4.225278089,3.139633652
+"The Problem
+You will be writing a program that outputs the amount of time that has passed since Epoch. (Googling Epoch may help)
+
+Write a program that prints out the time that has passed since the Epoch in 1) hours, 2) days, and 3) years, (ignoring leap years, so each year is 365 days) each on a separate line. Integer division is acceptable.
+
+To do this, you will write three functions: int hours(time_t t), int days(time_t t), and int years(time_t t). These functions all take the time since the epoch as input.
+
+The time_t type is used to hold the number of seconds since the epoch; its actual type (int, long, etc.) depends on your system and compiler. You can read more about it here on cppreference.com.
+
+In the provided code, you will find a variable that contains the seconds since epoch called sec_since_epoch.
+
+Testing Your Code
+Run the following commands to compile and execute your code:
+
+make
+./main
+Sample Output
+Hours: 412655
+Days: 17193
+Years: 47",0.110943687,0.13820022,0.218829265,0.070845565,0.07230822,0.072902055,0.354450839,4.753910989,2.675682584,3.08601418,1.197888091,2.137161663,4.320863929,2.150009808
+Where on github to I use this url to clone git: git clone https://github.com/illinois-cs-coursework/fa23_cs225_NETID cs225git,0.108679169,0.164865106,0.153108787,0.070003037,0.069614943,0.077060226,0.347433902,4.962389127,1.59795609,3.122505634,1.358989389,1.144955699,4.50861352,1.158204728
+how to exist folder by 1 in terminal mac,0.108047487,0.176327848,0.17740547,0.063292885,0.07068386,0.071880956,0.344656708,4.717029685,2.660455934,3.13465108,1.07806617,2.173764194,4.236084223,2.18826599
+Not able to download csvode server,0.112841277,0.134515537,0.142233304,0.066048079,0.070846131,0.075266046,0.349306594,4.662025349,2.555340853,3.137010825,1.079024901,2.091498746,4.242270411,2.105031486
+How to install rai-proejct on hyper-v linux ubuntu,0.110400302,0.107016138,0.132495103,0.061664209,0.068485672,0.084936106,0.354479348,1.123892771,1.719025659,0.134411686,0.576559605,1.279763449,0.74479856,1.293954652
+What is a subsequence of a string,0.109642679,0.10897323,0.150882755,0.064992568,0.064583582,0.07355631,0.343378712,0.993482274,1.590933525,0.149307966,0.455050446,1.157003874,0.627066951,1.17597235
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,

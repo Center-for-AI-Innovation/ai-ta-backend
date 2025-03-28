@@ -7,9 +7,8 @@
       "phases": {
         "install": {
           "cmds": [
-            "python -m venv --copies /opt/venv && . /opt/venv/bin/activate",
-            "pip install pip==23.3.1",
-            "pip install -r requirements.txt"
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "uv pip install --system -r requirements.txt"
           ]
         },
         "setup": {

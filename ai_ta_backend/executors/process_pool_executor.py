@@ -23,9 +23,7 @@ class ProcessPoolExecutorAdapter(ProcessPoolExecutorInterface):
     self.executor = ProcessPoolExecutor(max_workers=max_workers)
 
   def submit(self, fn, *args, **kwargs):
-    raise NotImplementedError(
-        "ProcessPoolExecutorAdapter does not support 'submit' directly due to its nature. Use 'map' or other methods as needed."
-    )
+    return self.executor.submit(fn, *args, **kwargs)
 
   def map(self, fn, *iterables, timeout=None, chunksize=1):
     return self.executor.map(fn, *iterables, timeout=timeout, chunksize=chunksize)
