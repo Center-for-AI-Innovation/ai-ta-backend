@@ -37,21 +37,23 @@ def main():
     data = [1, 2, 3]
     # fetch records from SQL
     while len(data) > 0:
-        response = SUPABASE_CLIENT.table("nal_publications").select("doi_number, publisher, metadata").eq("ingested", False).eq("downloadable", True).eq("publisher", "Wiley").limit(1000).execute()
+        response = SUPABASE_CLIENT.table("nal_publications").select("doi_number, publisher, metadata").eq("ingested", False).eq("downloadable", True).eq("publisher", "Wiley").limit(5).execute()
         data = response.data
         print("No. of records: ", len(data))
         for record in data:
             if 'Springer' in record['publisher']:
                 # route to springer download
+                print('Routing to Springer...')
                 result = downloadSpringerFulltext(doi=record['doi_number'])
                 
             elif 'Wiley' in record['publisher']:
                 # route to wiley download
-                print('Wiley')
+                print('Routing to Wiley...')
                 result = downloadWileyPDF(doi=record['doi_number'], metadata=record['metadata'])
                 time.sleep(10) # sleep for 10 seconds to avoid rate limiting
             elif 'Elsevier' in record['publisher']:
                 # update supabase
+                print('Routing to Elsevier...')
                 update_info = {"notes": "Elsevier articles not downloadable.", "downloadable": False, "modified_date": datetime.datetime.now().isoformat()}
                 response = SUPABASE_CLIENT.table("nal_publications").update(update_info).eq("doi_number", record['doi_number']).execute()
 
@@ -60,7 +62,8 @@ def main():
                 print("publisher name: " , record['publisher'])
                 result = download_article_from_url(record['doi_number'], record['metadata'])
                 print(result)
-                #time.sleep(10)
+                time.sleep(10) # sleep for 10 seconds to avoid rate limiting
+        break
     return "Success"
 
 
@@ -129,7 +132,7 @@ def upload_and_ingest(filepath, metadata, doi):
 
     
     # ingest
-    ingest_url = "https://ingest-task-queue-6ee4a59-v12.app.beam.cloud"
+    ingest_url = "https://ingest-task-queue-6ee4a59-v29.app.beam.cloud" # TODO: change to cropwizard-ingest endpoint -> https://cw-ingest-task-queue-3df80f3-v2.app.beam.cloud
     ingest_headers = {
           'Accept': '*/*',
           'Accept-Encoding': 'gzip, deflate',
@@ -155,6 +158,7 @@ def upload_and_ingest(filepath, metadata, doi):
     # update supabase
     update_info = {"ingested": True, "modified_date": datetime.datetime.now().isoformat()}
     response = SUPABASE_CLIENT.table("nal_publications").update(update_info).eq("doi_number", doi).execute()
+    print("Updated supabase: ", response)
     return "success"
 
 
