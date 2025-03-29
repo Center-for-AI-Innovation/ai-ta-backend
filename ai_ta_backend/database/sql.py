@@ -36,7 +36,7 @@ class SQLDatabase:
     # Create a Supabase client
     self.supabase_client = supabase.create_client(  # type: ignore
         supabase_url=os.environ['SUPABASE_URL'], supabase_key=os.environ['SUPABASE_API_KEY'])
-
+    
     sentry_sdk.init(
         dsn=os.environ['SENTRY_DSN'],
         enable_tracing=True,
@@ -366,3 +366,5 @@ class SQLDatabase:
     return self.supabase_client.table("messages").update({
         "llm-monitor-tags": llm_monitor_tags
     }).eq("conversation_id", convo_id).execute()
+  def getCourseDocumentByS3Path(self, course_name: str, s3_path: str):
+    return self.supabase_client.table("documents").select("id, course_name, readable_filename, url, base_url, s3_path, created_at").eq("course_name", course_name).eq("s3_path", s3_path).execute()
