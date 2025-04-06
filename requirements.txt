@@ -3,7 +3,7 @@ flask-cors==4.0.0
 Flask-Injector==0.15.0
 gunicorn==22.0.0
 protobuf==4.25.0
-aiohttp==3.8.6
+aiohttp==3.11.13
 wheel==0.41.3
 click==8.1.7
 MarkupSafe==2.1.3
