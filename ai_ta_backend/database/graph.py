@@ -1,53 +1,56 @@
 import os
+
 from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
 from langchain_openai import ChatOpenAI
 
+
 class GraphDatabase:
-    def __init__(self):
-        self.clinical_kg_graph = Neo4jGraph(
-            url=os.environ['CKG_NEO4J_URI'],
-            username=os.environ['CKG_NEO4J_USERNAME'],
-            password=os.environ['CKG_NEO4J_PASSWORD'],
-            database=os.environ['CKG_NEO4J_DATABASE'],
-            refresh_schema=True,
-        )
 
-        self.prime_kg_graph = Neo4jGraph(
-            url=os.environ['PRIME_KG_NEO4J_URI'],
-            username=os.environ['PRIME_KG_NEO4J_USERNAME'],
-            password=os.environ['PRIME_KG_NEO4J_PASSWORD'],
-            database=os.environ['PRIME_KG_NEO4J_DATABASE'],
-            refresh_schema=True,
-        )
-        
-        # Get schema information for the system prompt
-        self.ckg_schema_info = self._get_schema_info(self.clinical_kg_graph)
-        self.prime_kg_schema_info = self._get_schema_info(self.prime_kg_graph)
-        
-        # Create the chain with the clinical KG system prompt
-        self.ckg_chain = self._create_clinical_kg_chain()
-        self.prime_kg_chain = self._create_prime_kg_chain()
+  def __init__(self):
+    # self.clinical_kg_graph = Neo4jGraph(
+    #     url=os.environ['CKG_NEO4J_URI'],
+    #     username=os.environ['CKG_NEO4J_USERNAME'],
+    #     password=os.environ['CKG_NEO4J_PASSWORD'],
+    #     database=os.environ['CKG_NEO4J_DATABASE'],
+    #     refresh_schema=True,
+    # )
 
-    def refresh_schema(self, graph):
-        """Refresh the schema and update the chain with the new schema information."""
-        graph.refresh_schema()
-        
-        return "Schema refreshed successfully"
-    
-    def _get_schema_info(self, graph):
-        """Extract schema information from the Neo4j database."""
-        try:    
-            # This will get the schema without refreshing it (faster)
-            return graph.schema
-        except:
-            # If schema isn't available yet, return a placeholder
-            return "Schema information not available. Please refresh schema first."
-    
-    def _create_clinical_kg_chain(self):
-        """Create a GraphCypherQAChain with a clinical KG system prompt."""
-        
-        schema_info = self.ckg_schema_info
-        system_prompt = f"""
+    self.prime_kg_graph = Neo4jGraph(
+        url=os.environ['PRIME_KG_NEO4J_URI'],
+        username=os.environ['PRIME_KG_NEO4J_USERNAME'],
+        password=os.environ['PRIME_KG_NEO4J_PASSWORD'],
+        database=os.environ['PRIME_KG_NEO4J_DATABASE'],
+        refresh_schema=True,
+    )
+
+    # Get schema information for the system prompt
+    # self.ckg_schema_info = self._get_schema_info(self.clinical_kg_graph)
+    self.prime_kg_schema_info = self._get_schema_info(self.prime_kg_graph)
+
+    # Create the chain with the clinical KG system prompt
+    # self.ckg_chain = self._create_clinical_kg_chain()
+    self.prime_kg_chain = self._create_prime_kg_chain()
+
+  def refresh_schema(self, graph):
+    """Refresh the schema and update the chain with the new schema information."""
+    graph.refresh_schema()
+
+    return "Schema refreshed successfully"
+
+  def _get_schema_info(self, graph):
+    """Extract schema information from the Neo4j database."""
+    try:
+      # This will get the schema without refreshing it (faster)
+      return graph.schema
+    except:
+      # If schema isn't available yet, return a placeholder
+      return "Schema information not available. Please refresh schema first."
+
+  def _create_clinical_kg_chain(self):
+    """Create a GraphCypherQAChain with a clinical KG system prompt."""
+
+    schema_info = self.ckg_schema_info
+    system_prompt = f"""
         You are a clinical knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
         
         SCHEMA INFORMATION:
@@ -72,20 +75,23 @@ class GraphDatabase:
             2. If the response from neo4j is empty, return "No results found".
             3. If the response from neo4j is not empty, return the same in a list of dictionaries along with the full context.
         """
-        print("SYSTEM PROMPT: ", system_prompt)
-        return GraphCypherQAChain.from_llm(
-            ChatOpenAI(temperature=0, model="gpt-4o"),
-            graph=self.clinical_kg_graph,
-            verbose=False,
-            allow_dangerous_requests=True,
-            system_message=system_prompt,
-        )
-    
-    def _create_prime_kg_chain(self):
-        """Create a GraphCypherQAChain with a prime KG system prompt."""
-        schema_info = self.prime_kg_schema_info
-        system_prompt = f"""
+    print("SYSTEM PROMPT: ", system_prompt)
+    return GraphCypherQAChain.from_llm(
+        ChatOpenAI(temperature=0, model="gpt-4o"),
+        graph=self.clinical_kg_graph,
+        verbose=False,
+        allow_dangerous_requests=True,
+        system_message=system_prompt,
+    )
+
+  def _create_prime_kg_chain(self):
+    """Create a GraphCypherQAChain with a prime KG system prompt."""
+    schema_info = self.prime_kg_schema_info
+    print("PrimeKG SCHEMA INFO: ", schema_info)
+    system_prompt = f"""
         You are a prime knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
+
+        If you don't find any results, please try a new cypher. Keep trying until you find results or you have tried 3 times.
         
         SCHEMA INFORMATION:
         {schema_info}
@@ -98,18 +104,19 @@ class GraphDatabase:
         5. When querying for interactions, look for INTERACTS_WITH relationships
         6. Limit results to a reasonable number (e.g., LIMIT 10) for readability
         """
-        
-        return GraphCypherQAChain.from_llm(
-            ChatOpenAI(temperature=0, model="gpt-4o"),
-            graph=self.prime_kg_graph,
-            verbose=False,
-            allow_dangerous_requests=True,
-            system_message=system_prompt,
-        )
-    
-    # extra function to create a chain with a custom prompt
-    def create_chain_with_custom_prompt(self, additional_instructions=""):
-        """
+
+    return GraphCypherQAChain.from_llm(
+        ChatOpenAI(temperature=0, model="gpt-4o", api_key=os.environ['VLADS_OPENAI_KEY']),
+        return_intermediate_steps=True,
+        graph=self.prime_kg_graph,
+        verbose=False,
+        allow_dangerous_requests=True,
+        system_message=system_prompt,
+    )
+
+  # extra function to create a chain with a custom prompt
+  def create_chain_with_custom_prompt(self, additional_instructions=""):
+    """
         Create a new chain with a custom prompt that includes additional instructions.
         
         Args:
@@ -118,7 +125,7 @@ class GraphDatabase:
         Returns:
             GraphCypherQAChain: A new chain with the custom prompt
         """
-        system_prompt = f"""
+    system_prompt = f"""
         You are a clinical knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
         
         SCHEMA INFORMATION:
@@ -147,13 +154,12 @@ class GraphDatabase:
         ADDITIONAL INSTRUCTIONS:
         {additional_instructions}
         """
-        print("SYSTEM PROMPT: ", system_prompt)
-        
-        return GraphCypherQAChain.from_llm(
-            ChatOpenAI(temperature=0, model="gpt-4o"),
-            graph=self.clinical_kg_graph,
-            verbose=False,
-            allow_dangerous_requests=True,
-            system_message=system_prompt,
-        )
-        
+    print("SYSTEM PROMPT: ", system_prompt)
+
+    return GraphCypherQAChain.from_llm(
+        ChatOpenAI(temperature=0, model="gpt-4o", api_key=os.environ['VLADS_OPENAI_KEY']),
+        graph=self.clinical_kg_graph,
+        verbose=False,
+        allow_dangerous_requests=True,
+        system_message=system_prompt,
+    )
