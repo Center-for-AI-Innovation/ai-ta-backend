@@ -32,6 +32,9 @@ nomic==3.3.0
 openai==0.28.1
 langchain==0.0.331
 langchainhub==0.1.14
+langchain_openai==0.3.1
+langchain_qdrant==0.2.0
+langchain_neo4j==0.4.0
 
 # Data
 boto3==1.28.79
@@ -45,7 +48,7 @@ posthog==3.1.0
 sentry-sdk==1.39.1
 
 ollama==0.4.7
-
+langchain_neo4j
 # Not currently supporting coursera ingest
 # cs-dlp @ git+https://github.com/raffaem/cs-dlp.git@0.12.0b0 # previously called coursera-dl
 

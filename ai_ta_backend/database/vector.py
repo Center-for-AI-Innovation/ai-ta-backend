@@ -1,12 +1,13 @@
 import os
 from typing import List
-
+import json
 import requests
 from injector import inject
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.vectorstores import Qdrant
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import FieldCondition, MatchAny, MatchValue
+from ai_ta_backend.database.graph import GraphDatabase
 
 
 class VectorDatabase():
@@ -23,7 +24,7 @@ class VectorDatabase():
     self.qdrant_client = QdrantClient(
         url=os.environ['QDRANT_URL'],
         api_key=os.environ['QDRANT_API_KEY'],
-        port=os.getenv('QDRANT_PORT') if os.getenv('QDRANT_PORT') else None,
+        port=int(os.getenv('QDRANT_PORT')) if os.getenv('QDRANT_PORT') and os.getenv('QDRANT_PORT').isdigit() else None,
         timeout=20,  # default is 5 seconds. Getting timeout errors w/ document groups.
     )
 
@@ -31,6 +32,8 @@ class VectorDatabase():
                                              port=int(os.environ['VYRIAD_QDRANT_PORT']),
                                              https=True,
                                              api_key=os.environ['VYRIAD_QDRANT_API_KEY'])
+    
+    self.graphDb = GraphDatabase()
 
     try:
       # No major uptime guarantees
@@ -44,7 +47,7 @@ class VectorDatabase():
 
     self.vectorstore = Qdrant(client=self.qdrant_client,
                               collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-                              embeddings=OpenAIEmbeddings(openai_api_key=os.environ['VLADS_OPENAI_KEY']))
+                              embeddings=OpenAIEmbeddings(api_key=os.environ['VLADS_OPENAI_KEY']))
 
   def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                     disabled_doc_groups: List[str], public_doc_groups: List[dict]):
@@ -143,44 +146,83 @@ class VectorDatabase():
     # Post-process the Qdrant results (hydrate the vectors with the full text from SQL)
     try:
       # Get context IDs from search results
-      context_ids = [result.payload['context_id'] for result in search_results]
+      # context_ids = [result.payload['context_id'] for result in search_results]
 
-      # Call API to get text for all context IDs in bulk
-      api_url = "https://pubmed-db-query.kastan.ai/getTextFromContextIDBulk"
-      response = requests.post(api_url, json={"ids": context_ids}, timeout=30)
+      # # Call API to get text for all context IDs in bulk
+      # api_url = "https://pubmed-db-query.kastan.ai/getTextFromContextIDBulk"
+      # response = requests.post(api_url, json={"ids": context_ids}, timeout=30)
 
-      if not response.ok:
-        print(f"Error in retrieving Pubmed text details: {response.status_code}")
-      else:
-        # Create mapping of context_id to text from response
-        context_texts = response.json()
+      # if not response.ok:
+      #   print(f"Error in retrieving Pubmed text details: {response.status_code}")
+      # else:
+        # # Create mapping of context_id to text from response
+        # context_texts = response.json()
 
-        # Update search results with texts from bulk response
-        updated_results = []
-        for result in search_results:
-          context_id = result.payload['context_id']
-          if context_id in context_texts:
-            result.payload['page_content'] = context_texts[context_id]['page_content']
-            result.payload['readable_filename'] = context_texts[context_id]['readable_filename']
-            result.payload['s3_path'] = str(result.payload['minio_path']).replace('pubmed/', '')  # remove bucket name
-            result.payload['course_name'] = course_name
-            updated_results.append(result)
+      # # Update search results with texts from bulk response
+      # updated_results = []
+      # for result in search_results:
+      #   context_id = result.payload['context_id']
+      #   if context_id in context_texts:
+      #     result.payload['page_content'] = context_texts[context_id]['page_content']
+      #     result.payload['readable_filename'] = context_texts[context_id]['readable_filename']
+      #     result.payload['s3_path'] = str(result.payload['minio_path']).replace('pubmed/', '')  # remove bucket name
+      #     result.payload['course_name'] = course_name
+      #     updated_results.append(result)
 
-      # ----- Do Prime KG retrieval -----
+      # # return updated_results
 
-      prime_kg_triplets = self.vyriad_qdrant_client.search(
-          collection_name='prime_kg_nomic',  # Pubmed embeddings
-          with_vectors=False,
-          query_vector=user_query_embedding,
-          limit=20,  # not so many KG triplets
-      )
+      # # ----- Do Prime KG retrieval -----
 
-      for result in prime_kg_triplets:
-        result.payload['page_content'] = result.payload["triplet_string"]
-        result.payload['readable_filename'] = result.payload["triplet"]
-        result.payload['course_name'] = course_name
+      # prime_kg_triplets = self.vyriad_qdrant_client.search(
+      #     collection_name='prime_kg_nomic',  # Pubmed embeddings
+      #     with_vectors=False,
+      #     query_vector=user_query_embedding,
+      #     limit=20,  # not so many KG triplets
+      # )
 
-      return updated_results + prime_kg_triplets
+      # for result in prime_kg_triplets:
+      #   result.payload['page_content'] = result.payload["triplet_string"]
+      #   result.payload['readable_filename'] = result.payload["triplet"]
+      #   result.payload['course_name'] = course_name
+
+      # ---- Add clinical KG context -----
+      updated_results = []
+      clinical_kg_docs = self.getKnowledgeGraphContexts(search_query) 
+      print(f"Clinical KG docs: {clinical_kg_docs}")
+      print(f"Clinical KG docs type: {type(clinical_kg_docs)}")
+
+      if clinical_kg_docs and 'result' in clinical_kg_docs:
+          clinical_kg_result = {
+              'id': hash("clinical_kg_" + search_query),  # Generate a unique ID
+              'version': 1,  # Default version number
+              'payload': {
+                  'page_content': clinical_kg_docs['result'],
+                  'readable_filename': "Clinical KG",
+                  'course_name': course_name
+              },
+              'score': 1.0  # Adding a default score
+          }
+          updated_results.append(models.ScoredPoint(**clinical_kg_result))
+
+      # ---- Add Prime KG context -----
+      prime_kg_docs = self.getPrimeKGContexts(search_query)
+      print(f"Prime KG docs: {prime_kg_docs}")
+      print(f"Prime KG docs type: {type(prime_kg_docs)}")
+
+      if prime_kg_docs and 'result' in prime_kg_docs:
+          prime_kg_result = {
+              'id': hash("prime_kg_" + search_query),  # Generate a unique ID
+              'version': 1,  # Default version number
+              'payload': {
+                  'page_content': prime_kg_docs['result'],
+                  'readable_filename': "Prime KG",
+                  'course_name': course_name
+              },
+              'score': 1.0  # Adding a default score
+          }
+          updated_results.append(models.ScoredPoint(**prime_kg_result))
+      print(f"Updated results: {updated_results}")
+      return updated_results
 
     except Exception as e:
       print(f"Error in _vyriad_special_case: {e}")
@@ -256,3 +298,31 @@ class VectorDatabase():
             ),
         ]),
     )
+  
+  def getKnowledgeGraphContexts(self, user_query: str):
+    """
+    Get knowledge graph contexts from Clinical KG
+    """
+    try:
+        response = self.graphDb.ckg_chain.invoke({"query": user_query})
+        print("FINAL RESPONSE: ", response)
+        
+        return response
+    except Exception as e:
+        error_msg = f"Error in knowledge graph query for '{user_query}': {str(e)}"
+        print(error_msg)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  
+  def getPrimeKGContexts(self, user_query: str):
+    """
+    Get knowledge graph contexts from Prime KG
+    """
+    try:
+        response = self.graphDb.prime_kg_chain.invoke({"query": user_query})
+  
+        return response
+    
+    except Exception as e:  
+      print(f"Error in getPrimeKGContexts: {str(e)}")
+      return {"result": "An error occurred while processing your knowledge graph query."}
