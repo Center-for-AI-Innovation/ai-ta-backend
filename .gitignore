@@ -1,9 +1,14 @@
 # don't sync coursera docs
+
+*grobid_speedtest_pdfs*
 coursera-dl/
 *parsed.json
 wandb
 *.ipynb
 *.pem
+*.tei.xml
+*.json
+*articles.db
 
 # don't expose env files
 .env
