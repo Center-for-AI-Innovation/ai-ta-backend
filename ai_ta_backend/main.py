@@ -84,6 +84,16 @@ def getTopContexts(service: RetrievalService) -> Response:
   token_limit
   doc_groups
   
+  Example Request Body:
+  ```json
+  {
+    "search_query": "What is a finite state machine?",
+    "course_name": "ECE_385",
+    "doc_groups": ["lectures", "readings"],
+    "top_n": 5
+  }
+  ```
+
   Returns
   -------
   JSON
@@ -742,7 +752,7 @@ def configure(binder: Binder) -> None:
   binder.bind(ProcessPoolExecutorInterface, to=ProcessPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
   binder.bind(PosthogService, to=PosthogService, scope=SingletonScope)
-  binder.bind(SentryService, to=SentryService, scope=SingletonScope)
+  # binder.bind(SentryService, to=SentryService, scope=SingletonScope)
   binder.bind(NomicService, to=NomicService, scope=SingletonScope)
   binder.bind(ExportService, to=ExportService, scope=SingletonScope)
   binder.bind(WorkflowService, to=WorkflowService, scope=SingletonScope)

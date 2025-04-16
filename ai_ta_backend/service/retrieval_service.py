@@ -507,6 +507,9 @@ class RetrievalService:
     elif course_name == "pubmed":
       search_results = self.vdb.pubmed_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
                                                      disabled_doc_groups, public_doc_groups)
+    elif course_name == "patents":
+      search_results = self.vdb.patents_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                      top_n, disabled_doc_groups, public_doc_groups)
     else:
       search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
                                               disabled_doc_groups, public_doc_groups)

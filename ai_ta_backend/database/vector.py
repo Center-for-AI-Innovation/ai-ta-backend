@@ -80,6 +80,36 @@ class VectorDatabase():
 
     return search_results
 
+  def patents_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
+                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
+    """
+    Search the vector database for a given query.
+    """
+    top_n = 120
+
+    search_results = self.vyriad_qdrant_client.search(
+        collection_name='patents',  # Patents embeddings
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,  # Return n closest points
+    )
+
+    # Post-process the Qdrant results, format the results
+    try:
+      updated_results = []
+      for result in search_results:
+        result.payload['page_content'] = result.payload['text']
+        result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
+        result.payload['course_name'] = course_name
+        result.payload['url'] = result.payload['uspto_url']
+        result.payload['s3_path'] = "patents/" + result.payload['s3_path']
+        updated_results.append(result)
+      return updated_results
+
+    except Exception as e:
+      print(f"Error in patents_vector_search: {e}")
+      return []
+
   def pubmed_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
