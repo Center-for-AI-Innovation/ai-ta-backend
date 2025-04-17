@@ -12,6 +12,9 @@ from dateutil import parser
 from injector import inject
 from langchain.embeddings.ollama import OllamaEmbeddings
 
+from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
+from langchain_openai import ChatOpenAI
+
 # from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import Document
@@ -24,6 +27,7 @@ from ai_ta_backend.database.sql import (
     WeeklyMetric,
 )
 from ai_ta_backend.database.vector import VectorDatabase
+from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapter
 
 # from ai_ta_backend.service.nomic_service import NomicService
@@ -37,10 +41,11 @@ class RetrievalService:
   """
 
   @inject
-  def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, posthog: PosthogService,
+  def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, graphDb: GraphDatabase, posthog: PosthogService,
                sentry: SentryService, thread_pool_executor: ThreadPoolExecutorAdapter):
     self.vdb = vdb
     self.sqlDb = sqlDb
+    self.graphDb = graphDb
     self.aws = aws
     self.sentry = sentry
     self.posthog = posthog
@@ -56,8 +61,9 @@ class RetrievalService:
         # openai_api_version=os.environ["OPENAI_API_VERSION"],
     )
 
-    self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')
-
+    self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')   
+    
+    
     # self.llm = AzureChatOpenAI(
     #     temperature=0,
     #     deployment_name=os.environ["AZURE_OPENAI_ENGINE"],
@@ -66,6 +72,7 @@ class RetrievalService:
     #     openai_api_version=os.environ["OPENAI_API_VERSION"],
     #     openai_api_type=os.environ['OPENAI_API_TYPE'],
     # )
+
 
   async def getTopContexts(self,
                            search_query: str,
@@ -751,3 +758,45 @@ class RetrievalService:
       print(f"Error fetching model usage counts for {project_name}: {str(e)}")
       self.sentry.capture_exception(e)
       return []
+    
+  def getKnowledgeGraphContexts(self, user_query: str, course_name: str) -> Dict:
+    """
+    Get knowledge graph contexts from Clinical KG
+    """
+    try:
+        start_time = time.monotonic()
+        
+        custom_chain = self.graphDb.create_chain_with_custom_prompt()
+        response = self.graphDb.ckg_chain.invoke({"query": user_query})
+        
+        execution_time = time.monotonic() - start_time
+        print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
+
+        print("FINAL RESPONSE: ", response)
+        
+        return response
+    except Exception as e:
+        error_msg = f"Error in knowledge graph query for '{user_query}': {str(e)}"
+        print(error_msg)
+        self.sentry.capture_exception(e)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  
+  def getPrimeKGContexts(self, user_query: str) -> Dict:
+    """
+    Get knowledge graph contexts from Prime KG
+    """
+    try:
+        start_time = time.monotonic()
+        
+        response = self.graphDb.prime_kg_chain.invoke({"query": user_query})
+        
+        execution_time = time.monotonic() - start_time
+        print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
+        
+        return response
+    
+    except Exception as e:  
+      print(f"Error in getPrimeKGContexts: {str(e)}")
+      self.sentry.capture_exception(e)
+      return {"result": "An error occurred while processing your knowledge graph query."}
