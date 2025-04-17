@@ -1414,6 +1414,14 @@ class Ingest():
 
         if supabase_whole_text == current_whole_text:  # matches the previous file
           print(f"Duplicate ingested! 📄 s3_path/url: {original_filename}.")
+          # Delete the duplicate file from S3 if it has an s3_path
+          if incoming_s3_path:
+            bucket_name = os.getenv('S3_BUCKET_NAME')
+            try:
+              self.s3_client.delete_object(Bucket=bucket_name, Key=incoming_s3_path)
+            except Exception as e:
+              print(f"Error deleting duplicate file from S3: {e}")
+              sentry_sdk.capture_exception(e)
           return True
 
         else:  # the file is updated

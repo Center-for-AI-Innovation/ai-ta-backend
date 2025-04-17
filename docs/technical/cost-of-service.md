@@ -1,6 +1,92 @@
+---
+description: >-
+  I'm being extremely transparent. It's a core value of mine. Hopefully you can
+  learn from our decisions.
+---
+
 # Cost of Service
 
-## Core Services
+## Costs to run UIUC.chat as of April 2025
+
+We're becoming an production Illinois service. Let's take a look at our costs before we launch to campus (anticipated full campus advertising campeign in September 2025).&#x20;
+
+### Core Services
+
+LLM inference is the most expensive part of the app, but we pass that onto the user with a "BYO API Keys" model. $0.&#x20;
+
+#### Frontend: $30/mo
+
+Hosted on Vercel, had to upgrade to pro tier for greater usage. We're doing 600k function invokations, that's dominated by our "polling" during document uploads. I'm working to reduce tons of unnecessary polling.
+
+<figure><img src="../.gitbook/assets/CleanShot 2025-04-07 at 12.29.58.png" alt=""><figcaption><p>Typical vercel bill invoice.</p></figcaption></figure>
+
+#### Backend: $67/mo
+
+We host our Python backend and a few supporting services on Railway.&#x20;
+
+<figure><img src="../.gitbook/assets/CleanShot 2025-04-07 at 12.35.03.png" alt=""><figcaption><p>Monthly cost of Railway, broken down by service.</p></figcaption></figure>
+
+<figure><img src="../.gitbook/assets/CleanShot 2025-04-07 at 12.35.43 (1).png" alt=""><figcaption><p>History of Railway payments. Average: $67.59/mo.</p></figcaption></figure>
+
+
+
+#### Beam.cloud: $15/mo
+
+Beam.cloud runs our document ingest queue, and a few supporting functions for [AI Tool use](../features/tool-use-in-conversation.md#tools-demo).&#x20;
+
+<figure><img src="../.gitbook/assets/CleanShot 2025-04-07 at 13.01.06.png" alt=""><figcaption></figcaption></figure>
+
+
+
+### Databases
+
+#### Postgres on Supabase: $49/mo (trending upwards).
+
+We upgraded from the "Small" to "Medium" instance in Febuaruy 2025. Still, it seems a little under-sized for our needs and occasionally locks up under heavy load.
+
+I’m falling out of love with Supabase. (1) It “locks up” under heavy load, e.g. a user exporting their files while another user adds tons of new file uploads. (2) Using their (optional) SDK creates vendor lock-in. (3) The pricing is good, better than most, but only on-par with AWS Aurora RDS. I’d use managed AWS RDS in the future, or self hosted vanilla Postgres + PGBouncer.&#x20;
+
+<figure><img src="../.gitbook/assets/CleanShot 2025-04-07 at 12.37.57.png" alt=""><figcaption><p>Supabase billing history. Average $49/mo.</p></figcaption></figure>
+
+<figure><img src="../.gitbook/assets/CleanShot 2025-04-07 at 12.41.25.png" alt=""><figcaption><p>Supabase latest bill, broken down by category. The negitive numbers come from "included usage" on the Pro Plan.</p></figcaption></figure>
+
+#### Vector DB: $329 (with credits, trending down)
+
+Hosted on AWS EC2 `i3en.xlarge` with all data stored in-memory - this is not the most cost effective. Using AWS credits supplied to the [Center for AI Innovation](https://ai.ncsa.illinois.edu/).
+
+We're going to move this somewhere else more cost effective.&#x20;
+
+#### Redis
+
+Purchased via Redis Cloud on AWS Marketplace, just a flat rate $5/mo. Using AWS credits supplied to the [Center for AI Innovation](https://ai.ncsa.illinois.edu/).
+
+#### AWS S3 ($25/mo)
+
+This ranges from $10-$30/mo, depending on egress costs.
+
+### Newsletter $16/mo
+
+Mailgun + Ghost (self hosted) powers news.uiuc.chat. Mailgun is the only supported provider for Ghost, we pay Mailgun a base of $15/mo + usage, averaging $16/mo.&#x20;
+
+### Nomic Atlas $100/mo
+
+A fantastic startup creating visualizations of embedding spaces. We use this to (1) visualize all the documents a user has uploaded and (2) visualize all the conversations in each chatbot. Both have great filtering, search, clutering, hierarchical topic labeling. It's pretty great. They give us $100/mo education pricing.
+
+## Total costs
+
+| Service             | $/mo  | Notes                                                                        |
+| ------------------- | ----- | ---------------------------------------------------------------------------- |
+| Frontend            | $30   |                                                                              |
+| Backend             | $82   |                                                                              |
+| Databases           | $439  | $329 is Qdrant, which we're moving somewhere cheaper.                        |
+| Supporting services | $116  | Mailgun + Nomic Atlas.                                                       |
+| **Total**           | $667  | Soon to be $367 w/ cheaper Qdrant. Largest costs are covered by AWS credits. |
+
+
+
+<details>
+
+<summary>Costs when we were first starting (as of July 2024): </summary>
 
 ### Language modeling
 
@@ -67,4 +153,12 @@ The frontend is React on Next.js, hosted on Vercel. We're still comfortably insi
 | Services              | $99            |
 | --------------------- | -------------  |
 | TOTAL                 | $359/mo        |
+
+
+
+
+
+</details>
+
+
 

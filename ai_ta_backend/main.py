@@ -144,11 +144,13 @@ def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorI
   user_email: str = data.get('user_email', None)
   model_name: str = data.get('model_name', None)
 
-  if course_name == '':
+  if course_name == '' or conversation_id == '':
     # proper web error "400 Bad request"
-    abort(400,
-          description=
-          f"Missing one or more required parameters: 'course_name' must be provided. Course name: `{course_name}`")
+    abort(
+        400,
+        description=
+        f"Missing one or more required parameters: 'course_name' and 'conversation_id' must be provided. Course name: `{course_name}`, Conversation ID: `{conversation_id }`"
+    )
 
   flaskExecutor.submit(service.llm_monitor_message, course_name, conversation_id, user_email, model_name)
   response = jsonify({"outcome": "Task started"})
@@ -559,21 +561,21 @@ def switch_workflow(service: WorkflowService) -> Response:
 
 @app.route('/getConversationStats', methods=['GET'])
 def get_conversation_stats(service: RetrievalService) -> Response:
-    """
+  """
     Retrieves statistical metrics about conversations for a specific course.
     """
-    course_name = request.args.get('course_name', default='', type=str)
-    from_date = request.args.get('from_date', default='', type=str)
-    to_date = request.args.get('to_date', default='', type=str)
+  course_name = request.args.get('course_name', default='', type=str)
+  from_date = request.args.get('from_date', default='', type=str)
+  to_date = request.args.get('to_date', default='', type=str)
 
-    if course_name == '':
-        abort(400, description="Missing required parameter: 'course_name' must be provided.")
+  if course_name == '':
+    abort(400, description="Missing required parameter: 'course_name' must be provided.")
 
-    conversation_stats = service.getConversationStats(course_name, from_date, to_date)
+  conversation_stats = service.getConversationStats(course_name, from_date, to_date)
 
-    response = jsonify(conversation_stats)
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    return response
+  response = jsonify(conversation_stats)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route('/run_flow', methods=['POST'])

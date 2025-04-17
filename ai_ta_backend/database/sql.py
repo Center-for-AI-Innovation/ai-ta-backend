@@ -362,7 +362,7 @@ class SQLDatabase:
   def getMessagesFromConvoID(self, convo_id):
     return self.supabase_client.table("messages").select("*").eq("conversation_id", convo_id).limit(500).execute()
 
-  def updateMessageFromLlmMonitor(self, convo_id, llm_monitor_tags):
+  def updateMessageFromLlmMonitor(self, message_id, llm_monitor_tags):
     return self.supabase_client.table("messages").update({
         "llm-monitor-tags": llm_monitor_tags
-    }).eq("conversation_id", convo_id).execute()
+    }).eq("id", message_id).execute()
