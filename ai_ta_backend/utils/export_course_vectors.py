@@ -1,10 +1,14 @@
 """
 USAGE
-Output to file:
-python export_course_vectors.py "cropwizard-1.5" output.json
+Export vectors for a course to a JSON file:
+python export_course_vectors.py "course_name" output.json
 
-Output to STDOUT:
-python export_course_vectors.py "cropwizard-1.5"
+Example:
+python export_course_vectors.py "cropwizard-1.5" vectors.json
+
+This utility exports vector embeddings and their associated metadata from Qdrant 
+for a specific course. The data is exported as a JSON file containing an array of 
+objects with id, vector, and payload fields.
 """
 import os
 import sys
