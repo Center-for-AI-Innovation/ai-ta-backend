@@ -1,0 +1,17 @@
+:6969 {
+    reverse_proxy {
+        to https://grobid-cn064.kastan.ai https://grobid.kastan.ai
+        lb_policy round_robin
+        header_up Host {http.reverse_proxy.upstream.hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_down Strict-Transport-Security max-age=0
+        transport http {
+            tls_insecure_skip_verify
+            read_buffer 100MB
+            response_header_timeout 120s
+            dial_timeout 120s
+        }
+    }
+}
