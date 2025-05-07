@@ -229,6 +229,9 @@ class RetrievalService:
         'S12': 'Sexual Content',
         'S13': 'Elections'
     }
+    
+    # Categories to exclude from triggering alerts (Privacy, Defamation, and Specialized Advice, and Elections)
+    excluded_categories = {'S5', 'S6', 'S7', 'S13'}
 
     # Analyze each message using LLM
     for message in messages:
@@ -247,18 +250,24 @@ class RetrievalService:
       # Prepare default LLM monitor tags
       llm_monitor_tags = {"llm_monitor_model": llm_monitor_model}
 
+      # Identify triggered categories
+      triggered_categories = []
+      for category_code, category_name in safety_categories.items():
+          if category_code in response_content:
+              triggered_categories.append(category_name)
+      
+      # Analyze if the message should be considered unsafe for alerting
+      alert_categories = [cat for cat, code in zip(triggered_categories, 
+                           [code for code in safety_categories.keys() if safety_categories[code] in triggered_categories]) 
+                           if code not in excluded_categories]
+      
       # Assign tags to unsafe messages and send email when necessary
-      if 'unsafe' in response_content.lower():
+      if 'unsafe' in response_content.lower() and alert_categories:
         llm_monitor_tags["status"] = "unsafe"
-        # Identify and store triggered categories
-        llm_monitor_tags["triggered_categories"] = [
-            category_name for category_code, category_name in safety_categories.items()
-            if category_code in response_content
-        ]
+        llm_monitor_tags["triggered_categories"] = triggered_categories
 
-        # Prepare alert email if unsafe
-        alert_details = llm_monitor_tags.get("triggered_categories", [])
-        if alert_details:
+        # Prepare alert email only if there are non-excluded categories
+        if alert_categories:
           alert_body = "\n".join([
               "LLM Monitor Alert",
               "------------------------",
@@ -269,16 +278,16 @@ class RetrievalService:
               f"Convo ID: {conversation_id}",
               "------------------------",
               f"Responsible Role: {message.get('role')}",
-              f"Categories: {', '.join(alert_details)}",
+              f"Categories: {', '.join(alert_categories)}",
               "------------------------",
               f"Message Content:\n{json.dumps(message_content, indent=2)}",
               "",
           ])
 
           message_id = message.get('id')
-          # print(f"LLM Monitor Alert Triggered! Message ID: {message_id}")
+          print(f"LLM Monitor Alert Triggered! Message ID: {message_id}")
 
-          send_email(subject=f"LLM Monitor Alert - {', '.join(alert_details)}",
+          send_email(subject=f"LLM Monitor Alert - {', '.join(alert_categories)}",
                      body_text=alert_body,
                      sender="hi@uiuc.chat",
                      recipients=["kvday2@illinois.edu", "hbroome@illinois.edu", "rohan13@illinois.edu"],
