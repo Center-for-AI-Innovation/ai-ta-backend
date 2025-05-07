@@ -46,6 +46,12 @@ sentry-sdk==1.39.1
 
 ollama==0.4.7
 
+langchain_community==0.0.20
+langchain_core==0.1.23
+langchain_openai==0.0.6
+langgraph==0.0.24
+python-dotenv==1.0.1
+
 # Not currently supporting coursera ingest
 # cs-dlp @ git+https://github.com/raffaem/cs-dlp.git@0.12.0b0 # previously called coursera-dl
 

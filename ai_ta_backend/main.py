@@ -5,6 +5,7 @@ import time
 from typing import List
 
 from dotenv import load_dotenv
+from ai_ta_backend.beam.WARM_ai_agent.warm_ai.agents.sql_agent import SQLAIAgent
 from flask import (
     Flask,
     Response,
@@ -747,6 +748,226 @@ def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
   return response
 
 
+"""
+Example CURL request (for local testing):
+
+curl -X POST \
+  http://localhost:8000/api/chat-api/warm-ai \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "what is the temperature in champaign?"}'
+"""
+
+@app.route('/api/chat-api/warm-ai', methods=['POST'])
+def warm_ai_endpoint(service: RetrievalService, posthog_service: PosthogService):
+    """
+    WARM AI endpoint for natural language to SQL queries
+    """
+    try:
+        data = request.get_json()
+        
+        # Load environment variables if needed
+        load_dotenv()
+        
+        # Build connection string from environment variables
+        connection_str = (
+            f"Driver={os.getenv('DB_DRIVER')};"
+            f"Server={os.getenv('DB_SERVER')};"
+            f"Database={os.getenv('DB_NAME')};"
+            f"Authentication=ActiveDirectoryIntegrated;"
+            "Encrypt=yes;"
+            f"TrustServerCertificate={os.getenv('DB_TRUST_SERVER_CERT')};"
+        )
+        
+        openai_key = os.getenv('VIKRAM_OPENAI_API_KEY')
+                 
+        # Initialize agent and process query
+        agent = SQLAIAgent(connection_str, openai_key)
+        agent.connect()
+        results = agent.query(data.get('query', ''))
+            
+        response = jsonify({"response": results})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
+    finally:
+      print("done")
+      
+@app.route('/warm-ai-demo')
+def warm_ai_demo():
+    """Serves a simple HTML page for testing the warm-ai endpoint with UIUC brand colors"""
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>WARM AI Demo</title>
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <style>
+            :root {
+                /* Primary Colors */
+                --illini-orange: #FF5F05;
+                --illini-blue: #13294B;
+                
+                /* Secondary Colors (Storm) */
+                --storm-70: #707372;
+                --storm-40: #9C9A9D;
+                --storm-20: #C8C6C7;
+                --white: #FFFFFF;
+            }
+            
+            body { 
+                font-family: Arial, sans-serif; 
+                max-width: 800px; 
+                margin: 40px auto; 
+                padding: 0 20px;
+                background-color: var(--white);
+                color: var(--illini-blue);
+            }
+            
+            h1 {
+                color: var(--illini-blue);
+                border-bottom: 3px solid var(--illini-orange);
+                padding-bottom: 10px;
+            }
+            
+            .container { 
+                display: flex; 
+                flex-direction: column; 
+                gap: 20px; 
+            }
+            
+            textarea { 
+                width: 100%; 
+                height: 100px; 
+                padding: 10px; 
+                font-size: 16px;
+                border: 2px solid var(--storm-20);
+                border-radius: 4px;
+                color: var(--illini-blue);
+            }
+            
+            textarea:focus {
+                outline: none;
+                border-color: var(--illini-orange);
+            }
+            
+            button { 
+                padding: 12px 24px; 
+                background: var(--illini-orange);
+                color: var(--white);
+                border: none; 
+                border-radius: 4px; 
+                cursor: pointer; 
+                font-size: 16px;
+                font-weight: bold;
+                transition: background-color 0.2s;
+            }
+            
+            button:hover { 
+                background: #E45504; /* Slightly darker orange */
+            }
+            
+            #response { 
+                background: #F8F9FA; /* Much lighter background */
+                padding: 20px; 
+                border-radius: 4px;
+                font-size: 16px;
+                line-height: 1.5;
+                color: var(--illini-blue);
+                border: 1px solid var(--storm-20); /* Adding subtle border */
+            }
+            
+            .loading { 
+                display: none; 
+                color: var(--storm-70);
+                font-size: 16px;
+                text-align: center;
+                padding: 10px;
+            }
+            
+            /* Markdown styling */
+            #response strong {
+                color: var(--illini-orange);
+            }
+            
+            #response ul {
+                padding-left: 20px;
+            }
+            
+            #response li {
+                margin: 8px 0;
+            }
+            
+            #response p {
+                margin: 16px 0;
+            }
+            
+            #response code {
+                background: var(--white);
+                padding: 2px 4px;
+                border-radius: 3px;
+                font-family: monospace;
+                border: 1px solid var(--storm-20);
+            }
+            
+            #response pre {
+                background: var(--white);
+                padding: 15px;
+                border-radius: 4px;
+                overflow-x: auto;
+                border: 1px solid var(--storm-20);
+            }
+            
+            #response a {
+                color: var(--illini-blue);
+                text-decoration: underline;
+            }
+            
+            #response a:hover {
+                color: var(--illini-orange);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>WARM AI Query Demo</h1>
+            <p>Enter your query below to test the WARM AI endpoint:</p>
+            <textarea id="query" placeholder="Enter your query here...">what is the temperature in champaign?</textarea>
+            <button onclick="sendQuery()">Send Query</button>
+            <div class="loading" id="loading">Processing query...</div>
+            <div id="response"></div>
+        </div>
+
+        <script>
+            async function sendQuery() {
+                const query = document.getElementById('query').value;
+                const loading = document.getElementById('loading');
+                const responseDiv = document.getElementById('response');
+                
+                loading.style.display = 'block';
+                responseDiv.innerHTML = '';
+                
+                try {
+                    const response = await fetch('/api/chat-api/warm-ai', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ query: query })
+                    });
+                    
+                    const data = await response.json();
+                    // Use marked to parse markdown
+                    responseDiv.innerHTML = marked.parse(data.response.results.output);
+                } catch (error) {
+                    responseDiv.textContent = 'Error: ' + error.message;
+                } finally {
+                    loading.style.display = 'none';
+                }
+            }
+        </script>
+    </body>
+    </html>
+    '''
+        
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(ProcessPoolExecutorInterface, to=ProcessPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
