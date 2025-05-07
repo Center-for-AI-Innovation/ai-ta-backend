@@ -45,6 +45,8 @@ from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
 from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
 
+from ai_ta_backend.utils.cw_datamining import extract_article_metadata
+
 app = Flask(__name__)
 CORS(app)
 executor = Executor(app)
@@ -619,6 +621,22 @@ def run_flow(service: WorkflowService) -> Response:
       response.status_code = 500
       response.headers.add('Access-Control-Allow-Origin', '*')
       return response
+    
+@app.route('/nal-data-mining', methods=['GET'])
+def nal_data_mining() -> Response:
+  """
+  Queries NAL website with keywords to extract article data.
+  """
+  search_query: str = request.args.get('search_query', default='', type=str)
+
+  if search_query == '':
+    # proper web error "400 Bad request"
+    abort(400, description=f"Missing required parameter: 'search_query' must be provided. Search query: `{search_query}`")
+  
+  result = extract_article_metadata(search_query)
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route('/createProject', methods=['POST'])
