@@ -1,0 +1,315 @@
+protocolSection
+  identificationModule
+    nctId
+      - NCT03611127
+    orgStudyIdInfo
+      id
+        - ESR_15_11404_SHOUKRI
+    organization
+      fullName
+        - Ain Shams University
+      class
+        - OTHER
+    briefTitle
+      - The Impact of Early Pulmonary Rehabilitation on Multidimensional Aspect of Dyspnea in COPD Patients After Exacerbation
+    officialTitle
+      - The Impact of Early Pulmonary Rehabilitation on the Multidimensional Aspects of Dyspnea and Exercise Performance Following Acute Exacerbation of Chronic Obstructive Pulmonary Disease
+  statusModule
+    statusVerifiedDate
+      - 2018-07
+    overallStatus
+      - COMPLETED
+    expandedAccessInfo
+      hasExpandedAccess
+        - False
+    startDateStruct
+      date
+        - 2016-04-15
+      type
+        - ACTUAL
+    primaryCompletionDateStruct
+      date
+        - 2017-08-20
+      type
+        - ACTUAL
+    completionDateStruct
+      date
+        - 2017-08-20
+      type
+        - ACTUAL
+    studyFirstSubmitDate
+      - 2018-07-10
+    studyFirstSubmitQcDate
+      - 2018-07-31
+    studyFirstPostDateStruct
+      date
+        - 2018-08-02
+      type
+        - ACTUAL
+    lastUpdateSubmitDate
+      - 2018-07-31
+    lastUpdatePostDateStruct
+      date
+        - 2018-08-02
+      type
+        - ACTUAL
+  sponsorCollaboratorsModule
+    responsibleParty
+      type
+        - PRINCIPAL_INVESTIGATOR
+      investigatorFullName
+        - Amr Shoukri
+      investigatorTitle
+        - Associate Professor of Pulmonary medicine
+      investigatorAffiliation
+        - Ain Shams University
+    leadSponsor
+      name
+        - Ain Shams University
+      class
+        - OTHER
+  oversightModule
+    isFdaRegulatedDrug
+      - False
+    isFdaRegulatedDevice
+      - False
+  descriptionModule
+    briefSummary
+      - Acute exacerbations of chronic obstructive pulmonary disease (AECOPD) are associated with severe dyspnea and exercise intolerance. Early pulmonary rehabilitation (EPR) may lead to improvements in dyspnea and exercise tolerance, as it does in stable COPD patients.
+    detailedDescription
+      - One hundred and six patients admitted in a university hospital with AECOPD were randomized after discharge to either EPR for 8 weeks (EPR group) or usual care (UC) (UC group). All patients carried out the following initially and after 8 weeks: spirometry, 6minute walk test (SMWT), and a symptom-limited incremental cycle cardiopulmonary exercise test (CPET), and different dyspnea dimensions evaluation as following: Dyspnea intensity during incremental exercise using Borg scale, dyspnea 12 questionnaire and COPD assessment test (CAT) to assess sensory perceptual, affective distress, and symptom impact domains respectively.
+  conditionsModule
+    conditions
+      - Chronic Obstructive Pulmonary Disease
+  designModule
+    studyType
+      - INTERVENTIONAL
+    phases
+      - NA
+    designInfo
+      allocation
+        - RANDOMIZED
+      interventionModel
+        - PARALLEL
+      primaryPurpose
+        - TREATMENT
+      maskingInfo
+        masking
+          - NONE
+    enrollmentInfo
+      count
+        - 80
+      type
+        - ACTUAL
+  armsInterventionsModule
+    armGroups
+      label
+        - early pulmonary rehabilitation (EPR)
+      type
+        - EXPERIMENTAL
+      description
+        - early pulmonary rehabilitation started shortly after hospital discharge for COPD exacerbation.
+      interventionNames
+        - Other: pulmonary rehabilitation
+      label
+        - Usual care (UC)
+      type
+        - NO_INTERVENTION
+      description
+        - No pulmonary rehabilitation for this group
+    interventions
+      type
+        - OTHER
+      name
+        - pulmonary rehabilitation
+      description
+        - pulmonary rehabilitation standardized program
+      armGroupLabels
+        - early pulmonary rehabilitation (EPR)
+  outcomesModule
+    primaryOutcomes
+      measure
+        - change in different aspects of dyspnea (dyspnea 12 questionnaire: scale range 0-36, with high score indicating worse dyspnea, and COPD assessment test: scale range 0-40, high score indicating worse dyspnea).
+      description
+        - dyspnea questionnaires
+      timeFrame
+        - 8 weeks
+      measure
+        - change in exercise performance (borg scale during incremental exercise measuring the perceived dyspnea: scale 0-10, higher score indicating worse performance
+      description
+        - cardiopulmonary exercise tests
+      timeFrame
+        - 8 weeks
+      measure
+        - change in exercise performance (test duration: longer duration measured in seconds indicating better performance)
+      description
+        - cardiopulmonary exercise tests
+      timeFrame
+        - 8 weeks
+      measure
+        - change in exercise performance (Peak oxygen consumption: Higher values indicating better performance)
+      description
+        - cardiopulmonary exercise tests
+      timeFrame
+        - 8 weeks
+  eligibilityModule
+    eligibilityCriteria
+      - Inclusion Criteria:
+
+* Hospitalized COPD patients with a diagnosis of AECOPD with no clinically significant arterial hypoxemia at rest or on exercise (resting percutaneous oxygen saturation (SpO2) \> 90% or a sustained decrease of \< 4% during exercise) were recruited. Diagnosis of COPD, AECOPD and spirometric assessment of airflow limitation severity was based on Global Initiative for Chronic Obstructive Lung Disease (GOLD)
+
+Exclusion Criteria:
+
+* Patients with a prior diagnosis of other cardiorespiratory conditions (i.e., bronchial asthma, interstitial lung diseases, primary pulmonary hypertension, chronic congestive heart failure), as well as other conditions such as orthopedic, muscular and peripheral vascular diseases that could cause or contribute to breathlessness and exercise intolerance and/or could interfere with carrying out of exercise testing, were excluded.
+    healthyVolunteers
+      - False
+    sex
+      - MALE
+    stdAges
+      - CHILD
+      - ADULT
+      - OLDER_ADULT
+  ipdSharingStatementModule
+    ipdSharing
+      - NO
+derivedSection
+  miscInfoModule
+    versionHolder
+      - 2025-04-17
+  conditionBrowseModule
+    meshes
+      id
+        - D008171
+      term
+        - Lung Diseases
+      id
+        - D008173
+      term
+        - Lung Diseases, Obstructive
+      id
+        - D029424
+      term
+        - Pulmonary Disease, Chronic Obstructive
+      id
+        - D004417
+      term
+        - Dyspnea
+    ancestors
+      id
+        - D012140
+      term
+        - Respiratory Tract Diseases
+      id
+        - D002908
+      term
+        - Chronic Disease
+      id
+        - D020969
+      term
+        - Disease Attributes
+      id
+        - D010335
+      term
+        - Pathologic Processes
+      id
+        - D012120
+      term
+        - Respiration Disorders
+      id
+        - D012818
+      term
+        - Signs and Symptoms, Respiratory
+    browseLeaves
+      id
+        - M11170
+      name
+        - Lung Diseases, Obstructive
+      asFound
+        - Obstructive Pulmonary Disease
+      relevance
+        - HIGH
+      id
+        - M23449
+      name
+        - Pulmonary Disease, Chronic Obstructive
+      asFound
+        - Chronic Obstructive Pulmonary Disease
+      relevance
+        - HIGH
+      id
+        - M11168
+      name
+        - Lung Diseases
+      asFound
+        - Pulmonary Disease
+      relevance
+        - HIGH
+      id
+        - M7591
+      name
+        - Dyspnea
+      asFound
+        - Dyspnea
+      relevance
+        - HIGH
+      id
+        - M14977
+      name
+        - Respiratory Tract Diseases
+      relevance
+        - LOW
+      id
+        - M6147
+      name
+        - Chronic Disease
+      relevance
+        - LOW
+      id
+        - M22700
+      name
+        - Disease Attributes
+      relevance
+        - LOW
+      id
+        - M14957
+      name
+        - Respiration Disorders
+      relevance
+        - LOW
+      id
+        - M15623
+      name
+        - Signs and Symptoms, Respiratory
+      relevance
+        - LOW
+      id
+        - T1303
+      name
+        - Chronic Graft Versus Host Disease
+      relevance
+        - LOW
+      id
+        - T170
+      name
+        - Acute Graft Versus Host Disease
+      relevance
+        - LOW
+    browseBranches
+      abbrev
+        - BC08
+      name
+        - Respiratory Tract (Lung and Bronchial) Diseases
+      abbrev
+        - All
+      name
+        - All Conditions
+      abbrev
+        - BC23
+      name
+        - Symptoms and General Pathology
+      abbrev
+        - Rare
+      name
+        - Rare Diseases
+hasResults
+  - False
