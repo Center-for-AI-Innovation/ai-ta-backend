@@ -64,6 +64,45 @@ def export_vectors_for_course(course_name, output_path=None):
     else:
         print(json.dumps(all_vectors, indent=2))
 
+def export_vectors_for_course_api(course_name):
+    """API-friendly wrapper for export_vectors_for_course. Returns the vectors as a list of dicts."""
+    load_dotenv()
+    client = QdrantClient(
+        url=os.environ['QDRANT_URL'],
+        port=6333,
+        https=False,
+        api_key=os.environ['QDRANT_API_KEY']
+    )
+    collection_name = os.environ['QDRANT_COLLECTION_NAME']
+    offset = None
+    batch_size = 1000
+    all_vectors = []
+    while True:
+        res = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=models.Filter(must=[
+                models.FieldCondition(
+                    key="course_name",
+                    match=models.MatchValue(value=course_name)
+                ),
+            ]),
+            limit=batch_size,
+            with_payload=True,
+            with_vectors=True,
+            offset=offset
+        )
+        points = res[0]
+        for point in points:
+            all_vectors.append({
+                "id": point.id,
+                "vector": point.vector,
+                "payload": point.payload
+            })
+        offset = res[1]
+        if offset is None:
+            break
+    return all_vectors
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python export_course_vectors.py <course_name> [output_path]")

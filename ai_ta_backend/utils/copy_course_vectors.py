@@ -34,20 +34,39 @@ def load_failed_points():
     with open(FAILED_POINTS_LOG, "r") as f:
         return json.load(f)
 
-def copy_course_vectors(source_course, destination_course, retry_failed=False):
+def get_qdrant_client(url=None, api_key=None):
     load_dotenv()
-    try:
-        client = QdrantClient(
-            url=os.environ['QDRANT_URL'],
-            port=6333,
-            https=False,
-            api_key=os.environ['QDRANT_API_KEY']
-        )
-        collection_name = os.environ['QDRANT_COLLECTION_NAME']
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize Qdrant client: {e}")
-        sys.exit(2)
+    qdrant_url = url or os.environ.get('QDRANT_URL')
+    qdrant_api_key = api_key or os.environ.get('QDRANT_API_KEY')
+    if not qdrant_url or not qdrant_api_key:
+        print("Error: QDRANT_URL and QDRANT_API_KEY must be set in env or provided as arguments.")
+        sys.exit(1)
+    return QdrantClient(
+        url=qdrant_url,
+        port=6333,
+        https=False,
+        api_key=qdrant_api_key
+    )
 
+def vector_exists(qdrant_client, collection_name, course_name, readable_filename, chunk_index):
+    """Check if a vector with the same readable_filename, chunk_index, and course_name exists in the destination collection."""
+    res = qdrant_client.scroll(
+        collection_name=collection_name,
+        scroll_filter=models.Filter(must=[
+            models.FieldCondition(key="course_name", match=models.MatchValue(value=course_name)),
+            models.FieldCondition(key="readable_filename", match=models.MatchValue(value=readable_filename)),
+            models.FieldCondition(key="chunk_index", match=models.MatchValue(value=chunk_index)),
+        ]),
+        limit=1,
+        with_payload=False,
+        with_vectors=False,
+    )
+    return bool(res[0])
+
+def copy_course_vectors(source_course, destination_course, retry_failed=False, source_url=None, source_key=None, dest_url=None, dest_key=None):
+    source_client = get_qdrant_client(source_url, source_key)
+    destination_client = get_qdrant_client(dest_url, dest_key)
+    collection_name = os.environ['QDRANT_COLLECTION_NAME']
     batch_size = 1000
     total_copied = 0
     failed_batches = []
@@ -61,7 +80,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
         for batch_info in failed_batches:
             offset = batch_info["offset"]
             try:
-                res = client.scroll(
+                res = source_client.scroll(
                     collection_name=collection_name,
                     scroll_filter=models.Filter(must=[
                         models.FieldCondition(
@@ -77,6 +96,11 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
                 points = res[0]
                 new_points = []
                 for point in points:
+                    readable_filename = point.payload.get("readable_filename")
+                    chunk_index = point.payload.get("chunk_index")
+                    if vector_exists(destination_client, collection_name, destination_course, readable_filename, chunk_index):
+                        print(f"Skipping existing vector: {readable_filename} chunk {chunk_index} in {destination_course}")
+                        continue
                     new_payload = dict(point.payload)
                     new_payload["course_name"] = destination_course
                     new_id = str(uuid.uuid4())
@@ -87,12 +111,13 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
                             payload=new_payload
                         )
                     )
-                client.upsert(
-                    collection_name=collection_name,
-                    points=new_points,
-                    wait=True
-                )
-                total_copied += len(new_points)
+                if new_points:
+                    destination_client.upsert(
+                        collection_name=collection_name,
+                        points=new_points,
+                        wait=True
+                    )
+                    total_copied += len(new_points)
                 print(f"Retried and copied {len(new_points)} vectors for batch offset {offset}")
             except Exception as e:
                 print(f"[ERROR] Failed to retry batch at offset {offset}: {e}")
@@ -100,6 +125,11 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
         for point_info in failed_points:
             try:
                 point = point_info["point"]
+                readable_filename = point["payload"].get("readable_filename")
+                chunk_index = point["payload"].get("chunk_index")
+                if vector_exists(destination_client, collection_name, destination_course, readable_filename, chunk_index):
+                    print(f"Skipping existing vector: {readable_filename} chunk {chunk_index} in {destination_course}")
+                    continue
                 new_payload = dict(point["payload"])
                 new_payload["course_name"] = destination_course
                 new_id = str(uuid.uuid4())
@@ -108,7 +138,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
                     vector=point["vector"],
                     payload=new_payload
                 )
-                client.upsert(
+                destination_client.upsert(
                     collection_name=collection_name,
                     points=[np],
                     wait=True
@@ -125,7 +155,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
     batch_offsets = []
     while True:
         try:
-            res = client.scroll(
+            res = source_client.scroll(
                 collection_name=collection_name,
                 scroll_filter=models.Filter(must=[
                     models.FieldCondition(
@@ -150,6 +180,11 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
         new_points = []
         for point in points:
             try:
+                readable_filename = point.payload.get("readable_filename")
+                chunk_index = point.payload.get("chunk_index")
+                if vector_exists(destination_client, collection_name, destination_course, readable_filename, chunk_index):
+                    print(f"Skipping existing vector: {readable_filename} chunk {chunk_index} in {destination_course}")
+                    continue
                 new_payload = dict(point.payload)
                 new_payload["course_name"] = destination_course
                 new_id = str(uuid.uuid4())
@@ -169,20 +204,20 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
                 }})
 
         try:
-            client.upsert(
-                collection_name=collection_name,
-                points=new_points,
-                wait=True
-            )
-            total_copied += len(new_points)
+            if new_points:
+                destination_client.upsert(
+                    collection_name=collection_name,
+                    points=new_points,
+                    wait=True
+                )
+                total_copied += len(new_points)
             print(f"Copied {total_copied} vectors so far...")
         except Exception as e:
             print(f"[ERROR] Failed to upsert batch {batch_idx} (offset {offset}): {e}")
             failed_batches.append({"batch_idx": batch_idx, "offset": offset})
-            # Optionally, try to upsert points one by one to isolate failures
             for np, orig_point in zip(new_points, points):
                 try:
-                    client.upsert(
+                    destination_client.upsert(
                         collection_name=collection_name,
                         points=[np],
                         wait=True
@@ -211,11 +246,47 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False):
     if failed_batches or failed_points:
         sys.exit(3)
 
+def copy_course_vectors_api(
+    source_course,
+    destination_course,
+    retry_failed=False,
+    source_url=None,
+    source_key=None,
+    dest_url=None,
+    dest_key=None
+):
+    """API-friendly wrapper for copy_course_vectors. Returns a dict with status/results."""
+    try:
+        copy_course_vectors(
+            source_course,
+            destination_course,
+            retry_failed=retry_failed,
+            source_url=source_url,
+            source_key=source_key,
+            dest_url=dest_url,
+            dest_key=dest_key
+        )
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 if __name__ == "__main__":
-    if len(sys.argv) not in [3, 4]:
-        print("Usage: python copy_course_vectors.py <source_course> <destination_course> [--retry-failed]")
-        sys.exit(1)
-    source_course = sys.argv[1]
-    destination_course = sys.argv[2]
-    retry_failed = len(sys.argv) == 4 and sys.argv[3] == "--retry-failed"
-    copy_course_vectors(source_course, destination_course, retry_failed=retry_failed)
+    import argparse
+    parser = argparse.ArgumentParser(description="Copy course vectors from one course to another in Qdrant.")
+    parser.add_argument("source_course", type=str, help="Source course name")
+    parser.add_argument("destination_course", type=str, help="Destination course name")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry failed batches/points from previous run")
+    parser.add_argument("--source-url", type=str, help="Source Qdrant URL (overrides env)")
+    parser.add_argument("--source-key", type=str, help="Source Qdrant API Key (overrides env)")
+    parser.add_argument("--destination-url", type=str, help="Destination Qdrant URL (overrides env)")
+    parser.add_argument("--destination-key", type=str, help="Destination Qdrant API Key (overrides env)")
+    args = parser.parse_args()
+    copy_course_vectors(
+        args.source_course,
+        args.destination_course,
+        retry_failed=args.retry_failed,
+        source_url=args.source_url,
+        source_key=args.source_key,
+        dest_url=args.destination_url,
+        dest_key=args.destination_key
+    )
