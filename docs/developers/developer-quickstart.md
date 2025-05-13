@@ -6,7 +6,7 @@ description: Thanks for contributing to UIUC.chat ❤️
 
 ## Start here
 
-* [ ] Send me (kvday2@illinois.edu) an email and request to be added to:
+* [ ] Send me (rohan13@illinois.edu) an email and request to be added to:
   * [GitHub Organization](https://github.com/UIUC-Chatbot) & [Frontend repo](https://github.com/CAII-NCSA/uiuc-chat-frontend), <mark style="color:yellow;">include your GitHub username</mark>.
   * [Secrets manager](https://env.ncsa.ai/), <mark style="color:yellow;">include your preferred email address</mark>.
   * Supabase dashboard, <mark style="color:yellow;">include your GitHub's email address</mark>.
@@ -246,4 +246,4 @@ Now you can write new endpoints in `ai-ta-backend/main.py` and call them using [
 
 
 
-Thanks! For any questions at all just email me (kvday2@illinois.edu). I'm friendly, promise.
+Thanks! For any questions at all just email me (rohan13@illinois.edu).

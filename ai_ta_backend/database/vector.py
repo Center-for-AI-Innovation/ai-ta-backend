@@ -83,48 +83,60 @@ class VectorDatabase():
 
     return search_results
 
+  def patents_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
+                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
+    """
+    Search the vector database for a given query.
+    """
+    top_n = 120
+
+    search_results = self.vyriad_qdrant_client.search(
+        collection_name='patents',  # Patents embeddings
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,  # Return n closest points
+    )
+
+    # Post-process the Qdrant results, format the results
+    try:
+      updated_results = []
+      for result in search_results:
+        result.payload['page_content'] = result.payload['text']
+        result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
+        result.payload['course_name'] = course_name
+        result.payload['url'] = result.payload['uspto_url']
+        result.payload['s3_path'] = result.payload['s3_path']
+        updated_results.append(result)
+      return updated_results
+
+    except Exception as e:
+      print(f"Error in patents_vector_search: {e}")
+      return []
+
   def pubmed_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
     Search the vector database for a given query.
     """
-    # top_n = 10
     # Search the vector database
     search_results = self.vyriad_qdrant_client.search(
-        collection_name='embedding',  # Pubmed embeddings
+        collection_name='pubmed',  # Pubmed embeddings
         with_vectors=False,
         query_vector=user_query_embedding,
         limit=120,  # Return n closest points
     )
 
-    # Post-process the Qdrant results (hydrate the vectors with the full text from SQL)
+    # Post process the Qdrant results, format the results
     try:
-      # Get context IDs from search results
-      context_ids = [result.payload['context_id'] for result in search_results]
-
-      # Call API to get text for all context IDs in bulk
-      api_url = "https://pubmed-db-query.kastan.ai/getTextFromContextIDBulk"
-      response = requests.post(api_url, json={"ids": context_ids}, timeout=30)
-
-      if not response.ok:
-        print(f"Error in retrieving Pubmed text details: {response.status_code}")
-        return []
-      else:
-        # Create mapping of context_id to text from response
-        context_texts = response.json()
-
-        # Update search results with texts from bulk response
-        updated_results = []
-        for result in search_results:
-          context_id = result.payload['context_id']
-          if context_id in context_texts:
-            result.payload['page_content'] = context_texts[context_id]['page_content']
-            result.payload['readable_filename'] = context_texts[context_id]['readable_filename']
-            result.payload['s3_path'] = str(result.payload['minio_path']).replace('pubmed/', '')  # remove bucket name
-            result.payload['course_name'] = course_name
-            updated_results.append(result)
-
-        return updated_results
+      updated_results = []
+      for result in search_results:
+        result.payload['page_content'] = result.payload['page_content']
+        result.payload['readable_filename'] = result.payload['readable_filename']
+        result.payload['s3_path'] = result.payload['s3_path']
+        result.payload['pagenumber'] = result.payload['pagenumber']
+        result.payload['course_name'] = course_name
+        updated_results.append(result)
+      return updated_results
 
     except Exception as e:
       print(f"Error in pubmed_vector_search: {e}")
@@ -133,99 +145,57 @@ class VectorDatabase():
   def vyriad_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
-    Search the vector database for a given query.
+    Search the vector database for a given query, combining results from both pubmed and patents collections.
     """
+    top_n = 120
     # Search the pubmed vector database
-    search_results = self.vyriad_qdrant_client.search(
-        collection_name='embedding',  # Pubmed embeddings
+    pubmed_results = self.vyriad_qdrant_client.search(
+        collection_name='pubmed',
         with_vectors=False,
         query_vector=user_query_embedding,
-        limit=100,  # Return n closest points
+        limit=top_n,  # Return 50 closest points from pubmed
     )
 
-    # Post-process the Qdrant results (hydrate the vectors with the full text from SQL)
+    # Search the patents vector database
+    patents_results = self.vyriad_qdrant_client.search(
+        collection_name='patents',
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,  # Return 50 closest points from patents
+    )
+
     try:
-      # Get context IDs from search results
-      # context_ids = [result.payload['context_id'] for result in search_results]
+      # Process pubmed results
+      updated_pubmed_results = []
+      for result in pubmed_results:
+        result.payload['page_content'] = result.payload['page_content']
+        result.payload['readable_filename'] = result.payload['readable_filename']
+        result.payload['s3_path'] = result.payload['s3_path']
+        result.payload['pagenumber'] = result.payload['pagenumber']
+        result.payload['course_name'] = course_name
+        updated_pubmed_results.append(result)
 
-      # # Call API to get text for all context IDs in bulk
-      # api_url = "https://pubmed-db-query.kastan.ai/getTextFromContextIDBulk"
-      # response = requests.post(api_url, json={"ids": context_ids}, timeout=30)
+      # Process patents results
+      updated_patents_results = []
+      for result in patents_results:
+        result.payload['page_content'] = result.payload['text']
+        result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
+        result.payload['course_name'] = course_name
+        result.payload['url'] = result.payload['uspto_url']
+        result.payload['s3_path'] = result.payload['s3_path']
+        updated_patents_results.append(result)
 
-      # if not response.ok:
-      #   print(f"Error in retrieving Pubmed text details: {response.status_code}")
-      # else:
-        # # Create mapping of context_id to text from response
-        # context_texts = response.json()
+      # Combine results and limit to top_n
+      combined_results = updated_pubmed_results + updated_patents_results
 
-      # # Update search results with texts from bulk response
-      # updated_results = []
-      # for result in search_results:
-      #   context_id = result.payload['context_id']
-      #   if context_id in context_texts:
-      #     result.payload['page_content'] = context_texts[context_id]['page_content']
-      #     result.payload['readable_filename'] = context_texts[context_id]['readable_filename']
-      #     result.payload['s3_path'] = str(result.payload['minio_path']).replace('pubmed/', '')  # remove bucket name
-      #     result.payload['course_name'] = course_name
-      #     updated_results.append(result)
+      # Sort combined results by score (higher score = better match)
+      combined_results.sort(key=lambda x: x.score, reverse=True)
 
-      # # return updated_results
-
-      # # ----- Do Prime KG retrieval -----
-
-      # prime_kg_triplets = self.vyriad_qdrant_client.search(
-      #     collection_name='prime_kg_nomic',  # Pubmed embeddings
-      #     with_vectors=False,
-      #     query_vector=user_query_embedding,
-      #     limit=20,  # not so many KG triplets
-      # )
-
-      # for result in prime_kg_triplets:
-      #   result.payload['page_content'] = result.payload["triplet_string"]
-      #   result.payload['readable_filename'] = result.payload["triplet"]
-      #   result.payload['course_name'] = course_name
-
-      # ---- Add clinical KG context -----
-      updated_results = []
-      clinical_kg_docs = self.getKnowledgeGraphContexts(search_query) 
-      print(f"Clinical KG docs: {clinical_kg_docs}")
-      print(f"Clinical KG docs type: {type(clinical_kg_docs)}")
-
-      if clinical_kg_docs and 'result' in clinical_kg_docs:
-          clinical_kg_result = {
-              'id': hash("clinical_kg_" + search_query),  # Generate a unique ID
-              'version': 1,  # Default version number
-              'payload': {
-                  'page_content': clinical_kg_docs['result'],
-                  'readable_filename': "Clinical KG",
-                  'course_name': course_name
-              },
-              'score': 1.0  # Adding a default score
-          }
-          updated_results.append(models.ScoredPoint(**clinical_kg_result))
-
-      # ---- Add Prime KG context -----
-      prime_kg_docs = self.getPrimeKGContexts(search_query)
-      print(f"Prime KG docs: {prime_kg_docs}")
-      print(f"Prime KG docs type: {type(prime_kg_docs)}")
-
-      if prime_kg_docs and 'result' in prime_kg_docs:
-          prime_kg_result = {
-              'id': hash("prime_kg_" + search_query),  # Generate a unique ID
-              'version': 1,  # Default version number
-              'payload': {
-                  'page_content': prime_kg_docs['result'],
-                  'readable_filename': "Prime KG",
-                  'course_name': course_name
-              },
-              'score': 1.0  # Adding a default score
-          }
-          updated_results.append(models.ScoredPoint(**prime_kg_result))
-      print(f"Updated results: {updated_results}")
-      return updated_results
+      # Limit to top_n results
+      return combined_results
 
     except Exception as e:
-      print(f"Error in _vyriad_special_case: {e}")
+      print(f"Error in vyriad_vector_search: {e}")
       return []
 
   def _create_search_filter(self, course_name: str, doc_groups: List[str], admin_disabled_doc_groups: List[str],

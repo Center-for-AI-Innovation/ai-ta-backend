@@ -18,7 +18,7 @@ Now in UIUC.chat, you can create your own tools for the LLM to use seamlessly du
 
 Tools are invite-only during beta. Just shoot me an email and I'll send you an onboarding invite no problem. &#x20;
 
-`Email me: kvday2@illinois.edu`
+`Email me: rohan13@illinois.edu`
 
 I'm happy to onboard anyone. No need to justify anything, no calls required.&#x20;
 
@@ -111,15 +111,7 @@ Step 1: Capture the input params. We just need the `image_urls` field.
 
 Step 2: call a POST endpoint hosted on Beam. Auth is handled by an Authorization Header. The `body` uses the values from the last node as an input. No explicit return is necessary because we use the output of your last node as the return value of the tool. This works seamlessly across all the nodes offered by n8n.
 
-<div>
-
-<figure><img src="../.gitbook/assets/CleanShot 2024-06-26 at 17.51.52.png" alt=""><figcaption><p>HTTP</p></figcaption></figure>
-
- 
-
-<figure><img src="../.gitbook/assets/CleanShot 2024-06-26 at 17.52.26.png" alt=""><figcaption></figcaption></figure>
-
-</div>
+<div><figure><img src="../.gitbook/assets/CleanShot 2024-06-26 at 17.51.52.png" alt=""><figcaption><p>HTTP</p></figcaption></figure> <figure><img src="../.gitbook/assets/CleanShot 2024-06-26 at 17.52.26.png" alt=""><figcaption></figcaption></figure></div>
 
 ## Recommended patterns
 
