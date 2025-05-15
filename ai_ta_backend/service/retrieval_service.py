@@ -169,27 +169,27 @@ class RetrievalService:
           },
       )
 
-      primekg_result = self.getPrimeKGContexts(search_query)
-      if primekg_result and isinstance(primekg_result, dict) and "result" in primekg_result:
-          # You can customize the readable_filename and other fields as needed
-          primekg_context = {
-              "text": primekg_result["result"],
-              "readable_filename": "PrimeKG",
-              "course_name": course_name,
-              "s3_path": None,
-              "pagenumber": None,
-              "url": None,
-              "base_url": None,
-              "doc_groups": None,
-              "primekg_intermediate_steps": primekg_result.get("intermediate_steps"),
-              "primekg_query": primekg_result.get("query"),
-          }
-          # Append to the list of contexts
-          formatted = self.format_for_json(valid_docs)
+      # --- PrimeKG agent decision ---
+      primekg_context = None
+      if self.should_query_primekg(search_query):
+        primekg_result = self.getPrimeKGContexts(search_query)
+        if primekg_result and isinstance(primekg_result, dict) and "result" in primekg_result:
+            primekg_context = {
+                "text": primekg_result["result"],
+                "readable_filename": "PrimeKG",
+                "course_name": course_name,
+                "s3_path": None,
+                "pagenumber": None,
+                "url": None,
+                "base_url": None,
+                "doc_groups": None,
+                "primekg_intermediate_steps": primekg_result.get("intermediate_steps"),
+                "primekg_query": primekg_result.get("query"),
+            }
+      formatted = self.format_for_json(valid_docs)
+      if primekg_context:
           formatted.append(primekg_context)
-          return formatted
-      else:
-          return self.format_for_json(valid_docs)
+      return formatted
     except Exception as e:
       # return full traceback to front end
       # err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:\n{e}"  # type: ignore
@@ -826,3 +826,10 @@ class RetrievalService:
         print(f"Error in getPrimeKGContexts: {str(e)}")
         self.sentry.capture_exception(e)
         return {"result": "An error occurred while processing your knowledge graph query."}
+
+  def should_query_primekg(self, search_query: str) -> bool:
+    """
+    Simple agent to decide if PrimeKG should be queried based on keywords in the search query.
+    """
+    keywords = ["disease", "drug", "gene", "symptom", "side effect", "treatment", "primekg"]
+    return any(kw in search_query.lower() for kw in keywords)

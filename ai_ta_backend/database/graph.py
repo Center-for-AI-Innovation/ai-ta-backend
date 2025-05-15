@@ -132,24 +132,37 @@ class GraphDatabase:
         {self.ckg_schema_info}
         
         GUIDELINES FOR GENERATING CYPHER QUERIES:
-        1. Always use the correct node labels and relationship types from the schema above
-        2. For clinical entities, prefer to use specific node types like Disease, Drug, Symptom, etc.
-        3. When searching for treatments, use relationships like TREATS, PRESCRIBED_FOR, etc.
-        4. For finding side effects, use relationships like CAUSES, HAS_SIDE_EFFECT, etc.
-        5. When querying for interactions, look for INTERACTS_WITH relationships
-        6. Limit results to a reasonable number (e.g., LIMIT 10) for readability
-        7. Include relevant properties in the RETURN clause
-        8. Use appropriate WHERE clauses to filter results
-        9. For text matching, use case-insensitive matching with toLower() or CONTAINS
-        10. For complex queries, consider using multiple MATCH clauses
-        
+        1. Always use the correct node labels (e.g., "gene/protein", "Disease", "Drug") and relationship types (e.g., "protein_protein", "disease_gene") as per the schema.
+        2. Use node properties node_name and node_id for matching entities. Prefer case-insensitive matching for node_name (e.g., toLower(n.node_name) CONTAINS toLower("...")) for partial matches.
+        3. For relationships, use the type (e.g., disease_gene for disease-gene associations) and, if relevant, filter on display_relation.
+        4. For clinical/biomedical queries, prefer specific node types (e.g., Disease, Drug, gene/protein, Phenotype).
+        5. When a user query mentions a disease (e.g., "cancer"), match Disease nodes where node_name contains the disease term (case-insensitive).
+        6. To find related genes, look for relationships between Disease nodes and gene/protein nodes (e.g., disease_gene).
+        7. Limit results to a reasonable number (e.g., LIMIT 10) for readability.
+        8. For complex queries, use multiple MATCH clauses rather than long path patterns.
+        9. Always return the most relevant properties (e.g., node_name, node_id, display_relation) in the RETURN clause.
+        10. For ambiguous queries, try multiple plausible node labels or relationship types, and explain your reasoning.
+        11. If no results are found, try up to 3 alternative queries with different node labels or relationship types.
+        12. Use backticks for labels with special characters: `` gene/protein ``
+
         RESPONSE FORMAT:
-        1. First, explain the Cypher query you're generating and why
-        2. Present the results in a clear, structured format
-        3. Provide a clinical interpretation of the results
-        4. If relevant, suggest follow-up queries the user might be interested in
-        
-        Remember that you're helping healthcare professionals, so be precise and clinically accurate.
+        1. First, explain the Cypher query you are generating and why it addresses the user's question.
+        2. Present the Cypher query.
+        3. If the response from Neo4j is empty, return "No results found" and try a new query (up to 3 attempts).
+        4. If results are found, present them as a list of dictionaries with relevant properties and provide a brief interpretation.
+
+        EXAMPLE:
+        User query: "What genes are related to cancer?"
+
+        Your response:
+        - Explain: "To answer this, I will search for Disease nodes whose node_name contains 'cancer' (case-insensitive), and find all gene/protein nodes connected to these diseases via a disease_protein relationship."
+        - Cypher:
+          MATCH (d:disease)-[:disease_protein]->(g:``gene/protein``)
+          WHERE toLower(d.node_name) CONTAINS "cancer"
+          RETURN DISTINCT d.node_name AS Cancer, g.node_name AS Gene
+          ORDER BY d.node_name, g.node_name
+
+        If no results, try alternative node labels or relationship types, and explain your reasoning.
         
         ADDITIONAL INSTRUCTIONS:
         {additional_instructions}
