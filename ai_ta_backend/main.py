@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import re
 import time
+import logging
 from typing import List
 
 from dotenv import load_dotenv
@@ -44,6 +46,8 @@ from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
 from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
+from ai_ta_backend.rabbitmq.queue import Queue
+from ai_ta_backend.rabbitmq.ingest_canvas import IngestCanvas
 
 app = Flask(__name__)
 CORS(app)
@@ -620,6 +624,75 @@ def run_flow(service: WorkflowService) -> Response:
       response.headers.add('Access-Control-Allow-Origin', '*')
       return response
 
+@app.route('/ingest', methods=['POST'])
+def ingest() -> Response:
+  active_queue = Queue()
+  data = request.get_json()
+  logging.info("Data received: %s", data)
+
+  result = active_queue.addJobToIngestQueue(data)
+  logging.info("Result from addJobToIngestQueue:  %s", result)
+
+  response = jsonify(
+    {
+      "outcome": f'Queued Ingest task',
+      "ingest_task_id": result
+    }
+  )
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/canvas_ingest', methods=['POST'])
+def canvas_ingest(request) -> Response:
+  course_name: request.data.get('course_name', '')
+  canvas_url: request.data.get('canvas_url', None)
+  files: bool = request.data.get('files', True)
+  pages: bool = request.data.get('pages', True)
+  modules: bool = request.data.get('modules', True)
+  syllabus: bool = request.data.get('syllabus', True)
+  assignments: bool = request.data.get('assignments', True)
+  discussions: bool = request.data.get('discussions', True)
+  options = {
+    'files': str(files).lower() == 'true',
+    'pages': str(pages).lower() == 'true',
+    'modules': str(modules).lower() == 'true',
+    'syllabus': str(syllabus).lower() == 'true',
+    'assignments': str(assignments).lower() == 'true',
+    'discussions': str(discussions).lower() == 'true',
+  }
+
+  print("Course Name: ", course_name)
+  print("Canvas URL: ", canvas_url)
+  print("Download Options: ", options)
+
+  try:
+    # canvas.illinois.edu/courses/COURSE_CODE
+    match = re.search(r'canvas\.illinois\.edu/courses/([^/]+)', canvas_url)
+    canvas_course_id = match.group(1) if match else None
+
+    ingester = IngestCanvas()
+    ingester.ingest_course_content(canvas_course_id=canvas_course_id,
+                                   course_name=course_name,
+                                   content_ingest_dict=options)
+
+
+
+
+  active_queue = Queue()
+  data = request.get_json()
+  logging.info("Canvas ingest data: %s", data)
+
+  result = active_queue.addJobToIngestQueue(data, queue_name='uiuc-chat-canvas')
+  logging.info("Result from addJobToIngestQueue:  %s", result)
+
+  response = jsonify(
+    {
+      "outcome": f'Queued Canvas Ingest task',
+      "ingest_task_id": result
+    }
+  )
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 @app.route('/createProject', methods=['POST'])
 def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> Response:
