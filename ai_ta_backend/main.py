@@ -739,27 +739,38 @@ def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
-
+"""
+USAGE:
+curl -X POST http://localhost:8000/copy-course-vectors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_course": "cropwizard-1.5",
+    "destination_course": "cropwizard-1.6"
+  }'
+"""  
 @app.route('/copy-course-vectors', methods=['POST'])
 def copy_course_vectors_endpoint():
     data = request.get_json() or {}
     source_course = data.get('source_course')
     destination_course = data.get('destination_course')
     retry_failed = data.get('retry_failed', False)
-    source_url = data.get('source_url')
-    source_key = data.get('source_key')
-    dest_url = data.get('dest_url')
-    dest_key = data.get('dest_key')
     if not source_course or not destination_course:
         abort(400, description="'source_course' and 'destination_course' are required.")
+    # All connection info is from env vars
     result = copy_course_vectors_api(
         source_course,
         destination_course,
         retry_failed=retry_failed,
-        source_url=source_url,
-        source_key=source_key,
-        dest_url=dest_url,
-        dest_key=dest_key
+        source_url=None,
+        source_key=None,
+        dest_url=None,
+        dest_key=None,
+        source_collection=os.environ["QDRANT_COLLECTION_NAME"],
+        destination_collection=os.environ["NEW_CROPWIZARD_QDRANT_COLLECTION"],
+        source_url_env='QDRANT_URL',
+        source_key_env='QDRANT_API_KEY',
+        dest_url_env='NEW_CROPWIZARD_QDRANT_URL',
+        dest_key_env='NEW_CROPWIZARD_QDRANT_KEY'
     )
     return jsonify(result)
 

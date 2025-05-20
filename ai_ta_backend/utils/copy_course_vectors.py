@@ -34,12 +34,12 @@ def load_failed_points():
     with open(FAILED_POINTS_LOG, "r") as f:
         return json.load(f)
 
-def get_qdrant_client(url=None, api_key=None):
+def get_qdrant_client(url=None, api_key=None, url_env=None, key_env=None):
     load_dotenv()
-    qdrant_url = url or os.environ.get('QDRANT_URL')
-    qdrant_api_key = api_key or os.environ.get('QDRANT_API_KEY')
+    qdrant_url = url or (os.environ.get(url_env) if url_env else None) or os.environ.get('QDRANT_URL')
+    qdrant_api_key = api_key or (os.environ.get(key_env) if key_env else None) or os.environ.get('QDRANT_API_KEY')
     if not qdrant_url or not qdrant_api_key:
-        print("Error: QDRANT_URL and QDRANT_API_KEY must be set in env or provided as arguments.")
+        print(f"Error: Qdrant URL and API KEY must be set in env or provided as arguments. url_env={url_env}, key_env={key_env}")
         sys.exit(1)
     return QdrantClient(
         url=qdrant_url,
@@ -63,10 +63,47 @@ def vector_exists(qdrant_client, collection_name, course_name, readable_filename
     )
     return bool(res[0])
 
-def copy_course_vectors(source_course, destination_course, retry_failed=False, source_url=None, source_key=None, dest_url=None, dest_key=None):
-    source_client = get_qdrant_client(source_url, source_key)
-    destination_client = get_qdrant_client(dest_url, dest_key)
-    collection_name = os.environ['QDRANT_COLLECTION_NAME']
+def copy_course_vectors(
+    source_course,
+    destination_course,
+    retry_failed=False,
+    source_url=None,
+    source_key=None,
+    dest_url=None,
+    dest_key=None,
+    source_collection=None,
+    destination_collection=None,
+    source_url_env=None,
+    source_key_env=None,
+    dest_url_env=None,
+    dest_key_env=None
+):
+    # Defaults for env var names
+    source_url_env = source_url_env or 'QDRANT_URL'
+    source_key_env = source_key_env or 'QDRANT_API_KEY'
+    dest_url_env = dest_url_env or 'NEW_CROPWIZARD_QDRANT_URL'
+    dest_key_env = dest_key_env or 'NEW_CROPWIZARD_QDRANT_KEY'
+    source_collection = source_collection or os.environ.get('QDRANT_COLLECTION_NAME')
+    destination_collection = destination_collection or os.environ.get('NEW_CROPWIZARD_QDRANT_COLLECTION')
+    source_client = get_qdrant_client(source_url, source_key, url_env=source_url_env, key_env=source_key_env)
+    destination_client = get_qdrant_client(dest_url, dest_key, url_env=dest_url_env, key_env=dest_key_env)
+
+    # Verify connection to source Qdrant
+    try:
+        collections = source_client.get_collections()
+        print(f"[INFO] Successfully connected to source Qdrant at {source_client._config.host}. Collections: {[c.name for c in collections.collections]}")
+    except Exception as e:
+        print(f"[ERROR] Failed to connect to source Qdrant at {source_client._config.host}: {e}")
+        sys.exit(2)
+
+    # Verify connection to destination Qdrant
+    try:
+        collections = destination_client.get_collections()
+        print(f"[INFO] Successfully connected to destination Qdrant at {destination_client._config.host}. Collections: {[c.name for c in collections.collections]}")
+    except Exception as e:
+        print(f"[ERROR] Failed to connect to destination Qdrant at {destination_client._config.host}: {e}")
+        sys.exit(2)
+
     batch_size = 1000
     total_copied = 0
     failed_batches = []
@@ -81,7 +118,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
             offset = batch_info["offset"]
             try:
                 res = source_client.scroll(
-                    collection_name=collection_name,
+                    collection_name=source_collection,
                     scroll_filter=models.Filter(must=[
                         models.FieldCondition(
                             key="course_name",
@@ -98,7 +135,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
                 for point in points:
                     readable_filename = point.payload.get("readable_filename")
                     chunk_index = point.payload.get("chunk_index")
-                    if vector_exists(destination_client, collection_name, destination_course, readable_filename, chunk_index):
+                    if vector_exists(destination_client, destination_collection, destination_course, readable_filename, chunk_index):
                         print(f"Skipping existing vector: {readable_filename} chunk {chunk_index} in {destination_course}")
                         continue
                     new_payload = dict(point.payload)
@@ -113,7 +150,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
                     )
                 if new_points:
                     destination_client.upsert(
-                        collection_name=collection_name,
+                        collection_name=destination_collection,
                         points=new_points,
                         wait=True
                     )
@@ -127,7 +164,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
                 point = point_info["point"]
                 readable_filename = point["payload"].get("readable_filename")
                 chunk_index = point["payload"].get("chunk_index")
-                if vector_exists(destination_client, collection_name, destination_course, readable_filename, chunk_index):
+                if vector_exists(destination_client, destination_collection, destination_course, readable_filename, chunk_index):
                     print(f"Skipping existing vector: {readable_filename} chunk {chunk_index} in {destination_course}")
                     continue
                 new_payload = dict(point["payload"])
@@ -139,7 +176,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
                     payload=new_payload
                 )
                 destination_client.upsert(
-                    collection_name=collection_name,
+                    collection_name=destination_collection,
                     points=[np],
                     wait=True
                 )
@@ -156,7 +193,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
     while True:
         try:
             res = source_client.scroll(
-                collection_name=collection_name,
+                collection_name=source_collection,
                 scroll_filter=models.Filter(must=[
                     models.FieldCondition(
                         key="course_name",
@@ -182,7 +219,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
             try:
                 readable_filename = point.payload.get("readable_filename")
                 chunk_index = point.payload.get("chunk_index")
-                if vector_exists(destination_client, collection_name, destination_course, readable_filename, chunk_index):
+                if vector_exists(destination_client, destination_collection, destination_course, readable_filename, chunk_index):
                     print(f"Skipping existing vector: {readable_filename} chunk {chunk_index} in {destination_course}")
                     continue
                 new_payload = dict(point.payload)
@@ -206,7 +243,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
         try:
             if new_points:
                 destination_client.upsert(
-                    collection_name=collection_name,
+                    collection_name=destination_collection,
                     points=new_points,
                     wait=True
                 )
@@ -218,7 +255,7 @@ def copy_course_vectors(source_course, destination_course, retry_failed=False, s
             for np, orig_point in zip(new_points, points):
                 try:
                     destination_client.upsert(
-                        collection_name=collection_name,
+                        collection_name=destination_collection,
                         points=[np],
                         wait=True
                     )
@@ -253,7 +290,13 @@ def copy_course_vectors_api(
     source_url=None,
     source_key=None,
     dest_url=None,
-    dest_key=None
+    dest_key=None,
+    source_collection=None,
+    destination_collection=None,
+    source_url_env=None,
+    source_key_env=None,
+    dest_url_env=None,
+    dest_key_env=None
 ):
     """API-friendly wrapper for copy_course_vectors. Returns a dict with status/results."""
     try:
@@ -264,7 +307,13 @@ def copy_course_vectors_api(
             source_url=source_url,
             source_key=source_key,
             dest_url=dest_url,
-            dest_key=dest_key
+            dest_key=dest_key,
+            source_collection=source_collection,
+            destination_collection=destination_collection,
+            source_url_env=source_url_env,
+            source_key_env=source_key_env,
+            dest_url_env=dest_url_env,
+            dest_key_env=dest_key_env
         )
         return {"status": "success"}
     except Exception as e:
@@ -280,6 +329,12 @@ if __name__ == "__main__":
     parser.add_argument("--source-key", type=str, help="Source Qdrant API Key (overrides env)")
     parser.add_argument("--destination-url", type=str, help="Destination Qdrant URL (overrides env)")
     parser.add_argument("--destination-key", type=str, help="Destination Qdrant API Key (overrides env)")
+    parser.add_argument("--source-collection", type=str, help="Source Qdrant collection name (overrides env)")
+    parser.add_argument("--destination-collection", type=str, help="Destination Qdrant collection name (overrides env)")
+    parser.add_argument("--source-url-env", type=str, help="Env var name for source Qdrant URL")
+    parser.add_argument("--source-key-env", type=str, help="Env var name for source Qdrant API Key")
+    parser.add_argument("--dest-url-env", type=str, help="Env var name for destination Qdrant URL")
+    parser.add_argument("--dest-key-env", type=str, help="Env var name for destination Qdrant API Key")
     args = parser.parse_args()
     copy_course_vectors(
         args.source_course,
@@ -288,5 +343,11 @@ if __name__ == "__main__":
         source_url=args.source_url,
         source_key=args.source_key,
         dest_url=args.destination_url,
-        dest_key=args.destination_key
+        dest_key=args.destination_key,
+        source_collection=args.source_collection,
+        destination_collection=args.destination_collection,
+        source_url_env=args.source_url_env,
+        source_key_env=args.source_key_env,
+        dest_url_env=args.dest_url_env,
+        dest_key_env=args.dest_key_env
     )
