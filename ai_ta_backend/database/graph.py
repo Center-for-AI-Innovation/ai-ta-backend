@@ -87,15 +87,18 @@ class GraphDatabase:
   def _create_prime_kg_chain(self):
     """Create a GraphCypherQAChain with a prime KG system prompt."""
     schema_info = self.prime_kg_schema_info
-    print("PrimeKG SCHEMA INFO: ", schema_info)
+    # print("PrimeKG SCHEMA INFO: ", schema_info)
     system_prompt = f"""
     You are a clinical knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
     
     SCHEMA INFORMATION:
     {schema_info}
     
+    IMPORTANT INFORMATION ALWAYS FOLLOW:
+    1. USE BACKTICKS FOR LABELS WITH SPECIAL CHARACTERS: `gene/protein`
+    
     GUIDELINES FOR GENERATING CYPHER QUERIES:
-    1. Always use the correct node labels (e.g., "gene/protein", "Disease", "Drug") and relationship types (e.g., "protein_protein", "disease_gene") as per the schema.
+    1. Always use the correct node labels (e.g., `gene/protein`, Disease, Drug) and relationship types (e.g., "protein_protein", "disease_gene") as per the schema.
     2. Use node properties node_name and node_id for matching entities. Prefer case-insensitive matching for node_name (e.g., toLower(n.node_name) CONTAINS toLower("...")) for partial matches.
     3. For relationships, use the type (e.g., disease_gene for disease-gene associations) and, if relevant, filter on display_relation.
     4. For clinical/biomedical queries, prefer specific node types (e.g., Disease, Drug, gene/protein, Phenotype).
@@ -106,7 +109,6 @@ class GraphDatabase:
     9. Always return the most relevant properties (e.g., node_name, node_id, display_relation) in the RETURN clause.
     10. For ambiguous queries, try multiple plausible node labels or relationship types, and explain your reasoning.
     11. If no results are found, try up to 3 alternative queries with different node labels or relationship types.
-    12. Use backticks for labels with special characters: `` gene/protein ``
 
     RESPONSE FORMAT:
     1. First, explain the Cypher query you are generating and why it addresses the user's question.
@@ -120,7 +122,7 @@ class GraphDatabase:
     Your response:
     - Explain: "To answer this, I will search for Disease nodes whose node_name contains 'cancer' (case-insensitive), and find all gene/protein nodes connected to these diseases via a disease_protein relationship."
     - Cypher:
-      MATCH (d:disease)-[:disease_protein]->(g:``gene/protein``)
+      MATCH (d:disease)-[:disease_protein]->(g:`gene/protein`)
       WHERE toLower(d.node_name) CONTAINS "cancer"
       RETURN DISTINCT d.node_name AS Cancer, g.node_name AS Gene
       ORDER BY d.node_name, g.node_name
@@ -128,12 +130,12 @@ class GraphDatabase:
     If no results, try alternative node labels or relationship types, and explain your reasoning.
   
     """
-
+    print("SYSTEM PROMPT: ", system_prompt)
     return GraphCypherQAChain.from_llm(
-        ChatOpenAI(temperature=0, model="gpt-4-turbo", api_key=os.environ['VLADS_OPENAI_KEY']),
+        ChatOpenAI(temperature=0, model="gpt-4.1", api_key=os.environ['VLADS_OPENAI_KEY']),
         return_intermediate_steps=True,
         graph=self.prime_kg_graph,
-        verbose=False,
+        verbose=True,
         allow_dangerous_requests=True,
         system_message=system_prompt,
     )

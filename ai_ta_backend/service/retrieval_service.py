@@ -831,5 +831,5 @@ class RetrievalService:
     """
     Simple agent to decide if PrimeKG should be queried based on keywords in the search query.
     """
-    keywords = ["disease", "drug", "gene", "symptom", "side effect", "treatment", "primekg"]
+    keywords = ["disease", "drug", "gene", "symptom", "side effect", "treatment", "primekg", "cell"]
     return any(kw in search_query.lower() for kw in keywords)
