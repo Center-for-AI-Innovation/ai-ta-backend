@@ -116,19 +116,109 @@ class GraphDatabase:
     3. If the response from Neo4j is empty, return "No results found" and try a new query (up to 3 attempts).
     4. If results are found, present them as a list of dictionaries with relevant properties and provide a brief interpretation.
 
-    EXAMPLE:
-    User query: "What genes are related to cancer?"
+    EXAMPLE 1:
+    User query: "What drugs are used to treat Alzheimer's disease?"
 
     Your response:
-    - Explain: "To answer this, I will search for Disease nodes whose node_name contains 'cancer' (case-insensitive), and find all gene/protein nodes connected to these diseases via a disease_protein relationship."
+    - Explain: "To answer this question, I'll search for Disease nodes with 'Alzheimer' in their name and find Drug nodes connected to them via an indication relationship, which shows approved uses for drugs."
     - Cypher:
-      MATCH (d:disease)-[:disease_protein]->(g:`gene/protein`)
-      WHERE toLower(d.node_name) CONTAINS "cancer"
-      RETURN DISTINCT d.node_name AS Cancer, g.node_name AS Gene
-      ORDER BY d.node_name, g.node_name
+      MATCH (d:disease)<-[:indication]-(drug:drug)
+      WHERE toLower(d.node_name) CONTAINS "alzheimer"
+      RETURN DISTINCT d.node_name AS Disease, drug.node_name AS Drug
+      ORDER BY d.node_name, drug.node_name
+
+    EXAMPLE 2:
+    User query: "What biological processes are associated with the BRCA1 gene?"
+
+    Your response:
+    - Explain: "I'll find the gene/protein node for BRCA1 and identify all biological processes connected to it through the bioprocess_protein relationship."
+    - Cypher:
+      MATCH (g:`gene/protein`)-[:bioprocess_protein]->(bp:biological_process)
+      WHERE toLower(g.node_name) = "brca1"
+      RETURN DISTINCT g.node_name AS Gene, bp.node_name AS BiologicalProcess
+      ORDER BY bp.node_name
+
+    EXAMPLE 3:
+    User query: "What are the side effects of metformin?"
+
+    Your response:
+    - Explain: "To find side effects of metformin, I'll search for the drug node representing metformin and identify all effect/phenotype nodes connected to it via a drug_effect relationship."
+    - Cypher:
+      MATCH (d:drug)-[:drug_effect]->(e:`effect/phenotype`)
+      WHERE toLower(d.node_name) = "metformin"
+      RETURN DISTINCT d.node_name AS Drug, e.node_name AS SideEffect
+      ORDER BY e.node_name
+
+    EXAMPLE 4:
+    User query: "Which genes are expressed in the heart?"
+
+    Your response:
+    - Explain: "I'll search for anatomy nodes related to 'heart' and find gene/protein nodes that are connected to these anatomy nodes via an anatomy_protein_present relationship, indicating genes expressed in this tissue."
+    - Cypher:
+      MATCH (a:anatomy)<-[:anatomy_protein_present]-(g:`gene/protein`)
+      WHERE toLower(a.node_name) CONTAINS "heart"
+      RETURN DISTINCT a.node_name AS Anatomy, g.node_name AS Gene
+      ORDER BY a.node_name, g.node_name
+      
+    EXAMPLE 5:
+    User query: "Which pathways involve the TNF gene?"
+
+    Your response:
+    - Explain: "I'll find the gene/protein node for TNF and identify all pathway nodes connected to it through the pathway_protein relationship."
+    - Cypher:
+      MATCH (g:`gene/protein`)-[:pathway_protein]->(p:pathway)
+      WHERE toLower(g.node_name) = "tnf" OR toLower(g.node_name) = "tumor necrosis factor"
+      RETURN DISTINCT g.node_name AS Gene, p.node_name AS Pathway
+      ORDER BY p.node_name
 
     If no results, try alternative node labels or relationship types, and explain your reasoning.
   
+    EXAMPLE 6:
+    User query: "What proteins interact with the ACE2 receptor?"
+
+    Your response:
+    - Explain: "To find proteins that interact with ACE2, I'll search for the gene/protein node representing ACE2 and identify all other gene/protein nodes connected to it via a protein_protein relationship."
+    - Cypher:
+      MATCH (g1:`gene/protein`)-[:protein_protein]->(g2:`gene/protein`)
+      WHERE toLower(g1.node_name) = "ace2"
+      RETURN DISTINCT g1.node_name AS Protein, g2.node_name AS InteractingProtein
+      ORDER BY g2.node_name
+      
+    EXAMPLE 7:
+    User query: "What cellular components are associated with mitochondrial diseases?"
+
+    Your response:
+    - Explain: "I'll identify disease nodes related to mitochondria, find associated genes, and then discover the cellular components linked to those genes."
+    - Cypher:
+      MATCH (d:disease)-[:disease_protein]->(g:`gene/protein`)-[:cellcomp_protein]->(cc:cellular_component)
+      WHERE toLower(d.node_name) CONTAINS "mitochondri"
+      RETURN DISTINCT d.node_name AS Disease, g.node_name AS Gene, cc.node_name AS CellularComponent
+      ORDER BY d.node_name, cc.node_name
+    
+    EXAMPLE 8:
+    User query: "What genes are associated with congenital hyperinsulinism?"
+
+    Your response:
+    - Explain: "To answer this question, I'll search for Disease nodes related to hyperinsulinism and identify the gene/protein nodes connected to them through disease_protein relationships, which indicate genes associated with this condition."
+    - Cypher:
+      MATCH (d:disease)-[:disease_protein]->(g:`gene/protein`)
+      WHERE toLower(d.node_name) CONTAINS "hyperinsulin"
+      RETURN DISTINCT d.node_name AS Disease, g.node_name AS Gene
+      ORDER BY d.node_name, g.node_name
+
+    EXAMPLE 9:
+    User query: "Which drugs interact with the TNF inhibitor adalimumab?"
+
+    Your response:
+    - Explain: "To find drugs that interact with adalimumab (a TNF inhibitor), I'll search for the drug node representing adalimumab and identify other drug nodes connected to it through drug_drug relationships, which indicate potential drug interactions."
+    - Cypher:
+      MATCH (d1:drug)-[r:drug_drug]->(d2:drug)
+      WHERE toLower(d1.node_name) = "adalimumab"
+      RETURN DISTINCT d1.node_name AS Drug, d2.node_name AS InteractingDrug, 
+            r.display_relation AS InteractionType
+      ORDER BY d2.node_name
+    
+    If no results, try alternative terms related to the query and explain your reasoning.
     """
     print("SYSTEM PROMPT: ", system_prompt)
     return GraphCypherQAChain.from_llm(
