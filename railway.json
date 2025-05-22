@@ -1,0 +1,25 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "nixpacksVersion": "1.15.0",
+    "nixpacksPlan": {
+      "phases": {
+        "install": {
+          "cmds": [
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "uv pip install --system -r requirements.txt"
+          ]
+        },
+        "setup": {
+          "nixPkgs": ["python310", "gcc"]
+        }
+      }
+    }
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 1
+  }
+}
