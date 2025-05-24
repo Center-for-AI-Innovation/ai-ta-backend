@@ -40,6 +40,30 @@ from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
 from ai_ta_backend.service.sentry_service import SentryService
+from posthog import Posthog
+import ray
+import sentry_sdk
+
+# from ai_ta_backend.canvas import CanvasAPI
+
+# from ai_ta_backend.export_data import export_convo_history_json, export_documents_json, check_s3_path_and_download
+# from ai_ta_backend.nomic_logging import get_nomic_map, log_convo_to_nomic, create_document_map
+# from ai_ta_backend.vector_database import Ingest
+# from ai_ta_backend.web_scrape import WebScrape, mit_course_download
+from ai_ta_backend.journal_ingest import (get_arxiv_fulltext, downloadSpringerFulltext, 
+                                          downloadElsevierFulltextFromId, getFromDoi, 
+                                          downloadPubmedArticles, searchPubmedArticlesWithEutils,
+                                          searchScopusArticles, searchScienceDirectArticles)
+
+# Sentry.io error logging
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN"),
+    # Set traces_sample_rate to 1.0 to capture 100% of transactions for performance monitoring.
+    traces_sample_rate=1.0,
+    # Set profiles_sample_rate to 1.0 to profile 100% of sampled transactions.
+    # We recommend adjusting this value in production.
+    profiles_sample_rate=1.0,
+    enable_tracing=True)
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
@@ -619,6 +643,197 @@ def run_flow(service: WorkflowService) -> Response:
       response.status_code = 500
       response.headers.add('Access-Control-Allow-Origin', '*')
       return response
+
+@app.route('/get-arxiv-fulltext', methods=['GET'])
+def get_arxiv_data():
+  search_query: str = request.args.get('search_query', default='', type=str)
+  arxiv_id = request.args.get('arxiv_id', default='', type=str)
+  print("In /get-arxiv-fulltext: ", search_query)
+
+  if search_query == '' and arxiv_id == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'arxiv_id' or 'search_query' must be provided."
+    )
+
+  fulltext = get_arxiv_fulltext(search_query, arxiv_id)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/get-springer-fulltext', methods=['GET'])
+def get_springer_data():
+  course_name: str = request.args.get('course_name', default='', type=str)
+  issn = request.args.get('issn', default='', type=str)
+  subject = request.args.get('subject', default='', type=str)
+  journal = request.args.get('journal', default='', type=str)
+  title = request.args.get('title', default='', type=str)
+  doi = request.args.get('doi', default='', type=str)
+
+  print("In /get-springer-fulltext")
+
+  if (issn == '' and subject == '' and journal == '' and title == '' and doi == '') or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'issn' or 'subject' or 'title' or 'journal' or 'doi' and 'course_name' must be provided."
+    )
+
+  fulltext = downloadSpringerFulltext(issn, subject, journal, title, doi, course_name)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/get-elsevier-fulltext', methods=['GET'])
+def get_elsevier_data():
+  id = request.args.get('id', default='', type=str)
+  id_type = request.args.get('id_type', default='doi', type=str)
+  course_name = request.args.get('course_name', default='', type=str)
+
+  print("In /get-elsevier-fulltext")
+
+  if id == '' or id_type == '' or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'id', 'id_type' [doi, eid, pii, pubmed_id] and 'course_name' must be provided."
+    )
+
+  fulltext = downloadElsevierFulltextFromId(id, id_type, course_name)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/getArticleFromDoi', methods=['GET'])
+def getArticleFromDoi():
+  doi = request.args.get('doi', default='', type=str)
+  course_name = request.args.get('course_name', default='', type=str)
+
+  print("In /getArticleFromDoi")
+
+  if doi == '' or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'doi' and 'course_name' must be provided."
+    )
+
+  fulltext = getFromDoi(doi, course_name)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getArticleFromPubmed', methods=['GET'])
+def getArticleFromPubmed():
+  id = request.args.get('id', default='', type=str)
+  from_date = request.args.get('from_date', default='', type=str)
+  until_date = request.args.get('until_date', default='', type=str)
+  format = request.args.get('format', default='', type=str)
+  course_name = request.args.get('course_name', default='', type=str)
+
+  print("In /getArticleFromPubmed")
+
+  if (id == '' and from_date  == '' and until_date == '') or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'id', 'from_date', or 'until_date' and 'course_name' must be provided."
+    )
+
+  fulltext = downloadPubmedArticles(id, course_name, from_date=from_date, until_date=until_date, format=format)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getPubmedArticleWithEutils', methods=['GET'])
+def getPubmedArticleWithEutils():
+  course_name = request.args.get('course_name', default='', type=str)
+  title = request.args.get('title', default='', type=str)
+  journal = request.args.get('journal', default='', type=str)
+  search_query = request.args.get('search_query', default='', type=str)
+
+  print("In /getPubmedArticleWithEutils")
+
+  if (title == '' and journal  == '' and search_query == '') or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'title', 'journal', or 'search_query' and 'course_name' must be provided."
+    )
+
+  fulltext = searchPubmedArticlesWithEutils(course_name, search_query, title, journal)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getScopusArticles', methods=['GET'])
+def getScopusArticles() -> Response:
+  """
+  Download full-text article from Scopus
+  """
+  course_name = request.args.get('course_name', default='', type=str)
+  article_title = request.args.get('article_title', default='', type=str)
+  journal_title = request.args.get('journal_title', default='', type=str)
+  search_str = request.args.get('search_str', default='', type=str)
+  subject = request.args.get('subject', default='', type=str)
+  issn = request.args.get('issn', default='', type=str)
+
+  print("In /getScopusArticles")
+
+  if (article_title == '' and journal_title  == '' and search_str == '' and issn == '' and subject == '') or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'article_title', 'journal_title', 'issn', 'subject' or 'search_str' and 'course_name' must be provided."
+    )
+
+  fulltext = searchScopusArticles(course_name, search_str, article_title, journal_title, subject, issn)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getScienceDirectArticles', methods=['GET'])
+def getScienceDirectArticles() -> Response:
+  """
+  Download full-text article from Scopus
+  """
+  course_name = request.args.get('course_name', default='', type=str)
+  article_title = request.args.get('article_title', default='', type=str)
+  journal_title = request.args.get('journal_title', default='', type=str)
+  search_str = request.args.get('search_str', default='', type=str)
+  
+
+  print("In /getScienceDirectArticles")
+
+  if (article_title == '' and journal_title  == '' and search_str == '') or course_name == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing required parameters: 'article_title', 'journal_title' or 'search_str' and 'course_name' must be provided."
+    )
+
+  fulltext = searchScienceDirectArticles(course_name, search_str, article_title, journal_title)
+
+  response = jsonify(fulltext)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route('/createProject', methods=['POST'])
