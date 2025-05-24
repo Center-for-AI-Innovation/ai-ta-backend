@@ -346,7 +346,9 @@ class RetrievalService:
       print("Deleting from Qdrant")
       if course_name == 'cropwizard-1.5':
         # delete from cw db
-        response = self.vdb.delete_data_cropwizard(identifier_key, identifier_value)
+        response = self.vdb.delete_data_cropwizard('cropwizard', identifier_key, identifier_value)
+      elif course_name == 'ag-research':
+        response = self.vdb.delete_data_cropwizard('ag-research', identifier_key, identifier_value)
       else:
         response = self.vdb.delete_data(os.environ['QDRANT_COLLECTION_NAME'], identifier_key, identifier_value)
       print(f"Qdrant response: {response}")
@@ -511,6 +513,9 @@ class RetrievalService:
       search_results = self.vdb.vyriad_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
                                                      disabled_doc_groups, public_doc_groups)
     elif course_name == "cropwizard":
+      search_results = self.vdb.cropwizard_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                         top_n, disabled_doc_groups, public_doc_groups)
+    elif course_name == "ag-research":
       search_results = self.vdb.cropwizard_vector_search(search_query, course_name, doc_groups, user_query_embedding,
                                                          top_n, disabled_doc_groups, public_doc_groups)
     elif course_name == "pubmed":
