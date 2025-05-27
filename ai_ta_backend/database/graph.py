@@ -94,16 +94,13 @@ class GraphDatabase:
     SCHEMA INFORMATION:
     {schema_info}
     
-    IMPORTANT INFORMATION ALWAYS FOLLOW:
-    1. USE BACKTICKS FOR LABELS WITH SPECIAL CHARACTERS: `gene/protein`
-    
     GUIDELINES FOR GENERATING CYPHER QUERIES:
-    1. Always use the correct node labels (e.g., `gene/protein`, Disease, Drug) and relationship types (e.g., "protein_protein", "disease_gene") as per the schema.
+    1. Always use the correct node labels (e.g., `gene_protein`, Disease, Drug) and relationship types (e.g., "protein_protein", "disease_gene") as per the schema.
     2. Use node properties node_name and node_id for matching entities. Prefer case-insensitive matching for node_name (e.g., toLower(n.node_name) CONTAINS toLower("...")) for partial matches.
     3. For relationships, use the type (e.g., disease_gene for disease-gene associations) and, if relevant, filter on display_relation.
-    4. For clinical/biomedical queries, prefer specific node types (e.g., Disease, Drug, gene/protein, Phenotype).
+    4. For clinical/biomedical queries, prefer specific node types (e.g., Disease, Drug, gene_protein, Phenotype).
     5. When a user query mentions a disease (e.g., "cancer"), match Disease nodes where node_name contains the disease term (case-insensitive).
-    6. To find related genes, look for relationships between Disease nodes and gene/protein nodes (e.g., disease_gene).
+    6. To find related genes, look for relationships between Disease nodes and gene_protein nodes (e.g., disease_gene).
     7. Limit results to a reasonable number (e.g., LIMIT 10) for readability.
     8. For complex queries, use multiple MATCH clauses rather than long path patterns.
     9. Always return the most relevant properties (e.g., node_name, node_id, display_relation) in the RETURN clause.
@@ -131,9 +128,9 @@ class GraphDatabase:
     User query: "What biological processes are associated with the BRCA1 gene?"
 
     Your response:
-    - Explain: "I'll find the gene/protein node for BRCA1 and identify all biological processes connected to it through the bioprocess_protein relationship."
+    - Explain: "I'll find the gene_protein node for BRCA1 and identify all biological processes connected to it through the bioprocess_protein relationship."
     - Cypher:
-      MATCH (g:`gene/protein`)-[:bioprocess_protein]->(bp:biological_process)
+      MATCH (g:`gene_protein`)-[:bioprocess_protein]->(bp:biological_process)
       WHERE toLower(g.node_name) = "brca1"
       RETURN DISTINCT g.node_name AS Gene, bp.node_name AS BiologicalProcess
       ORDER BY bp.node_name
@@ -142,9 +139,9 @@ class GraphDatabase:
     User query: "What are the side effects of metformin?"
 
     Your response:
-    - Explain: "To find side effects of metformin, I'll search for the drug node representing metformin and identify all effect/phenotype nodes connected to it via a drug_effect relationship."
+    - Explain: "To find side effects of metformin, I'll search for the drug node representing metformin and identify all effect_phenotype nodes connected to it via a drug_effect relationship."
     - Cypher:
-      MATCH (d:drug)-[:drug_effect]->(e:`effect/phenotype`)
+      MATCH (d:drug)-[:drug_effect]->(e:`effect_phenotype`)
       WHERE toLower(d.node_name) = "metformin"
       RETURN DISTINCT d.node_name AS Drug, e.node_name AS SideEffect
       ORDER BY e.node_name
@@ -153,9 +150,9 @@ class GraphDatabase:
     User query: "Which genes are expressed in the heart?"
 
     Your response:
-    - Explain: "I'll search for anatomy nodes related to 'heart' and find gene/protein nodes that are connected to these anatomy nodes via an anatomy_protein_present relationship, indicating genes expressed in this tissue."
+    - Explain: "I'll search for anatomy nodes related to 'heart' and find gene_protein nodes that are connected to these anatomy nodes via an anatomy_protein_present relationship, indicating genes expressed in this tissue."
     - Cypher:
-      MATCH (a:anatomy)<-[:anatomy_protein_present]-(g:`gene/protein`)
+      MATCH (a:anatomy)<-[:anatomy_protein_present]-(g:`gene_protein`)
       WHERE toLower(a.node_name) CONTAINS "heart"
       RETURN DISTINCT a.node_name AS Anatomy, g.node_name AS Gene
       ORDER BY a.node_name, g.node_name
@@ -164,9 +161,9 @@ class GraphDatabase:
     User query: "Which pathways involve the TNF gene?"
 
     Your response:
-    - Explain: "I'll find the gene/protein node for TNF and identify all pathway nodes connected to it through the pathway_protein relationship."
+    - Explain: "I'll find the gene_protein node for TNF and identify all pathway nodes connected to it through the pathway_protein relationship."
     - Cypher:
-      MATCH (g:`gene/protein`)-[:pathway_protein]->(p:pathway)
+      MATCH (g:`gene_protein`)-[:pathway_protein]->(p:pathway)
       WHERE toLower(g.node_name) = "tnf" OR toLower(g.node_name) = "tumor necrosis factor"
       RETURN DISTINCT g.node_name AS Gene, p.node_name AS Pathway
       ORDER BY p.node_name
@@ -177,9 +174,9 @@ class GraphDatabase:
     User query: "What proteins interact with the ACE2 receptor?"
 
     Your response:
-    - Explain: "To find proteins that interact with ACE2, I'll search for the gene/protein node representing ACE2 and identify all other gene/protein nodes connected to it via a protein_protein relationship."
+    - Explain: "To find proteins that interact with ACE2, I'll search for the gene_protein node representing ACE2 and identify all other gene_protein nodes connected to it via a protein_protein relationship."
     - Cypher:
-      MATCH (g1:`gene/protein`)-[:protein_protein]->(g2:`gene/protein`)
+      MATCH (g1:`gene_protein`)-[:protein_protein]->(g2:`gene_protein`)
       WHERE toLower(g1.node_name) = "ace2"
       RETURN DISTINCT g1.node_name AS Protein, g2.node_name AS InteractingProtein
       ORDER BY g2.node_name
@@ -190,7 +187,7 @@ class GraphDatabase:
     Your response:
     - Explain: "I'll identify disease nodes related to mitochondria, find associated genes, and then discover the cellular components linked to those genes."
     - Cypher:
-      MATCH (d:disease)-[:disease_protein]->(g:`gene/protein`)-[:cellcomp_protein]->(cc:cellular_component)
+      MATCH (d:disease)-[:disease_protein]->(g:`gene_protein`)-[:cellcomp_protein]->(cc:cellular_component)
       WHERE toLower(d.node_name) CONTAINS "mitochondri"
       RETURN DISTINCT d.node_name AS Disease, g.node_name AS Gene, cc.node_name AS CellularComponent
       ORDER BY d.node_name, cc.node_name
@@ -199,9 +196,9 @@ class GraphDatabase:
     User query: "What genes are associated with congenital hyperinsulinism?"
 
     Your response:
-    - Explain: "To answer this question, I'll search for Disease nodes related to hyperinsulinism and identify the gene/protein nodes connected to them through disease_protein relationships, which indicate genes associated with this condition."
+    - Explain: "To answer this question, I'll search for Disease nodes related to hyperinsulinism and identify the gene_protein nodes connected to them through disease_protein relationships, which indicate genes associated with this condition."
     - Cypher:
-      MATCH (d:disease)-[:disease_protein]->(g:`gene/protein`)
+      MATCH (d:disease)-[:disease_protein]->(g:`gene_protein`)
       WHERE toLower(d.node_name) CONTAINS "hyperinsulin"
       RETURN DISTINCT d.node_name AS Disease, g.node_name AS Gene
       ORDER BY d.node_name, g.node_name
