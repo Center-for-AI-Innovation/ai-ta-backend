@@ -86,11 +86,12 @@ def pubmed_ingest(context, **inputs: Dict[str, Any]):
     from_date: str = inputs.get('from_date', '')
     to_date: str = inputs.get('to_date', '')
     pmc_id: str = inputs.get('pmc_id', '')
+    doi: str = inputs.get('doi', '')
 
     # route to 2 functions based on the input - PMC ID or search query
     if pmc_id:
         # use Web Service OA API to fetch articles by PMC ID and date range
-        return fech_articles_by_pmc_id(pmc_id, course_name, s3_client, from_date=from_date, to_date=to_date)
+        return fech_articles_by_pmc_id(pmc_id, course_name, s3_client, from_date=from_date, to_date=to_date, doi=doi)
     
     if search_query or journal_name or article_title:
         # use EUtils API to fetch articles by journal, article title, text query, etc.
