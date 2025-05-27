@@ -7,6 +7,7 @@ from minio.error import S3Error
 
 load_dotenv()
 
+
 client = Minio(
     os.environ['MINIO_ENDPOINT'],
     access_key=os.environ['MINIO_ACCESS_KEY'],
