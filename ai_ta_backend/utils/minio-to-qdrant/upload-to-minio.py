@@ -1,56 +1,87 @@
 import os
 import json
+import io
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from minio import Minio
 from minio.error import S3Error
+from json_to_text import extract_relevant_text
+from multiprocessing import Pool, Lock, Manager, current_process
 
 load_dotenv(override=True)
 
-client = Minio(
-    os.environ['MINIO_ENDPOINT'],
-    access_key=os.environ['MINIO_ACCESS_KEY'],
-    secret_key=os.environ['MINIO_SECRET_KEY'],
-    secure=False,
-)
+def get_minio_client():
+    return Minio(
+        os.environ['MINIO_ENDPOINT'],
+        access_key=os.environ['MINIO_ACCESS_KEY'],
+        secret_key=os.environ['MINIO_SECRET_KEY'],
+        secure=False,
+    )
 
 bucket_name = "clinical-trials"
-local_dir = "/projects/uiucchat/ctg-data/clinical_trials_data"
-state_file = "upload_state.json"
+input_dir = Path("/projects/uiucchat/ctg-data/clinical_trials_data")
+state_dir = Path("/projects/uiucchat/minio-to-qdrant")
+uploaded_txt_file = state_dir / "uploaded.txt"
+MAX_FILES_PER_FOLDER = 10_000
 
-if os.path.exists(state_file):
-    with open(state_file, "r") as f:
-        uploaded_files = set(json.load(f))
+state_dir.mkdir(parents=True, exist_ok=True)
+
+if uploaded_txt_file.exists():
+    with uploaded_txt_file.open("r") as f:
+        uploaded_files = set(line.strip() for line in f if line.strip())
 else:
     uploaded_files = set()
 
+client = get_minio_client()
 if not client.bucket_exists(bucket_name):
     client.make_bucket(bucket_name)
     print(f"Bucket '{bucket_name}' created.")
 else:
     print(f"Bucket '{bucket_name}' already exists.")
 
-newly_uploaded = []
+all_json_files = [p for p in input_dir.glob("*.json") if p.name not in uploaded_files]
 
-for root, dirs, files in os.walk(local_dir):
-    for file in files:
-        local_path = os.path.join(root, file)
-        relative_path = os.path.relpath(local_path, local_dir)
-        minio_path = relative_path.replace("\\", "/")
+def process_file(path, lock):
+    client = get_minio_client()
+    filename = path.name
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        text_data = extract_relevant_text(data)
+        if not text_data.strip():
+            print(f"[{current_process().name}] Skipped empty text: {filename}")
+            return
 
-        if minio_path in uploaded_files:
-            print(f"Skipping already uploaded: {minio_path}")
-            continue
+        text_bytes = io.BytesIO(text_data.encode("utf-8"))
 
-        try:
-            client.fput_object(bucket_name, minio_path, local_path)
-            print(f"Uploaded: {minio_path}")
-            uploaded_files.add(minio_path)
-            newly_uploaded.append(minio_path)
+        all_objects = list(client.list_objects(bucket_name, recursive=True))
+        batch_index = len(all_objects) // MAX_FILES_PER_FOLDER + 1
+        batch_folder = f"batch_{batch_index:04d}"
+        object_name = f"{batch_folder}/{path.stem}.txt"
 
-        except S3Error as err:
-            print(f"Failed to upload {minio_path}: {err}")
+        start_time = time.time()
+        client.put_object(
+            bucket_name,
+            object_name,
+            data=text_bytes,
+            length=len(text_data.encode("utf-8")),
+            content_type="text/plain"
+        )
+        duration = time.time() - start_time
 
-if newly_uploaded:
-    with open(state_file, "w") as f:
-        json.dump(list(uploaded_files), f, indent=2)
+        with lock:
+            with uploaded_txt_file.open("a") as f:
+                f.write(filename + "\n")
+
+        print(f"[{current_process().name}] Uploaded: {object_name} ({duration:.2f}s)")
+
+    except Exception as e:
+        print(f"[{current_process().name}] Error processing {filename}: {e}")
+
+if __name__ == "__main__":
+    manager = Manager()
+    lock = manager.Lock()
+
+    with Pool(processes=64) as pool:
+        pool.starmap(process_file, [(path, lock) for path in all_json_files])
