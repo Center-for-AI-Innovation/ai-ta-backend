@@ -91,18 +91,24 @@ def copy_course_vectors(
     # Verify connection to source Qdrant
     try:
         collections = source_client.get_collections()
-        print(f"[INFO] Successfully connected to source Qdrant at {source_client._config.host}. Collections: {[c.name for c in collections.collections]}")
+        print(f"[INFO] Successfully connected to source Qdrant. Collections: {[c.name for c in collections.collections]}")
     except Exception as e:
-        print(f"[ERROR] Failed to connect to source Qdrant at {source_client._config.host}: {e}")
+        print(f"[ERROR] Failed to connect to source Qdrant: {e}")
         sys.exit(2)
 
     # Verify connection to destination Qdrant
     try:
         collections = destination_client.get_collections()
-        print(f"[INFO] Successfully connected to destination Qdrant at {destination_client._config.host}. Collections: {[c.name for c in collections.collections]}")
+        print(f"[INFO] Successfully connected to destination Qdrant. Collections: {[c.name for c in collections.collections]}")
     except Exception as e:
-        print(f"[ERROR] Failed to connect to destination Qdrant at {destination_client._config.host}: {e}")
+        print(f"[ERROR] Failed to connect to destination Qdrant: {e}")
         sys.exit(2)
+
+    info = source_client.get_collection(source_collection)
+    print("Source collection info:", info)
+
+    info = destination_client.get_collection(destination_collection)
+    print("Destination collection info:", info)
 
     batch_size = 1000
     total_copied = 0
@@ -351,3 +357,20 @@ if __name__ == "__main__":
         dest_url_env=args.dest_url_env,
         dest_key_env=args.dest_key_env
     )
+
+# load_dotenv()
+
+# # Only run this ONCE to (re)create the collection!
+# client = QdrantClient(
+#     url=os.environ["NEW_CROPWIZARD_QDRANT_URL"],
+#     api_key=os.environ["NEW_CROPWIZARD_QDRANT_KEY"],
+#     port=6333,
+#     https=False
+# )
+
+# client.recreate_collection(
+#     collection_name=os.environ["NEW_CROPWIZARD_QDRANT_COLLECTION"],
+#     vectors_config=models.VectorParams(size=1536, distance="Cosine")
+# )
+# print("Destination collection created!")
+# exit(0)  # Prevents the rest of the script from running
