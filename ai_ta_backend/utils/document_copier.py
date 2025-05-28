@@ -155,6 +155,18 @@ def copy_documents_api(
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+def verify_connection(client: Client, course_name: str) -> bool:
+    """Verify connection to Supabase by attempting to fetch a single document."""
+    try:
+        response = client.table("documents") \
+                      .select("id") \
+                      .eq("course_name", course_name) \
+                      .limit(1) \
+                      .execute()
+        return not (hasattr(response, 'error') and response.error)
+    except Exception:
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Copy documents from one course to another in Supabase")
     parser.add_argument("--source-course", required=True, help="Source course name")
@@ -169,43 +181,99 @@ def main():
     parser.add_argument("--destination-key", type=str, help="Destination Supabase Key (overrides env)")
     args = parser.parse_args()
 
-    source_client = get_supabase_client(args.source_url, args.source_key)
-    destination_client = get_supabase_client(args.destination_url, args.destination_key)
-    failed_docs = []
-    total_copied = 0
+    # Warn if source and destination credentials are the same
+    if (args.source_url and args.destination_url and args.source_url == args.destination_url \
+        and args.source_key and args.destination_key and args.source_key == args.destination_key):
+        print("Warning: Source and destination Supabase credentials are identical. You are copying within the same database/account.")
 
-    if args.retry_file:
-        # Load identifiers from file
-        with open(args.retry_file, "r") as f:
-            identifiers = [line.strip() for line in f if line.strip()]
-        print(f"Retrying {len(identifiers)} documents from {args.retry_file} using field '{args.id_field}'")
-        docs = get_documents_by_identifiers(source_client, args.source_course, identifiers, args.id_field)
-        print(f"Found {len(docs)} documents to retry.")
-        total_copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
-    else:
-        # ... existing batch loop code ...
-        offset = 0
-        batch_size = args.batch_size
-        print(f"Starting batch copy from {args.source_course} to {args.target_course} (batch size: {batch_size})")
-        while True:
-            print(f"Fetching documents {offset} to {offset + batch_size - 1}...")
-            docs = get_documents_by_course_batch(source_client, args.source_course, offset, offset + batch_size - 1)
-            if not docs:
-                print("No more documents to process.")
-                break
-            print(f"Processing batch of {len(docs)} documents...")
-            copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
-            total_copied += copied
-            offset += batch_size
-            if len(docs) < batch_size:
-                break  # Last batch
+    try:
+        source_client = get_supabase_client(args.source_url, args.source_key)
+        destination_client = get_supabase_client(args.destination_url, args.destination_key)
 
-    print(f"Operation completed. {total_copied} documents {'would be ' if args.dry_run else ''}copied.")
-    if failed_docs:
-        print(f"{len(failed_docs)} documents failed to copy. See 'failed_documents.log' for details.")
-        with open("failed_documents.log", "w") as f:
-            for doc in failed_docs:
-                f.write(f"{doc[args.id_field]}\n")
+        # Verify connections
+        source_connected = verify_connection(source_client, args.source_course)
+        destination_connected = verify_connection(destination_client, args.target_course)
+
+        if source_connected and destination_connected:
+            print(f"Successfully connected to both source and destination databases for course: {args.source_course}")
+
+            # Print first 10 documents from source course
+            try:
+                response = source_client.table("documents") \
+                    .select("*") \
+                    .eq("course_name", args.source_course) \
+                    .limit(10) \
+                    .execute()
+                if hasattr(response, 'error') and response.error:
+                    print("Error fetching documents:", response.error)
+                else:
+                    print(f"\nFirst 10 documents in source course '{args.source_course}':")
+                    for doc in response.data:
+                        print(f"- {doc.get('readable_filename', 'No filename')} (ID: {doc.get('id', 'No ID')})")
+            except Exception as e:
+                print(f"Error fetching documents from source: {str(e)}")
+
+            # Print first 10 documents from destination course
+            try:
+                dest_response = destination_client.table("documents") \
+                    .select("*") \
+                    .eq("course_name", args.target_course) \
+                    .limit(10) \
+                    .execute()
+                if hasattr(dest_response, 'error') and dest_response.error:
+                    print("Error fetching destination documents:", dest_response.error)
+                else:
+                    print(f"\nFirst 10 documents in destination course '{args.target_course}':")
+                    for doc in dest_response.data:
+                        print(f"- {doc.get('readable_filename', 'No filename')} (ID: {doc.get('id', 'No ID')})")
+            except Exception as e:
+                print(f"Error fetching documents from destination: {str(e)}")
+
+            # Proceed with original batch/retry copy logic
+            failed_docs = []
+            total_copied = 0
+
+            if args.retry_file:
+                # Load identifiers from file
+                with open(args.retry_file, "r") as f:
+                    identifiers = [line.strip() for line in f if line.strip()]
+                print(f"Retrying {len(identifiers)} documents from {args.retry_file} using field '{args.id_field}'")
+                docs = get_documents_by_identifiers(source_client, args.source_course, identifiers, args.id_field)
+                print(f"Found {len(docs)} documents to retry.")
+                total_copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+            else:
+                offset = 0
+                batch_size = args.batch_size
+                print(f"Starting batch copy from {args.source_course} to {args.target_course} (batch size: {batch_size})")
+                while True:
+                    print(f"Fetching documents {offset} to {offset + batch_size - 1}...")
+                    docs = get_documents_by_course_batch(source_client, args.source_course, offset, offset + batch_size - 1)
+                    if not docs:
+                        print("No more documents to process.")
+                        break
+                    print(f"Processing batch of {len(docs)} documents...")
+                    copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+                    total_copied += copied
+                    offset += batch_size
+                    if len(docs) < batch_size:
+                        break  # Last batch
+
+            print(f"Operation completed. {total_copied} documents {'would be ' if args.dry_run else ''}copied.")
+            if failed_docs:
+                print(f"{len(failed_docs)} documents failed to copy. See 'failed_documents.log' for details.")
+                with open("failed_documents.log", "w") as f:
+                    for doc in failed_docs:
+                        f.write(f"{doc[args.id_field]}\n")
+        else:
+            if not source_connected:
+                print(f"Failed to connect to source database for course: {args.source_course}")
+            if not destination_connected:
+                print(f"Failed to connect to destination database for course: {args.target_course}")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
