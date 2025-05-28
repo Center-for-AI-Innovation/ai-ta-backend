@@ -739,17 +739,25 @@ def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
-"""
-USAGE:
-curl -X POST http://localhost:8000/copy-course-vectors \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source_course": "cropwizard-1.5",
-    "destination_course": "cropwizard-1.6"
-  }'
-"""  
+
 @app.route('/copy-course-vectors', methods=['POST'])
 def copy_course_vectors_endpoint():
+    """
+    Copy all vector data from a source course to a destination course in Qdrant.
+
+    Usage:
+      1. HTTP API:
+         POST /copy-course-vectors
+         Body: {"source_course": "A", "destination_course": "B"}
+         Example:
+           curl -X POST http://localhost:8000/copy-course-vectors \
+             -H "Content-Type: application/json" \
+             -d '{"source_course": "A", "destination_course": "B"}'
+
+      2. Python script:
+         python ai_ta_backend/utils/copy_course_vectors.py A B
+         (See script for advanced options)
+    """
     data = request.get_json() or {}
     source_course = data.get('source_course')
     destination_course = data.get('destination_course')

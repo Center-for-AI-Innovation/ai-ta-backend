@@ -1,7 +1,13 @@
 """
-USAGE:
-    python copy_course_vectors.py "source_course" "destination_course"
-    python copy_course_vectors.py "source_course" "destination_course" --retry-failed
+Copy all vector data from a source course to a destination course in Qdrant.
+
+Usage:
+    python copy_course_vectors.py <source_course> <destination_course>
+    # Example:
+    python copy_course_vectors.py cropwizard-1.5 cropwizard-1.6
+
+For advanced options, run:
+    python copy_course_vectors.py --help
 """
 
 import os
