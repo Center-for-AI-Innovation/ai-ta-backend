@@ -89,6 +89,7 @@ def canvas_ingest(context, **inputs: Dict[str, Any]):
 
   course_name: List[str] | str = inputs.get('course_name', '')
   canvas_url: List[str] | str | None = inputs.get('canvas_url', None)
+  
   # Options:
   files: bool = inputs.get('files', True)
   pages: bool = inputs.get('pages', True)
@@ -114,6 +115,12 @@ def canvas_ingest(context, **inputs: Dict[str, Any]):
     canvas_course_id = match.group(1) if match else None
 
     ingester = CanvasIngest(s3_client, canvas_client, posthog)
+    
+    # Auto-accept invitation for this specific course
+    print("Auto-accepting pending course invitation...")
+    accept_status = ingester.auto_accept_enrollments(canvas_course_id)
+    print(f"Auto-accept status: {accept_status}")
+    
     ingester.ingest_course_content(canvas_course_id=canvas_course_id,
                                    course_name=course_name,
                                    content_ingest_dict=options)
@@ -133,6 +140,91 @@ class CanvasIngest():
     self.s3_client = s3_client
     self.canvas_client = canvas_client
     self.headers = {"Authorization": "Bearer " + os.getenv('CANVAS_ACCESS_TOKEN')}
+
+  def auto_accept_enrollments(self, target_course_id):
+    try:
+        print("Getting user ID...")
+        user_response = requests.get(
+            "https://canvas.illinois.edu/api/v1/users/self", 
+            headers=self.headers
+        )
+        user_response.raise_for_status()
+        user_data = user_response.json()
+        user_id = user_data.get('id')
+        print(f"User ID: {user_id}, Name: {user_data.get('name')}")
+        
+        if not user_id:
+            print("Failed to get user ID")
+            return "Failed to get user ID"
+        
+        # First, check if user is already enrolled in the target course
+        print(f"Checking if user is already enrolled in course ID {target_course_id}...")
+        current_enrollments_url = f"https://canvas.illinois.edu/api/v1/users/{user_id}/enrollments?state[]=active"
+        current_enrollment_response = requests.get(current_enrollments_url, headers=self.headers)
+        current_enrollment_response.raise_for_status()
+        current_enrollments = current_enrollment_response.json()
+        
+        # Check if already enrolled in target course
+        for enrollment in current_enrollments:
+            course_id = enrollment.get('course_id')
+            if str(course_id) == str(target_course_id):
+                print(f"User is already enrolled in course ID {target_course_id}")
+                return f"User is already enrolled in course ID {target_course_id}"
+        
+        # If not already enrolled, check for pending invitations
+        print(f"User not currently enrolled. Checking for pending enrollments for user ID {user_id}...")
+        enrollments_url = f"https://canvas.illinois.edu/api/v1/users/{user_id}/enrollments?state[]=invited"
+        enrollment_response = requests.get(enrollments_url, headers=self.headers)
+        enrollment_response.raise_for_status()
+        pending_enrollments = enrollment_response.json()
+        
+        print(f"Found {len(pending_enrollments)} pending enrollments")
+        
+        # Find the enrollment for the target course
+        target_enrollment = None
+        for enrollment in pending_enrollments:
+            course_id = enrollment.get('course_id')
+            if str(course_id) == str(target_course_id):
+                target_enrollment = enrollment
+                break
+        
+        # If no enrollment found for the target course, throw error
+        if not target_enrollment:
+            error_msg = f"User is not enrolled and no pending invitation found for course ID {target_course_id}"
+            print(error_msg)
+            raise Exception(error_msg)
+        
+        # Accept the enrollment for the target course
+        course_id = target_enrollment.get('course_id')
+        enrollment_id = target_enrollment.get('id')
+        
+        if not course_id or not enrollment_id:
+            error_msg = f"Missing course_id or enrollment_id in enrollment data: {target_enrollment}"
+            print(error_msg)
+            raise Exception(error_msg)
+            
+        print(f"Accepting enrollment ID {enrollment_id} for course ID {course_id}...")
+        accept_url = f"https://canvas.illinois.edu/api/v1/courses/{course_id}/enrollments/{enrollment_id}/accept"
+        accept_response = requests.post(accept_url, headers=self.headers)
+        
+        if accept_response.status_code == 200:
+            result = accept_response.json()
+            if result.get('success'):
+                print(f"Successfully accepted enrollment in course ID {course_id}")
+                return f"Successfully accepted enrollment for course ID {course_id}"
+            else:
+                error_msg = f"Failed to accept enrollment: {result}"
+                print(error_msg)
+                raise Exception(error_msg)
+        else:
+            error_msg = f"Failed to accept enrollment. Status code: {accept_response.status_code}"
+            print(error_msg)
+            raise Exception(error_msg)
+            
+    except Exception as e:
+        print(f"Error in auto_accept_enrollments: {e}")
+        sentry_sdk.capture_exception(e)
+        return f"Failed! Error: {str(e)}"
 
   def upload_file(self, file_path: str, bucket_name: str, object_name: str):
     self.s3_client.upload_file(file_path, bucket_name, object_name)
