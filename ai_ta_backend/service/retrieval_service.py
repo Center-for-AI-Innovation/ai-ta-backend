@@ -170,25 +170,44 @@ class RetrievalService:
       )
 
       # --- PrimeKG agent decision ---
-      primekg_context = None
-      if self.should_query_primekg(search_query):
-        primekg_result = self.getPrimeKGContexts(search_query)
-        if primekg_result and isinstance(primekg_result, dict) and "result" in primekg_result:
-            primekg_context = {
-                "text": primekg_result["result"],
-                "readable_filename": "PrimeKG",
+      # primekg_context = None
+      # if self.should_query_primekg(search_query):
+      #   primekg_result = self.getPrimeKGContexts(search_query)
+      #   if primekg_result and isinstance(primekg_result, dict) and "result" in primekg_result:
+      #       primekg_context = {
+      #           "text": primekg_result["result"],
+      #           "readable_filename": "PrimeKG",
+      #           "course_name": course_name,
+      #           "s3_path": None,
+      #           "pagenumber": None,
+      #           "url": None,
+      #           "base_url": None,
+      #           "doc_groups": None,
+      #           "primekg_intermediate_steps": primekg_result.get("intermediate_steps"),
+      #           "primekg_query": primekg_result.get("query"),
+      #       }
+      # --- Clinical KG agent decision ---
+      clinicalkg_context = None
+      if self.should_query_clinical_kg(search_query):
+        clinicalkg_result = self.getKnowledgeGraphContexts(search_query, course_name)
+        if clinicalkg_result and isinstance(clinicalkg_result, dict) and "result" in clinicalkg_result:
+            clinicalkg_context = {
+                "text": clinicalkg_result["result"],
+                "readable_filename": "ClinicalKG",
                 "course_name": course_name,
                 "s3_path": None,
                 "pagenumber": None,
                 "url": None,
                 "base_url": None,
                 "doc_groups": None,
-                "primekg_intermediate_steps": primekg_result.get("intermediate_steps"),
-                "primekg_query": primekg_result.get("query"),
+                "clinicalkg_intermediate_steps": clinicalkg_result.get("intermediate_steps"),
+                "clinicalkg_query": clinicalkg_result.get("query"),
             }
       formatted = self.format_for_json(valid_docs)
-      if primekg_context:
-          formatted.append(primekg_context)
+      # if primekg_context:
+      #     formatted.append(primekg_context)
+      if clinicalkg_context:
+          formatted.append(clinicalkg_context)
       return formatted
     except Exception as e:
       # return full traceback to front end
@@ -794,7 +813,12 @@ class RetrievalService:
         
         execution_time = time.monotonic() - start_time
         print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
-
+        
+        # Post-process: If the result is "I don't know the answer", return empty
+        result_text = response.get("result", "")
+        if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+            return {}  # or {"result": ""} or [] depending on your downstream expectations
+        
         print("FINAL RESPONSE: ", response)
         
         return response
@@ -811,7 +835,8 @@ class RetrievalService:
     """
     try:
         start_time = time.monotonic()
-        response = self.graphDb.prime_kg_chain.invoke({"query": user_query})
+        response = self.graphDb.run_primekg_query_with_retries(user_query)
+        print("RESPONSE pre post processing: ", response)
         execution_time = time.monotonic() - start_time
         print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
 
@@ -832,4 +857,11 @@ class RetrievalService:
     Simple agent to decide if PrimeKG should be queried based on keywords in the search query.
     """
     keywords = ["disease", "drug", "gene", "symptom", "side effect", "treatment", "primekg", "cell"]
+    return any(kw in search_query.lower() for kw in keywords)
+
+  def should_query_clinical_kg(self, search_query: str) -> bool:
+    """
+    Simple agent to decide if Clinical KG should be queried based on keywords in the search query.
+    """
+    keywords = ["patient", "symptom", "diagnosis", "treatment", "clinical", "disease", "drug", "gene", "side effect"]
     return any(kw in search_query.lower() for kw in keywords)

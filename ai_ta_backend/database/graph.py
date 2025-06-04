@@ -2,18 +2,53 @@ import os
 
 from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
 from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
 
+
+class PrimeKGQueryState(TypedDict):
+    user_query: str
+    attempt: int
+    queries_tried: list[str]
+    results: list[dict]
+    max_attempts: int
+
+# Example strategies for generating Cypher queries (can be extended)
+def generate_primekg_cypher(user_query: str, attempt: int) -> str:
+    # For demonstration, just return the user query as a Cypher string (replace with real logic)
+    # In practice, you would use different templates or prompt modifications per attempt
+    # For now, just echo the user_query for all attempts
+    return user_query
+
+def run_primekg_chain(chain, cypher_query: str):
+    # This function should call the chain with the cypher_query
+    # For now, assume chain.invoke returns a dict with 'results' key
+    # In practice, you may need to adapt this to your chain's API
+    try:
+        result = chain.invoke({"query": cypher_query})
+        # Adapt this if your chain returns results differently
+        if isinstance(result, dict) and "results" in result:
+            return result["results"]
+        return result
+    except Exception as e:
+        return []
 
 class GraphDatabase:
 
   def __init__(self):
-    # self.clinical_kg_graph = Neo4jGraph(
-    #     url=os.environ['CKG_NEO4J_URI'],
-    #     username=os.environ['CKG_NEO4J_USERNAME'],
-    #     password=os.environ['CKG_NEO4J_PASSWORD'],
-    #     database=os.environ['CKG_NEO4J_DATABASE'],
-    #     refresh_schema=True,
-    # )
+    self.clinical_kg_graph = Neo4jGraph(
+        url=os.environ['CKG_NEO4J_URI'],
+        username=os.environ['CKG_NEO4J_USERNAME'],
+        password=os.environ['CKG_NEO4J_PASSWORD'],
+        database=os.environ['CKG_NEO4J_DATABASE'],
+        refresh_schema=True,
+    )
+
+    try:
+      count = self.clinical_kg_graph.query("MATCH (n) RETURN count(n) AS node_count LIMIT 1")
+      print(f"[DEBUG] Connected to Clinical KG Neo4j. Node count: {count[0]['node_count']}")
+    except Exception as e:
+      print(f"[ERROR] Could not connect to Clinical KG Neo4j: {e}")
 
     self.prime_kg_graph = Neo4jGraph(
         url=os.environ['PRIME_KG_NEO4J_URI'],
@@ -23,12 +58,18 @@ class GraphDatabase:
         refresh_schema=True,
     )
 
+    try:
+      count = self.prime_kg_graph.query("MATCH (n) RETURN count(n) AS node_count LIMIT 1")
+      print(f"[DEBUG] Connected to Prime KG Neo4j. Node count: {count[0]['node_count']}")
+    except Exception as e:
+      print(f"[ERROR] Could not connect to Prime KG Neo4j: {e}")
+
     # Get schema information for the system prompt
-    # self.ckg_schema_info = self._get_schema_info(self.clinical_kg_graph)
+    self.ckg_schema_info = self._get_schema_info(self.clinical_kg_graph)
     self.prime_kg_schema_info = self._get_schema_info(self.prime_kg_graph)
 
     # Create the chain with the clinical KG system prompt
-    # self.ckg_chain = self._create_clinical_kg_chain()
+    self.ckg_chain = self._create_clinical_kg_chain()
     self.prime_kg_chain = self._create_prime_kg_chain()
 
   def refresh_schema(self, graph):
@@ -51,35 +92,102 @@ class GraphDatabase:
 
     schema_info = self.ckg_schema_info
     system_prompt = f"""
-        You are a clinical knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
-        
-        SCHEMA INFORMATION:
-        {schema_info}
-        
-        GUIDELINES FOR GENERATING CYPHER QUERIES:
-            1. Always use the correct node labels and relationship types from the schema information. Pay attention to the formatting of the node and relationship names.
-            2. Identify the key entities from the user query and use the most specific node type available. Analyze and choose the relationships in the schema carefully.
-            3. Use appropriate WHERE clauses with case-insensitive matching:
-            - For exact matches: WHERE toLower(n.name) = toLower("term")
-            - For partial matches: WHERE toLower(n.name) CONTAINS toLower("term")
-            4. For complex queries, use multiple MATCH clauses rather than long path patterns.
-            5. Include LIMIT clauses (typically 5-15 results) for readability.
-            6. For property access, use the correct property names from the schema.
-            7. When appropriate, use aggregation functions (count, collect, etc.).
-            8. For path finding, consider using shortest path algorithms.
-            9. Return the most clinically relevant properties in the RETURN clause.
-            10. When generating the Cypher query, read through the schema information and try out different combinations of node labels and relationship types to find the most relevant ones.
-            
-        RESPONSE FORMAT:
-            1. First, explain the Cypher query you're generating and why it addresses the user's question.
-            2. If the response from neo4j is empty, return "No results found".
-            3. If the response from neo4j is not empty, return the same in a list of dictionaries along with the full context.
-        """
+      You are a clinical knowledge graph expert assistant that helps healthcare professionals query a medical knowledge graph.
+
+      SCHEMA INFORMATION:
+      {schema_info}
+
+      GUIDELINES FOR GENERATING CYPHER QUERIES:
+      1. Always use the correct node labels and relationship types from the schema information.
+      2. Identify key entities from the user query and use the most specific node type available.
+      3. Use appropriate WHERE clauses with case-insensitive matching:
+        - For exact matches: WHERE toLower(n.name) = toLower("term")
+        - For partial matches: WHERE toLower(n.name) CONTAINS toLower("term")
+      4. For complex queries, use multiple MATCH clauses rather than long path patterns.
+      5. Include LIMIT clauses (typically 5-15 results) for readability.
+      6. Use correct property names from the schema.
+      7. Use aggregation functions (count, collect, etc.) when appropriate.
+      8. For path finding, consider using shortest path algorithms.
+      9. Return the most clinically relevant properties in the RETURN clause.
+      10. Try different combinations of node labels and relationship types to find the most relevant ones.
+
+      RESPONSE FORMAT:
+      1. First, explain the Cypher query you're generating and why it addresses the user's question.
+      2. Present the Cypher query.
+      3. If the response is empty, return "No results found" and try alternative queries.
+      4. If results are found, present them as a list of dictionaries with relevant properties.
+
+      EXAMPLES:
+
+      Example 1: Protein-Cellular Component Association
+      User query: "Which cellular components is the protein EGR1 associated with?"
+
+      Explain: To answer this question, I'll search for the Protein node with the name 'EGR1' and find all 
+      Cellular_component nodes connected to it via the ASSOCIATED_WITH relationship. I'll also return the 
+      evidence type and source for each association.
+
+      Cypher:
+      MATCH (p:Protein)-[r:ASSOCIATED_WITH]->(cc:Cellular_component)
+      WHERE toLower(p.name) = "egr1"
+      RETURN 
+          p.name AS Protein, 
+          cc.name AS CellularComponent, 
+          cc.id AS CellularComponentID, 
+          r.evidence_type AS EvidenceType, 
+          r.source AS Source
+      ORDER BY cc.name
+
+      Example 2: Disease Pathology Samples
+      User query: "List proteins detected in pathology samples for pancreatic cancer."
+
+      Explain: I'll search for Disease nodes with the name 'pancreatic cancer' and find all Protein nodes 
+      connected via the DETECTED_IN_PATHOLOGY_SAMPLE relationship, including expression levels and prognosis data.
+
+      Cypher:
+      MATCH (p:Protein)-[r:DETECTED_IN_PATHOLOGY_SAMPLE]->(d:Disease)
+      WHERE toLower(d.name) = "pancreatic cancer"
+      RETURN 
+          p.name AS Protein, 
+          d.name AS Disease, 
+          r.expression_low AS ExpressionLow, 
+          r.expression_medium AS ExpressionMedium, 
+          r.expression_high AS ExpressionHigh, 
+          r.not_detected AS NotDetected, 
+          r.positive_prognosis_logrank_pvalue AS PositivePrognosisP, 
+          r.negative_prognosis_logrank_pvalue AS NegativePrognosisP, 
+          r.linkout AS Link
+      ORDER BY p.name
+
+      Example 3: Gene Variants
+      User query: "List all genes that have a known missense variant."
+
+      Explain: I'll search for Known_variant nodes with the effect 'missense variant' and find all Gene nodes 
+      connected via the VARIANT_FOUND_IN_GENE relationship, returning gene and variant information.
+
+      Cypher:
+      MATCH (v:Known_variant)-[:VARIANT_FOUND_IN_GENE]->(g:Gene)
+      WHERE toLower(v.effect) = "missense variant"
+      RETURN 
+          g.name AS Gene, 
+          v.pvariant_id AS Variant, 
+          v.external_id AS ExternalID
+      ORDER BY g.name, v.pvariant_id
+      LIMIT 15
+
+      Note: For each query, if no results are found, try alternative approaches such as:
+      - Using different relationship types
+      - Broadening search terms
+      - Checking for synonyms
+      - Using different node properties
+      Always explain the alternative approaches being tried.
+      """
     print("SYSTEM PROMPT: ", system_prompt)
     return GraphCypherQAChain.from_llm(
-        ChatOpenAI(temperature=0, model="gpt-4o"),
+        ChatOpenAI(temperature=0, model="gpt-4o", api_key=os.environ['VLADS_OPENAI_KEY']),
         graph=self.clinical_kg_graph,
-        verbose=False,
+        return_direct=True,
+        verbose=True,
+        show_intermediate_steps=True,
         allow_dangerous_requests=True,
         system_message=system_prompt,
     )
@@ -219,7 +327,8 @@ class GraphDatabase:
     """
     print("SYSTEM PROMPT: ", system_prompt)
     return GraphCypherQAChain.from_llm(
-        ChatOpenAI(temperature=0, model="gpt-4.1", api_key=os.environ['VLADS_OPENAI_KEY']),
+        ChatOpenAI(temperature=0, model="gpt-4o", api_key=os.environ['VLADS_OPENAI_KEY']),
+        return_direct=True,
         return_intermediate_steps=True,
         graph=self.prime_kg_graph,
         verbose=True,
@@ -276,3 +385,47 @@ class GraphDatabase:
         allow_dangerous_requests=True,
         system_message=system_prompt,
     )
+
+  def run_primekg_query_with_retries(self, user_query: str, max_attempts: int = 3):
+    """
+    Use LangGraph to run a PrimeKG query with up to max_attempts, trying different strategies if no results are found.
+    Returns the first non-empty result or the last attempt's result.
+    """
+    chain = self.prime_kg_chain
+    
+    def query_node(state: PrimeKGQueryState):
+        cypher_query = generate_primekg_cypher(state["user_query"], state["attempt"])
+        results = run_primekg_chain(chain, cypher_query)
+        return {
+            "queries_tried": state["queries_tried"] + [cypher_query],
+            "results": results,
+            "attempt": state["attempt"] + 1,
+        }
+
+    def should_retry(state: PrimeKGQueryState):
+        if state["results"]:
+            return "success"
+        elif state["attempt"] < state["max_attempts"]:
+            return "query_node"
+        else:
+            return "fail"
+
+    builder = StateGraph(PrimeKGQueryState)
+    builder.add_node("query_node", query_node)
+    builder.add_conditional_edges("query_node", should_retry, {
+        "success": END,
+        "fail": END,
+        "query_node": "query_node"
+    })
+    builder.add_edge(START, "query_node")
+    graph = builder.compile()
+
+    initial_state = PrimeKGQueryState(
+        user_query=user_query,
+        attempt=0,
+        queries_tried=[],
+        results=[],
+        max_attempts=max_attempts,
+    )
+    result = graph.invoke(initial_state)
+    return result
