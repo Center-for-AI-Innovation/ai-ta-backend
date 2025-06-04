@@ -4,6 +4,8 @@ coursera-dl/
 wandb
 *.ipynb
 *.pem
+*.idea
+*.DS_Store
 
 # don't expose env files
 .env
