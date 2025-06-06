@@ -12,6 +12,9 @@ from dateutil import parser
 from injector import inject
 from langchain.embeddings.ollama import OllamaEmbeddings
 
+from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
+from langchain_openai import ChatOpenAI
+
 # from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import Document
@@ -24,6 +27,7 @@ from ai_ta_backend.database.sql import (
     WeeklyMetric,
 )
 from ai_ta_backend.database.vector import VectorDatabase
+from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapter
 
 # from ai_ta_backend.service.nomic_service import NomicService
@@ -37,10 +41,11 @@ class RetrievalService:
   """
 
   @inject
-  def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, posthog: PosthogService,
+  def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, graphDb: GraphDatabase, posthog: PosthogService,
                sentry: SentryService, thread_pool_executor: ThreadPoolExecutorAdapter):
     self.vdb = vdb
     self.sqlDb = sqlDb
+    self.graphDb = graphDb
     self.aws = aws
     self.sentry = sentry
     self.posthog = posthog
@@ -56,8 +61,9 @@ class RetrievalService:
         # openai_api_version=os.environ["OPENAI_API_VERSION"],
     )
 
-    self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')
-
+    self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')   
+    
+    
     # self.llm = AzureChatOpenAI(
     #     temperature=0,
     #     deployment_name=os.environ["AZURE_OPENAI_ENGINE"],
@@ -66,6 +72,7 @@ class RetrievalService:
     #     openai_api_version=os.environ["OPENAI_API_VERSION"],
     #     openai_api_type=os.environ['OPENAI_API_TYPE'],
     # )
+
 
   async def getTopContexts(self,
                            search_query: str,
@@ -162,7 +169,46 @@ class RetrievalService:
           },
       )
 
-      return self.format_for_json(valid_docs)
+      # --- PrimeKG agent decision ---
+      primekg_context = None
+      if self.should_query_primekg(search_query):
+        primekg_result = self.getPrimeKGContexts(search_query)
+        if primekg_result:
+            summary = self.generate_openai_summary(search_query, primekg_result)
+            primekg_context = {
+                "kg_result": primekg_result,
+                "readable_filename": "PrimeKG",
+                "course_name": course_name,
+                "s3_path": None,
+                "pagenumber": None,
+                "url": None,
+                "base_url": None,
+                "doc_groups": None,
+                "text": summary,
+            }
+      # --- Clinical KG agent decision ---
+      clinicalkg_context = None
+      if self.should_query_clinical_kg(search_query):
+        clinicalkg_result = self.getKnowledgeGraphContexts(search_query, course_name)
+        if clinicalkg_result and isinstance(clinicalkg_result, dict) and "result" in clinicalkg_result:
+            clinicalkg_context = {
+                "text": clinicalkg_result["result"],
+                "readable_filename": "ClinicalKG",
+                "course_name": course_name,
+                "s3_path": None,
+                "pagenumber": None,
+                "url": None,
+                "base_url": None,
+                "doc_groups": None,
+                "clinicalkg_intermediate_steps": clinicalkg_result.get("intermediate_steps"),
+                "clinicalkg_query": clinicalkg_result.get("query"),
+            }
+      formatted = self.format_for_json(valid_docs)
+      if primekg_context:
+          formatted.append(primekg_context)
+      if clinicalkg_context:
+          formatted.append(clinicalkg_context)
+      return formatted
     except Exception as e:
       # return full traceback to front end
       # err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:\n{e}"  # type: ignore
@@ -763,3 +809,95 @@ class RetrievalService:
       print(f"Error fetching model usage counts for {project_name}: {str(e)}")
       self.sentry.capture_exception(e)
       return []
+    
+  def getKnowledgeGraphContexts(self, user_query: str, course_name: str) -> Dict:
+    """
+    Get knowledge graph contexts from Clinical KG
+    """
+    try:
+        start_time = time.monotonic()
+        
+        custom_chain = self.graphDb.create_chain_with_custom_prompt()
+        response = self.graphDb.ckg_chain.invoke({"query": user_query})
+        
+        execution_time = time.monotonic() - start_time
+        print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
+        
+        # Post-process: If the result is "I don't know the answer", return empty
+        result_text = response.get("result", "")
+        if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+            return {}  # or {"result": ""} or [] depending on your downstream expectations
+        
+        print("FINAL RESPONSE: ", response)
+        
+        return response
+    except Exception as e:
+        error_msg = f"Error in knowledge graph query for '{user_query}': {str(e)}"
+        print(error_msg)
+        self.sentry.capture_exception(e)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  
+  def getPrimeKGContexts(self, user_query: str) -> Dict:
+    """
+    Get knowledge graph contexts from Prime KG
+    """
+    try:
+        start_time = time.monotonic()
+        response = self.graphDb.run_primekg_query_with_retries(user_query)
+        print("RESPONSE pre post processing: ", response)
+        execution_time = time.monotonic() - start_time
+        print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
+
+        # Post-process: If the result is "I don't know the answer", return empty
+        # Try to extract the nested 'result' field from the 'results' object
+        if isinstance(response, dict):
+            results_obj = response.get("results")
+            if isinstance(results_obj, dict) and "result" in results_obj:
+                return results_obj["result"]
+
+        return response
+
+    except Exception as e:  
+        print(f"Error in getPrimeKGContexts: {str(e)}")
+        self.sentry.capture_exception(e)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  def should_query_primekg(self, search_query: str) -> bool:
+    """
+    Simple agent to decide if PrimeKG should be queried based on keywords in the search query.
+    """
+    keywords = ["disease", "drug", "gene", "symptom", "side effect", "treatment", "primekg", "cell"]
+    return any(kw in search_query.lower() for kw in keywords)
+
+  def should_query_clinical_kg(self, search_query: str) -> bool:
+    """
+    Simple agent to decide if Clinical KG should be queried based on keywords in the search query.
+    """
+    keywords = ["patient", "symptom", "diagnosis", "treatment", "clinical", "disease", "drug", "gene", "side effect"]
+    return any(kw in search_query.lower() for kw in keywords)
+
+  def generate_openai_summary(self, user_query: str, kg_result: list) -> str:
+    """
+    Generate a summary using the OpenAI API, given the user query and the first 5 results from the KG.
+    """
+    from openai import OpenAI
+    import os
+
+    client = OpenAI(api_key=os.environ["VLADS_OPENAI_KEY"])
+    # Truncate or format kg_result for prompt if it's very large
+    context_str = str(kg_result)[:4000]  # adjust as needed for token limits
+
+    prompt = (
+        f"User question: {user_query}\n"
+        f"Knowledge graph results: {context_str}\n"
+        "Please provide a concise, readable summary of the key findings that answer the user's question."
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o",  # or "gpt-3.5-turbo" if you want to save cost
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=256,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
