@@ -187,27 +187,27 @@ class RetrievalService:
                 "text": summary,
             }
       # --- Clinical KG agent decision ---
-      # clinicalkg_context = None
-      # if self.should_query_clinical_kg(search_query):
-      #   clinicalkg_result = self.getKnowledgeGraphContexts(search_query, course_name)
-      #   if clinicalkg_result and isinstance(clinicalkg_result, dict) and "result" in clinicalkg_result:
-      #       clinicalkg_context = {
-      #           "text": clinicalkg_result["result"],
-      #           "readable_filename": "ClinicalKG",
-      #           "course_name": course_name,
-      #           "s3_path": None,
-      #           "pagenumber": None,
-      #           "url": None,
-      #           "base_url": None,
-      #           "doc_groups": None,
-      #           "clinicalkg_intermediate_steps": clinicalkg_result.get("intermediate_steps"),
-      #           "clinicalkg_query": clinicalkg_result.get("query"),
-      #       }
+      clinicalkg_context = None
+      if self.should_query_clinical_kg(search_query):
+        clinicalkg_result = self.getKnowledgeGraphContexts(search_query, course_name)
+        if clinicalkg_result and isinstance(clinicalkg_result, dict) and "result" in clinicalkg_result:
+            clinicalkg_context = {
+                "text": clinicalkg_result["result"],
+                "readable_filename": "ClinicalKG",
+                "course_name": course_name,
+                "s3_path": None,
+                "pagenumber": None,
+                "url": None,
+                "base_url": None,
+                "doc_groups": None,
+                "clinicalkg_intermediate_steps": clinicalkg_result.get("intermediate_steps"),
+                "clinicalkg_query": clinicalkg_result.get("query"),
+            }
       formatted = self.format_for_json(valid_docs)
       if primekg_context:
           formatted.append(primekg_context)
-      # if clinicalkg_context:
-      #     formatted.append(clinicalkg_context)
+      if clinicalkg_context:
+          formatted.append(clinicalkg_context)
       return formatted
     except Exception as e:
       # return full traceback to front end
