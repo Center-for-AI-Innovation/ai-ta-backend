@@ -1,4 +1,5 @@
 import os
+import re
 
 from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
 from langchain_openai import ChatOpenAI
@@ -15,10 +16,46 @@ class PrimeKGQueryState(TypedDict):
 
 # Example strategies for generating Cypher queries (can be extended)
 def generate_primekg_cypher(user_query: str, attempt: int) -> str:
-    # For demonstration, just return the user query as a Cypher string (replace with real logic)
-    # In practice, you would use different templates or prompt modifications per attempt
-    # For now, just echo the user_query for all attempts
-    return user_query
+    """
+    Generate different Cypher queries for each attempt, aligned with the system prompt instructions.
+    For queries mentioning two entities, retries after the first attempt will use CONTAINS for node names and match any relationship type between the nodes.
+    """
+    general_terms = ["related to", "associated with", "connected to", "linked to", "connection", "relationship"]
+    lower_query = user_query.lower()
+    uses_general_term = any(term in lower_query for term in general_terms)
+
+    # Simple heuristic: look for two quoted entities or two 'and'-separated terms
+    # e.g., "diabetes and heart disease"
+    entity_match = re.findall(r'([\w\- ]+) and ([\w\- ]+)', user_query, re.IGNORECASE)
+    if entity_match:
+        entity1, entity2 = entity_match[0]
+        entity1 = entity1.strip(' "')
+        entity2 = entity2.strip(' "')
+    else:
+        entity1 = entity2 = None
+
+    if attempt == 0:
+        # First attempt: smart mapping and synonym use for node labels/relationships
+        return f"{user_query} (map user terms to closest schema node labels/relationships, use synonyms if needed)"
+    elif (attempt == 1 or attempt == 2) and entity1 and entity2:
+        # For retries, if two entities are detected, use CONTAINS and match any relationship type
+        return (
+            f"Find any connections between entities using partial matching and any relationship type: "
+            f'MATCH (d1:disease), (d2:disease) '\
+            f'WHERE toLower(d1.node_name) CONTAINS "{entity1.lower()}" '\
+            f'AND toLower(d2.node_name) CONTAINS "{entity2.lower()}" '\
+            f'MATCH (d1)-[r]-(d2) '\
+            f'RETURN d1.node_name AS Disease1, d2.node_name AS Disease2, type(r) AS RelationshipType, r'
+        )
+    elif attempt == 1 and uses_general_term:
+        # Second attempt: broaden to any plausible relationship if general terms are detected
+        return f"{user_query} (broaden: treat general terms like 'related to' as any plausible relationship, use -[]-> or multiple types)"
+    elif attempt == 2:
+        # Third attempt: try alternative node labels/relationships and synonyms
+        return f"{user_query} (try alternative node labels, relationship types, and synonyms from schema)"
+    else:
+        # Fallback: most general query
+        return f"{user_query} (fallback: use the most general relationship and node label patterns)"
 
 def run_primekg_chain(chain, cypher_query: str):
     # This function should call the chain with the cypher_query
@@ -215,6 +252,11 @@ class GraphDatabase:
     10. For ambiguous queries, try multiple plausible node labels or relationship types, and explain your reasoning.
     11. If no results are found, try up to 3 alternative queries with different node labels or relationship types.
 
+    ADDITIONAL INSTRUCTIONS:
+    - When translating user queries, always try to map user-provided terms (for node labels and relationship types) to the closest matching schema terms. If a direct match is not found, use a synonym or the most relevant node label or relationship type from the schema.
+    - If the user uses general terms like "related to", "associated with", or "connected to", interpret these as any plausible relationship type, not just a specific relationship. Use a broad relationship pattern (e.g., -[]->) or try multiple plausible relationship types.
+    - Be proactive in using synonyms and schema knowledge to maximize the chance of retrieving relevant results, even on the first attempt.
+
     RESPONSE FORMAT:
     1. First, explain the Cypher query you are generating and why it addresses the user's question.
     2. Present the Cypher query.
@@ -403,7 +445,9 @@ class GraphDatabase:
         }
 
     def should_retry(state: PrimeKGQueryState):
-        if state["results"]:
+        results = state["results"]
+        # Only return success if the 'result' field in the results dict is non-empty
+        if isinstance(results, dict) and results.get("result"):
             return "success"
         elif state["attempt"] < state["max_attempts"]:
             return "query_node"
