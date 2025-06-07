@@ -12,6 +12,8 @@ from dateutil import parser
 from injector import inject
 from langchain.embeddings.ollama import OllamaEmbeddings
 
+from canvasapi import Canvas
+
 # from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import Document
@@ -57,7 +59,7 @@ class RetrievalService:
     )
 
     self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')
-
+    self.canvas_client = Canvas("https://canvas.illinois.edu", os.environ['CANVAS_ACCESS_TOKEN'])
     # self.llm = AzureChatOpenAI(
     #     temperature=0,
     #     deployment_name=os.environ["AZURE_OPENAI_ENGINE"],
@@ -66,6 +68,15 @@ class RetrievalService:
     #     openai_api_version=os.environ["OPENAI_API_VERSION"],
     #     openai_api_type=os.environ['OPENAI_API_TYPE'],
     # )
+  def check_course_access(self, course_id: int) -> bool:
+    """
+    Check if UIUC Chat is able to access the Canvas course.
+    """
+    try:
+      course = self.canvas_client.get_course(course_id)
+      return True
+    except Exception as e:
+      return False
 
   async def getTopContexts(self,
                            search_query: str,

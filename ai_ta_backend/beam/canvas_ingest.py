@@ -245,6 +245,13 @@ class CanvasIngest():
         }
 
       print("Content Dictionary: ", content_ingest_dict)
+      # Check if we can access the course
+      try:
+        course = self.canvas_client.get_course(canvas_course_id)
+      except Exception as e:
+        print("Course not accessible!")
+        return "Course not accessible!"
+      
       # Create a canvas directory with a course folder inside it.
       canvas_dir = os.path.join(volume_path, "canvas_materials")
       folder_name = "canvas_course_" + str(canvas_course_id) + "_ingest"
