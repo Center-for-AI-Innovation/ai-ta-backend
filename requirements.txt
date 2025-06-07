@@ -73,3 +73,7 @@ ollama==0.4.7
 # unstructured.pytesseract==0.3.12
 # unstructured-inference==0.7.11 # this is the real large one :(
 # unstructured[xlsx,image,pptx]==0.10.29 # causes huge ~5.3 GB of installs. Probbably from onnx: https://github.com/Unstructured-IO/unstructured/blob/ad14321016533dc03c1782f6ebea00bc9c804846/requirements/extra-pdf-image.in#L4
+
+selenium
+webdriver_manager
+crossref_commons
