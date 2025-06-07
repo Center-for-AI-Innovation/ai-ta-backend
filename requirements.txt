@@ -42,7 +42,7 @@ redis[hiredis]
 
 # Logging 
 posthog==3.1.0
-sentry-sdk==1.39.1
+sentry-sdk==2.22.0
 
 ollama==0.4.7
 
