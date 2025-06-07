@@ -35,7 +35,7 @@ langchainhub==0.1.14
 
 # Data
 boto3==1.28.79
-qdrant-client==1.7.3
+qdrant-client==1.13.2
 supabase==2.5.3
 minio==7.2.12
 redis[hiredis]
