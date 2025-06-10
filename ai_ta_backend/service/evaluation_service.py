@@ -15,13 +15,13 @@ from time import sleep
 class CropWizardConfig:
     def __init__(self):
         self.prompt_endpoint = str(
-            getenv("UIUC_CHAT_PROD_URL")
+            getenv("EVALUATION_CONTEXT_URL")
         )  # API endpoint to retrieve contexts
         self.answer_endpoint = str(
-            getenv("CROPWIZARD_API_URL")
+            getenv("EVALUATION_ANSWER_URL")
         )  # API endpoint to retrieve answers
         self.cropwiz_api_key = str(
-            getenv("UIUC_CHAT_API_KEY")
+            getenv("EVALUATION_UIUC_CHAT_API_KEY")
         )  # API key to access UIUC.chat
         self.db_version = "cropwizard-1.5"  # CropWizard version
         self.cw_groups = ["All Documents"]  # Subset of documents
@@ -54,7 +54,7 @@ class LangchainConfig:
     def __init__(self):
         environ["LANGCHAIN_TRACING_V2"] = "true"
         environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-        environ["LANGCHAIN_API_KEY"] = str(getenv("LANGCHAIN_API_KEY"))
+        environ["LANGCHAIN_API_KEY"] = str(getenv("EVALUATION_LANGCHAIN_API_KEY"))
         environ["LANGCHAIN_PROJECT"] = "cropwizard_testing"
 
         self.tracing_v2 = environ["LANGCHAIN_TRACING_V2"]
@@ -77,7 +77,7 @@ class LangchainConfig:
 
 class OpenAIConfig:
     def __init__(self):
-        environ["OPENAI_API_KEY"] = str(getenv("OPENAI_API_KEY"))
+        environ["OPENAI_API_KEY"] = str(getenv("EVALUATION_OPENAI_API_KEY"))
 
         self.api_key = environ["OPENAI_API_KEY"]
         self.temperature = 0.1  # Default temperature
