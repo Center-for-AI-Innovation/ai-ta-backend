@@ -19,6 +19,7 @@ import sys
 from typing import List, Dict, Any
 from datetime import datetime
 import subprocess
+import time
 
 try:
     from supabase import create_client, Client
@@ -168,6 +169,38 @@ def verify_connection(client: Client, course_name: str) -> bool:
     except Exception:
         return False
 
+def is_retryable_supabase_error(e):
+    msg = str(e)
+    return (
+        "Web server is down" in msg or
+        "Could not query the database" in msg or
+        "PGRST002" in msg or
+        "JSON could not be generated" in msg or
+        "Error code 521" in msg
+    )
+
+def retry_with_new_client(
+    client_args,  # tuple: (url, key)
+    client_factory,  # function to create client
+    operation,  # function that takes a client and does the work
+    max_retries=10,
+    retry_wait=5
+):
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            client = client_factory(*client_args)
+            return operation(client)
+        except Exception as e:
+            if is_retryable_supabase_error(e):
+                print(f"Supabase connection error: {e}. Re-creating client and retrying (attempt {attempt+1}/{max_retries})...")
+                attempt += 1
+                time.sleep(retry_wait)
+                continue
+            else:
+                raise  # Not a retryable error
+    raise RuntimeError("Max retries exceeded for Supabase operation")
+
 def main():
     parser = argparse.ArgumentParser(description="Copy documents from one course to another in Supabase")
     parser.add_argument("--source-course", required=True, help="Source course name")
@@ -186,6 +219,18 @@ def main():
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers (used with --parallel)")
     parser.add_argument("--progress-files", type=str, help="Comma-separated list of progress log files to use for parallelization. Each file defines a batch's start and end offset.")
     args = parser.parse_args()
+
+    # Set source credentials: prefer CLI args, then SUPABASE_*
+    if not args.source_url:
+        args.source_url = os.environ.get("SUPABASE_URL")
+    if not args.source_key:
+        args.source_key = os.environ.get("SUPABASE_KEY")
+
+    # Set destination credentials: prefer CLI args, then CROPWIZARD_*
+    if not args.destination_url:
+        args.destination_url = os.environ.get("CROPWIZARD_SUPABASE_URL")
+    if not args.destination_key:
+        args.destination_key = os.environ.get("CROPWIZARD_SUPABASE_KEY")
 
     # Progress files logic (takes precedence over --parallel)
     if getattr(args, 'progress_files', None):
@@ -286,8 +331,10 @@ def main():
             f.write(str(offset))
 
     try:
-        source_client = get_supabase_client(args.source_url, args.source_key)
-        destination_client = get_supabase_client(args.destination_url, args.destination_key)
+        source_client_args = (args.source_url, args.source_key)
+        destination_client_args = (args.destination_url, args.destination_key)
+        source_client = get_supabase_client(*source_client_args)
+        destination_client = get_supabase_client(*destination_client_args)
 
         # Verify connections
         source_connected = verify_connection(source_client, args.source_course)
@@ -298,11 +345,13 @@ def main():
 
             # Print first 10 documents from source course
             try:
-                response = source_client.table("documents") \
-                    .select("*") \
-                    .eq("course_name", args.source_course) \
-                    .limit(10) \
-                    .execute()
+                def fetch_source_docs(client):
+                    return client.table("documents") \
+                        .select("*") \
+                        .eq("course_name", args.source_course) \
+                        .limit(10) \
+                        .execute()
+                response = retry_with_new_client(source_client_args, get_supabase_client, fetch_source_docs)
                 if hasattr(response, 'error') and response.error:
                     print("Error fetching documents:", response.error)
                 else:
@@ -314,11 +363,13 @@ def main():
 
             # Print first 10 documents from destination course
             try:
-                dest_response = destination_client.table("documents") \
-                    .select("*") \
-                    .eq("course_name", args.target_course) \
-                    .limit(10) \
-                    .execute()
+                def fetch_dest_docs(client):
+                    return client.table("documents") \
+                        .select("*") \
+                        .eq("course_name", args.target_course) \
+                        .limit(10) \
+                        .execute()
+                dest_response = retry_with_new_client(destination_client_args, get_supabase_client, fetch_dest_docs)
                 if hasattr(dest_response, 'error') and dest_response.error:
                     print("Error fetching destination documents:", dest_response.error)
                 else:
@@ -343,18 +394,26 @@ def main():
                 with open(args.retry_file, "r") as f:
                     identifiers = [line.strip() for line in f if line.strip()]
                 print(f"Retrying {len(identifiers)} documents from {args.retry_file} using field '{args.id_field}'")
-                docs = get_documents_by_identifiers(source_client, args.source_course, identifiers, args.id_field)
+                def fetch_docs(client):
+                    return get_documents_by_identifiers(client, args.source_course, identifiers, args.id_field)
+                docs = retry_with_new_client(source_client_args, get_supabase_client, fetch_docs)
                 print(f"Found {len(docs)} documents to retry.")
-                total_copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+                def copy_docs(client):
+                    return copy_documents_batch(client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+                total_copied = retry_with_new_client(destination_client_args, get_supabase_client, copy_docs)
             else:
                 while offset < end_offset:
                     print(f"Fetching documents {offset} to {min(offset + batch_size - 1, end_offset - 1)}...")
-                    docs = get_documents_by_course_batch(source_client, args.source_course, offset, min(offset + batch_size - 1, end_offset - 1))
+                    def fetch_docs(client):
+                        return get_documents_by_course_batch(client, args.source_course, offset, min(offset + batch_size - 1, end_offset - 1))
+                    docs = retry_with_new_client(source_client_args, get_supabase_client, fetch_docs)
                     if not docs:
                         print("No more documents to process.")
                         break
                     print(f"Processing batch of {len(docs)} documents...")
-                    copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+                    def copy_docs(client):
+                        return copy_documents_batch(client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+                    copied = retry_with_new_client(destination_client_args, get_supabase_client, copy_docs)
                     total_copied += copied
                     offset += batch_size
                     write_progress(progress_log, offset)

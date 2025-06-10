@@ -25,8 +25,18 @@ def webscrape_documents(project_name: str):
 
   # use RPC to get unique base_urls
   response = supabase_client.rpc("get_base_url_with_doc_groups", {"p_course_name": project_name}).execute()
+  print("Supabase RPC response:", response)
   base_urls = response.data
+  if not base_urls:
+    print("No base URLs found or Supabase RPC failed.")
+    print("Supabase response:", response)
+    return
   print(f"Total base_urls: {len(base_urls)}")
+
+  if not response.data:
+    print("Supabase error:", getattr(response, 'error', 'No error attribute'))
+    print("Supabase raw response:", response)
+    return
 
   # Add extra URLs with their associated document groups
   extra_urls_with_groups = {
