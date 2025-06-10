@@ -18,6 +18,7 @@ import os
 import sys
 from typing import List, Dict, Any
 from datetime import datetime
+import subprocess
 
 try:
     from supabase import create_client, Client
@@ -179,12 +180,110 @@ def main():
     parser.add_argument("--source-key", type=str, help="Source Supabase Key (overrides env)")
     parser.add_argument("--destination-url", type=str, help="Destination Supabase URL (overrides env)")
     parser.add_argument("--destination-key", type=str, help="Destination Supabase Key (overrides env)")
+    parser.add_argument("--start-offset", type=int, default=0, help="Start offset for batch processing")
+    parser.add_argument("--end-offset", type=int, help="End offset for batch processing (exclusive)")
+    parser.add_argument("--parallel", action="store_true", help="Run in parallel mode (spawns multiple workers)")
+    parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers (used with --parallel)")
+    parser.add_argument("--progress-files", type=str, help="Comma-separated list of progress log files to use for parallelization. Each file defines a batch's start and end offset.")
     args = parser.parse_args()
+
+    # Progress files logic (takes precedence over --parallel)
+    if getattr(args, 'progress_files', None):
+        progress_files = [f.strip() for f in args.progress_files.split(",") if f.strip()]
+        worker_cmds = []
+        for pf in progress_files:
+            # Parse offsets from filename: progress_<start>_<end>.log
+            import re
+            m = re.match(r".*progress_(\d+)_(\d+).log", pf)
+            if not m:
+                print(f"Could not parse offsets from {pf}, skipping.")
+                continue
+            start_offset, end_offset = int(m.group(1)), int(m.group(2))
+            # Read current offset from file, or use start_offset
+            if os.path.exists(pf):
+                with open(pf, "r") as f:
+                    try:
+                        current_offset = int(f.read().strip())
+                    except Exception:
+                        current_offset = start_offset
+            else:
+                current_offset = start_offset
+            if current_offset >= end_offset:
+                print(f"Batch {pf} already completed (offset {current_offset} >= {end_offset}), skipping.")
+                continue
+            cmd = [sys.executable, sys.argv[0]]
+            for i, arg in enumerate(sys.argv[1:]):
+                # Remove --progress-files and its value
+                if arg == "--progress-files":
+                    continue
+                if i > 0 and sys.argv[i] == "--progress-files":
+                    continue
+                cmd.append(arg)
+            cmd += ["--start-offset", str(current_offset), "--end-offset", str(end_offset)]
+            print(f"Launching worker for {pf}: {cmd}")
+            worker_cmds.append(cmd)
+        procs = [subprocess.Popen(cmd) for cmd in worker_cmds]
+        for idx, proc in enumerate(procs):
+            ret = proc.wait()
+            print(f"Worker {idx+1} exited with code {ret}")
+        sys.exit(0)
+
+    # Parallelization logic
+    TOTAL_DOCUMENTS = 684403  # Set your total document count here
+    if args.parallel:
+        if args.num_workers < 1:
+            print("--num-workers must be >= 1")
+            sys.exit(1)
+        ranges = []
+        chunk = TOTAL_DOCUMENTS // args.num_workers
+        for i in range(args.num_workers):
+            start = i * chunk
+            end = (i + 1) * chunk if i < args.num_workers - 1 else TOTAL_DOCUMENTS
+            ranges.append((start, end))
+        procs = []
+        for idx, (start, end) in enumerate(ranges):
+            cmd = [sys.executable, sys.argv[0]]
+            skip_next = False
+            for i, arg in enumerate(sys.argv[1:]):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == "--parallel":
+                    continue
+                if arg == "--num-workers":
+                    skip_next = True  # skip the value after --num-workers
+                    continue
+                cmd.append(arg)
+            # Add start/end offsets
+            cmd += ["--start-offset", str(start), "--end-offset", str(end)]
+            print(f"Launching worker {idx+1}/{args.num_workers}: {cmd}")
+            procs.append(subprocess.Popen(cmd))
+        # Wait for all workers
+        for idx, proc in enumerate(procs):
+            ret = proc.wait()
+            print(f"Worker {idx+1} exited with code {ret}")
+        sys.exit(0)
 
     # Warn if source and destination credentials are the same
     if (args.source_url and args.destination_url and args.source_url == args.destination_url \
         and args.source_key and args.destination_key and args.source_key == args.destination_key):
         print("Warning: Source and destination Supabase credentials are identical. You are copying within the same database/account.")
+
+    # Determine progress log file name based on offset range
+    progress_log = f"progress_{args.start_offset}_{args.end_offset if args.end_offset is not None else 'end'}.log"
+
+    def read_progress(log_file, default_offset):
+        if os.path.exists(log_file):
+            with open(log_file, "r") as f:
+                try:
+                    return int(f.read().strip())
+                except Exception:
+                    return default_offset
+        return default_offset
+
+    def write_progress(log_file, offset):
+        with open(log_file, "w") as f:
+            f.write(str(offset))
 
     try:
         source_client = get_supabase_client(args.source_url, args.source_key)
@@ -229,9 +328,15 @@ def main():
             except Exception as e:
                 print(f"Error fetching documents from destination: {str(e)}")
 
-            # Proceed with original batch/retry copy logic
             failed_docs = []
             total_copied = 0
+
+            # Determine offset range
+            start_offset = args.start_offset
+            end_offset = args.end_offset if args.end_offset is not None else float('inf')
+            offset = read_progress(progress_log, start_offset)
+            batch_size = args.batch_size
+            print(f"Resuming from offset {offset} (range: {start_offset} to {end_offset})")
 
             if args.retry_file:
                 # Load identifiers from file
@@ -242,12 +347,9 @@ def main():
                 print(f"Found {len(docs)} documents to retry.")
                 total_copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
             else:
-                offset = 0
-                batch_size = args.batch_size
-                print(f"Starting batch copy from {args.source_course} to {args.target_course} (batch size: {batch_size})")
-                while True:
-                    print(f"Fetching documents {offset} to {offset + batch_size - 1}...")
-                    docs = get_documents_by_course_batch(source_client, args.source_course, offset, offset + batch_size - 1)
+                while offset < end_offset:
+                    print(f"Fetching documents {offset} to {min(offset + batch_size - 1, end_offset - 1)}...")
+                    docs = get_documents_by_course_batch(source_client, args.source_course, offset, min(offset + batch_size - 1, end_offset - 1))
                     if not docs:
                         print("No more documents to process.")
                         break
@@ -255,8 +357,9 @@ def main():
                     copied = copy_documents_batch(destination_client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
                     total_copied += copied
                     offset += batch_size
-                    if len(docs) < batch_size:
-                        break  # Last batch
+                    write_progress(progress_log, offset)
+                    if len(docs) < batch_size or offset >= end_offset:
+                        break  # Last batch or reached end_offset
 
             print(f"Operation completed. {total_copied} documents {'would be ' if args.dry_run else ''}copied.")
             if failed_docs:
