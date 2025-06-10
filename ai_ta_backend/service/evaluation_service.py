@@ -188,15 +188,6 @@ class EvaluationService:
         return fragments
 
     def query_cropwizard(self, prompt: str, log: bool = True) -> str:
-
-        # with open(
-        #     "/home/sol/cropwizard/ai-ta-backend/ai_ta_backend/benchmarking/testqueryresult.txt",
-        #     "r",
-        # ) as file:
-        #     return file.read()
-
-        return "aaaaaa"
-
         """
         Function to send a prompt to CropWizard and get the response.
         """
