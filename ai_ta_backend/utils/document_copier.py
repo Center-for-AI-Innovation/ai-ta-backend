@@ -20,6 +20,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 import subprocess
 import time
+import random
 
 try:
     from supabase import create_client, Client
@@ -201,12 +202,34 @@ def retry_with_new_client(
                 raise  # Not a retryable error
     raise RuntimeError("Max retries exceeded for Supabase operation")
 
+def get_all_destination_ids(destination_client, course_name, id_field):
+    ids = set()
+    offset = 0
+    batch_size = 1000
+    while True:
+        response = destination_client.table("documents") \
+            .select(id_field) \
+            .eq("course_name", course_name) \
+            .range(offset, offset + batch_size - 1) \
+            .execute()
+        if hasattr(response, 'error') and response.error:
+            print(f"Error fetching destination ids: {response.error}")
+            break
+        batch = [doc[id_field] for doc in response.data]
+        if not batch:
+            break
+        ids.update(batch)
+        if len(batch) < batch_size:
+            break
+        offset += batch_size
+    return ids
+
 def main():
     parser = argparse.ArgumentParser(description="Copy documents from one course to another in Supabase")
     parser.add_argument("--source-course", required=True, help="Source course name")
     parser.add_argument("--target-course", required=True, help="Target course name")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without making changes")
-    parser.add_argument("--batch-size", type=int, default=1000, help="Number of documents to process per batch")
+    parser.add_argument("--batch-size", type=int, default=100, help="Number of documents to process per batch")
     parser.add_argument("--retry-file", type=str, help="Path to file with list of document identifiers to retry")
     parser.add_argument("--id-field", type=str, default="readable_filename", help="Field to use as document identifier (default: readable_filename)")
     parser.add_argument("--source-url", type=str, help="Source Supabase URL (overrides env)")
@@ -215,9 +238,6 @@ def main():
     parser.add_argument("--destination-key", type=str, help="Destination Supabase Key (overrides env)")
     parser.add_argument("--start-offset", type=int, default=0, help="Start offset for batch processing")
     parser.add_argument("--end-offset", type=int, help="End offset for batch processing (exclusive)")
-    parser.add_argument("--parallel", action="store_true", help="Run in parallel mode (spawns multiple workers)")
-    parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers (used with --parallel)")
-    parser.add_argument("--progress-files", type=str, help="Comma-separated list of progress log files to use for parallelization. Each file defines a batch's start and end offset.")
     args = parser.parse_args()
 
     # Set source credentials: prefer CLI args, then SUPABASE_*
@@ -231,83 +251,6 @@ def main():
         args.destination_url = os.environ.get("CROPWIZARD_SUPABASE_URL")
     if not args.destination_key:
         args.destination_key = os.environ.get("CROPWIZARD_SUPABASE_KEY")
-
-    # Progress files logic (takes precedence over --parallel)
-    if getattr(args, 'progress_files', None):
-        progress_files = [f.strip() for f in args.progress_files.split(",") if f.strip()]
-        worker_cmds = []
-        for pf in progress_files:
-            # Parse offsets from filename: progress_<start>_<end>.log
-            import re
-            m = re.match(r".*progress_(\d+)_(\d+).log", pf)
-            if not m:
-                print(f"Could not parse offsets from {pf}, skipping.")
-                continue
-            start_offset, end_offset = int(m.group(1)), int(m.group(2))
-            # Read current offset from file, or use start_offset
-            if os.path.exists(pf):
-                with open(pf, "r") as f:
-                    try:
-                        current_offset = int(f.read().strip())
-                    except Exception:
-                        current_offset = start_offset
-            else:
-                current_offset = start_offset
-            if current_offset >= end_offset:
-                print(f"Batch {pf} already completed (offset {current_offset} >= {end_offset}), skipping.")
-                continue
-            cmd = [sys.executable, sys.argv[0]]
-            for i, arg in enumerate(sys.argv[1:]):
-                # Remove --progress-files and its value
-                if arg == "--progress-files":
-                    continue
-                if i > 0 and sys.argv[i] == "--progress-files":
-                    continue
-                cmd.append(arg)
-            cmd += ["--start-offset", str(current_offset), "--end-offset", str(end_offset)]
-            print(f"Launching worker for {pf}: {cmd}")
-            worker_cmds.append(cmd)
-        procs = [subprocess.Popen(cmd) for cmd in worker_cmds]
-        for idx, proc in enumerate(procs):
-            ret = proc.wait()
-            print(f"Worker {idx+1} exited with code {ret}")
-        sys.exit(0)
-
-    # Parallelization logic
-    TOTAL_DOCUMENTS = 684403  # Set your total document count here
-    if args.parallel:
-        if args.num_workers < 1:
-            print("--num-workers must be >= 1")
-            sys.exit(1)
-        ranges = []
-        chunk = TOTAL_DOCUMENTS // args.num_workers
-        for i in range(args.num_workers):
-            start = i * chunk
-            end = (i + 1) * chunk if i < args.num_workers - 1 else TOTAL_DOCUMENTS
-            ranges.append((start, end))
-        procs = []
-        for idx, (start, end) in enumerate(ranges):
-            cmd = [sys.executable, sys.argv[0]]
-            skip_next = False
-            for i, arg in enumerate(sys.argv[1:]):
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg == "--parallel":
-                    continue
-                if arg == "--num-workers":
-                    skip_next = True  # skip the value after --num-workers
-                    continue
-                cmd.append(arg)
-            # Add start/end offsets
-            cmd += ["--start-offset", str(start), "--end-offset", str(end)]
-            print(f"Launching worker {idx+1}/{args.num_workers}: {cmd}")
-            procs.append(subprocess.Popen(cmd))
-        # Wait for all workers
-        for idx, proc in enumerate(procs):
-            ret = proc.wait()
-            print(f"Worker {idx+1} exited with code {ret}")
-        sys.exit(0)
 
     # Warn if source and destination credentials are the same
     if (args.source_url and args.destination_url and args.source_url == args.destination_url \
@@ -335,6 +278,13 @@ def main():
         destination_client_args = (args.destination_url, args.destination_key)
         source_client = get_supabase_client(*source_client_args)
         destination_client = get_supabase_client(*destination_client_args)
+
+        # Fetch all destination IDs at the start
+        print(f"Fetching all destination document IDs for course '{args.target_course}'...")
+        def fetch_dest_ids(client):
+            return get_all_destination_ids(client, args.target_course, args.id_field)
+        already_copied_ids = retry_with_new_client(destination_client_args, get_supabase_client, fetch_dest_ids)
+        print(f"Found {len(already_copied_ids)} already-copied documents in destination.")
 
         # Verify connections
         source_connected = verify_connection(source_client, args.source_course)
@@ -398,9 +348,14 @@ def main():
                     return get_documents_by_identifiers(client, args.source_course, identifiers, args.id_field)
                 docs = retry_with_new_client(source_client_args, get_supabase_client, fetch_docs)
                 print(f"Found {len(docs)} documents to retry.")
-                def copy_docs(client):
-                    return copy_documents_batch(client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
-                total_copied = retry_with_new_client(destination_client_args, get_supabase_client, copy_docs)
+                # Filter out already-copied docs
+                docs_to_copy = [doc for doc in docs if doc[args.id_field] not in already_copied_ids]
+                if not docs_to_copy:
+                    print("All documents in retry file already copied, skipping.")
+                else:
+                    def copy_docs(client):
+                        return copy_documents_batch(client, docs_to_copy, args.target_course, args.dry_run, failed_docs, args.id_field)
+                    total_copied = retry_with_new_client(destination_client_args, get_supabase_client, copy_docs)
             else:
                 while offset < end_offset:
                     print(f"Fetching documents {offset} to {min(offset + batch_size - 1, end_offset - 1)}...")
@@ -410,13 +365,22 @@ def main():
                     if not docs:
                         print("No more documents to process.")
                         break
-                    print(f"Processing batch of {len(docs)} documents...")
+                    # Filter out already-copied docs
+                    docs_to_copy = [doc for doc in docs if doc[args.id_field] not in already_copied_ids]
+                    if not docs_to_copy:
+                        print("All documents in this batch already copied, skipping.")
+                        offset += batch_size
+                        write_progress(progress_log, offset)
+                        continue
+                    print(f"Processing batch of {len(docs_to_copy)} documents...")
                     def copy_docs(client):
-                        return copy_documents_batch(client, docs, args.target_course, args.dry_run, failed_docs, args.id_field)
+                        return copy_documents_batch(client, docs_to_copy, args.target_course, args.dry_run, failed_docs, args.id_field)
                     copied = retry_with_new_client(destination_client_args, get_supabase_client, copy_docs)
                     total_copied += copied
                     offset += batch_size
                     write_progress(progress_log, offset)
+                    # Add a small random delay between batches to avoid overloading the backend
+                    time.sleep(random.uniform(1, 3))
                     if len(docs) < batch_size or offset >= end_offset:
                         break  # Last batch or reached end_offset
 
