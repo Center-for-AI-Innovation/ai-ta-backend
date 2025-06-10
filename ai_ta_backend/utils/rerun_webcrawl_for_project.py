@@ -25,10 +25,57 @@ def webscrape_documents(project_name: str):
 
   # use RPC to get unique base_urls
   response = supabase_client.rpc("get_base_url_with_doc_groups", {"p_course_name": project_name}).execute()
+  print("Supabase RPC response:", response)
   base_urls = response.data
+  if not base_urls:
+    print("No base URLs found or Supabase RPC failed.")
+    print("Supabase response:", response)
+    return
   print(f"Total base_urls: {len(base_urls)}")
 
-  webcrawl_url = "https://crawlee-production.up.railway.app/crawl"
+  if not response.data:
+    print("Supabase error:", getattr(response, 'error', 'No error attribute'))
+    print("Supabase raw response:", response)
+    return
+
+  # Add extra URLs with their associated document groups
+  extra_urls_with_groups = {
+      "https://nature.berkeley.edu/cooperative-extension": ["UC Berkeley"],
+      "https://caes.ucdavis.edu/outreach/ce": ["UC Davis"],
+      "https://caes.ucdavis.edu": ["UC Davis"],
+      "https://www.aces.edu/": ["Alabama Cooperative Extension System"],
+      "https://synthesis.yale.edu/products-publications": ["Yale University"],
+      "https://www.canr.msu.edu/tribal_education/": ["Michigan State University"],
+      "https://www.wetcc.edu/extension/": ["White Earth Tribal and Community College"],
+      "https://www.ecolibrium3.org/fond-du-lac-tribal-and-community-college-environmental-institute/": ["Fond du Lac Tribal and Community College"],
+      "https://tribalextension.org/project/leech-lake/": ["Leech Lake Tribal College"],
+      "https://www.montana.edu/extension/flatheadres/": ["Montana State University"],
+      "https://bfcc.edu/post/USDA-Extension": ["Blackfeet Community College"],
+      "https://www.fpcc.edu/special-projects/ag-department/extension-services/": ["Fort Peck Community College"],
+      "https://extension.skc.edu/": ["Salish Kootenai College"],
+      "https://www.littlepriest.edu/lptc-equity-extension/": ["Little Priest Tribal College"],
+      "https://nativecoalition.unl.edu/": ["University of Nebraska–Lincoln"],
+      "https://iaia.edu/outreach/land-grant/": ["Institute of American Indian Arts"],
+      "https://tribalextension.nmsu.edu/": ["New Mexico State University"],
+      "https://www.littlehoop.edu/community/land-grant/": ["Cankdeska Cikana Community College"],
+      "https://extension.sdstate.edu/": ["South Dakota State University"],
+      "https://extension.wsu.edu/pendoreille/kalispel-tribal-extension-2/": ["Washington State University"],
+      "http://www.comfsm.fm/myShark/news/item=3219/mod=10:43:04": ["College of Micronesia-FSM"],
+      "https://blogs.ifas.ufl.edu/global/category/agriculture/": ["University of Florida"],
+  }
+
+  for url, groups in extra_urls_with_groups.items():
+      if url not in base_urls:
+          base_urls[url] = groups
+
+  # Output all URLs to a text file
+  all_urls_file = "all_urls_to_scrape.txt"
+  with open(all_urls_file, 'w') as f:
+      for url in base_urls:
+          f.write(url + '\n')
+  print(f"All URLs to be scraped written to: {all_urls_file}")
+
+  webcrawl_url = "http://localhost:3000/crawl"
 
   payload = {
       "params": {
@@ -91,3 +138,13 @@ def webscrape_documents(project_name: str):
   #     print(f"Removed file: {processed_file_name}")
 
   return "Webscrape done."
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 2:
+        print("Usage: python rerun_webcrawl_for_project.py <project_name>")
+        sys.exit(1)
+    project_name = sys.argv[1]
+    result = webscrape_documents(project_name)
+    print(result)
