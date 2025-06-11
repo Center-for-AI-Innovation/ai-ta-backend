@@ -7,11 +7,12 @@ from langgraph.graph import StateGraph, START, END
 from typing_extensions import TypedDict
 
 
-class PrimeKGQueryState(TypedDict):
+# Unified state for both PrimeKG and Clinical KG
+class KGQueryState(TypedDict):
     user_query: str
     attempt: int
     queries_tried: list[str]
-    results: list[dict]
+    results: list[dict] | dict  # allow both for compatibility
     max_attempts: int
 
 # Example strategies for generating Cypher queries (can be extended)
@@ -46,6 +47,47 @@ def generate_primekg_cypher(user_query: str, attempt: int) -> str:
             f'AND toLower(d2.node_name) CONTAINS "{entity2.lower()}" '\
             f'MATCH (d1)-[r]-(d2) '\
             f'RETURN d1.node_name AS Disease1, d2.node_name AS Disease2, type(r) AS RelationshipType, r'
+        )
+    elif attempt == 1 and uses_general_term:
+        # Second attempt: broaden to any plausible relationship if general terms are detected
+        return f"{user_query} (broaden: treat general terms like 'related to' as any plausible relationship, use -[]-> or multiple types)"
+    elif attempt == 2:
+        # Third attempt: try alternative node labels/relationships and synonyms
+        return f"{user_query} (try alternative node labels, relationship types, and synonyms from schema)"
+    else:
+        # Fallback: most general query
+        return f"{user_query} (fallback: use the most general relationship and node label patterns)"
+
+# Example strategies for generating Cypher queries for Clinical KG (can be extended)
+def generate_clinicalkg_cypher(user_query: str, attempt: int) -> str:
+    """
+    Generate different Cypher queries for each attempt, aligned with the clinical KG system prompt instructions.
+    """
+    general_terms = ["related to", "associated with", "connected to", "linked to", "connection", "relationship"]
+    lower_query = user_query.lower()
+    uses_general_term = any(term in lower_query for term in general_terms)
+
+    # Simple heuristic: look for two quoted entities or two 'and'-separated terms
+    entity_match = re.findall(r'([\w\- ]+) and ([\w\- ]+)', user_query, re.IGNORECASE)
+    if entity_match:
+        entity1, entity2 = entity_match[0]
+        entity1 = entity1.strip(' "')
+        entity2 = entity2.strip(' "')
+    else:
+        entity1 = entity2 = None
+
+    if attempt == 0:
+        # First attempt: smart mapping and synonym use for node labels/relationships
+        return f"{user_query} (map user terms to closest schema node labels/relationships, use synonyms if needed)"
+    elif (attempt == 1 or attempt == 2) and entity1 and entity2:
+        # For retries, if two entities are detected, use CONTAINS and match any relationship type
+        return (
+            f"Find any connections between entities using partial matching and any relationship type: "
+            f'MATCH (n1), (n2) '
+            f'WHERE toLower(n1.name) CONTAINS "{entity1.lower()}" '
+            f'AND toLower(n2.name) CONTAINS "{entity2.lower()}" '
+            f'MATCH (n1)-[r]-(n2) '
+            f'RETURN n1.name AS Entity1, n2.name AS Entity2, type(r) AS RelationshipType, r'
         )
     elif attempt == 1 and uses_general_term:
         # Second attempt: broaden to any plausible relationship if general terms are detected
@@ -428,23 +470,30 @@ class GraphDatabase:
         system_message=system_prompt,
     )
 
-  def run_primekg_query_with_retries(self, user_query: str, max_attempts: int = 3):
+  def run_kg_query_with_retries(self, user_query: str, chain, cypher_generator, max_attempts: int = 3):
     """
-    Use LangGraph to run a PrimeKG query with up to max_attempts, trying different strategies if no results are found.
-    Returns the first non-empty result or the last attempt's result.
+    Generic retry logic for KG queries using LangGraph. Tries up to max_attempts, generating a new Cypher query each time.
+    Args:
+        user_query (str): The user's natural language query.
+        chain: The GraphCypherQAChain to use (e.g., self.prime_kg_chain or self.ckg_chain).
+        cypher_generator (Callable): Function to generate a Cypher query for each attempt.
+        max_attempts (int): Maximum number of attempts.
+    Returns:
+        dict: The final state after running the LangGraph, including queries tried and results.
     """
-    chain = self.prime_kg_chain
-    
-    def query_node(state: PrimeKGQueryState):
-        cypher_query = generate_primekg_cypher(state["user_query"], state["attempt"])
-        results = run_primekg_chain(chain, cypher_query)
+    def query_node(state: KGQueryState):
+        cypher_query = cypher_generator(state["user_query"], state["attempt"])
+        try:
+            result = chain.invoke({"query": cypher_query})
+        except Exception:
+            result = {}
         return {
             "queries_tried": state["queries_tried"] + [cypher_query],
-            "results": results,
+            "results": result,
             "attempt": state["attempt"] + 1,
         }
 
-    def should_retry(state: PrimeKGQueryState):
+    def should_retry(state: KGQueryState):
         results = state["results"]
         # Only return success if the 'result' field in the results dict is non-empty
         if isinstance(results, dict) and results.get("result"):
@@ -454,7 +503,7 @@ class GraphDatabase:
         else:
             return "fail"
 
-    builder = StateGraph(PrimeKGQueryState)
+    builder = StateGraph(KGQueryState)
     builder.add_node("query_node", query_node)
     builder.add_conditional_edges("query_node", should_retry, {
         "success": END,
@@ -464,12 +513,44 @@ class GraphDatabase:
     builder.add_edge(START, "query_node")
     graph = builder.compile()
 
-    initial_state = PrimeKGQueryState(
+    initial_state = KGQueryState(
         user_query=user_query,
         attempt=0,
         queries_tried=[],
-        results=[],
+        results={},
         max_attempts=max_attempts,
     )
     result = graph.invoke(initial_state)
     return result
+
+  def run_primekg_query_with_retries(self, user_query: str, max_attempts: int = 3):
+    """
+    Retry-enabled PrimeKG query using LangGraph. Tries up to max_attempts with different Cypher strategies.
+    Args:
+        user_query (str): The user's natural language query.
+        max_attempts (int): Maximum number of attempts.
+    Returns:
+        dict: The final state after running the LangGraph, including queries tried and results.
+    """
+    return self.run_kg_query_with_retries(
+        user_query=user_query,
+        chain=self.prime_kg_chain,
+        cypher_generator=generate_primekg_cypher,
+        max_attempts=max_attempts,
+    )
+
+  def run_clinicalkg_query_with_retries(self, user_query: str, max_attempts: int = 3):
+    """
+    Retry-enabled Clinical KG query using LangGraph. Tries up to max_attempts with different Cypher strategies.
+    Args:
+        user_query (str): The user's natural language query.
+        max_attempts (int): Maximum number of attempts.
+    Returns:
+        dict: The final state after running the LangGraph, including queries tried and results.
+    """
+    return self.run_kg_query_with_retries(
+        user_query=user_query,
+        chain=self.ckg_chain,
+        cypher_generator=generate_clinicalkg_cypher,
+        max_attempts=max_attempts,
+    )

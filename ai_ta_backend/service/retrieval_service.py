@@ -172,37 +172,17 @@ class RetrievalService:
       # --- PrimeKG agent decision ---
       primekg_context = None
       if self.should_query_primekg(search_query):
-        primekg_result = self.getPrimeKGContexts(search_query)
-        if primekg_result:
-            summary = self.generate_openai_summary(search_query, primekg_result)
-            primekg_context = {
-                "kg_result": primekg_result,
-                "readable_filename": "PrimeKG",
-                "course_name": course_name,
-                "s3_path": None,
-                "pagenumber": None,
-                "url": None,
-                "base_url": None,
-                "doc_groups": None,
-                "text": summary,
-            }
+          primekg_context = self.getPrimeKGContexts(search_query)
+          if not primekg_context:
+              primekg_context = None
+
       # --- Clinical KG agent decision ---
       clinicalkg_context = None
       if self.should_query_clinical_kg(search_query):
-        clinicalkg_result = self.getKnowledgeGraphContexts(search_query, course_name)
-        if clinicalkg_result and isinstance(clinicalkg_result, dict) and "result" in clinicalkg_result:
-            clinicalkg_context = {
-                "text": clinicalkg_result["result"],
-                "readable_filename": "ClinicalKG",
-                "course_name": course_name,
-                "s3_path": None,
-                "pagenumber": None,
-                "url": None,
-                "base_url": None,
-                "doc_groups": None,
-                "clinicalkg_intermediate_steps": clinicalkg_result.get("intermediate_steps"),
-                "clinicalkg_query": clinicalkg_result.get("query"),
-            }
+          clinicalkg_context = self.getKnowledgeGraphContexts(search_query, course_name)
+          if not clinicalkg_context:
+              clinicalkg_context = None
+
       formatted = self.format_for_json(valid_docs)
       if primekg_context:
           formatted.append(primekg_context)
@@ -803,24 +783,36 @@ class RetrievalService:
     
   def getKnowledgeGraphContexts(self, user_query: str, course_name: str) -> Dict:
     """
-    Get knowledge graph contexts from Clinical KG
+    Get knowledge graph contexts from Clinical KG, including an OpenAI summary of the results.
     """
     try:
         start_time = time.monotonic()
-        
-        custom_chain = self.graphDb.create_chain_with_custom_prompt()
-        response = self.graphDb.ckg_chain.invoke({"query": user_query})
-        
+        response = self.graphDb.run_clinicalkg_query_with_retries(user_query)
         execution_time = time.monotonic() - start_time
         print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
-        
+
         # Post-process: If the result is "I don't know the answer", return empty
-        result_text = response.get("result", "")
-        if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
-            return {}  # or {"result": ""} or [] depending on your downstream expectations
-        
-        print("FINAL RESPONSE: ", response)
-        
+        # Try to extract the nested 'result' field from the 'results' object
+        if isinstance(response, dict):
+            results_obj = response.get("results")
+            if isinstance(results_obj, dict) and "result" in results_obj:
+                result_text = results_obj["result"]
+                if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+                    return {}
+                # Generate summary
+                summary = self.generate_openai_summary(user_query, results_obj["result"])
+                return {
+                    "text": summary,
+                    "readable_filename": "ClinicalKG",
+                    "course_name": course_name,
+                    "s3_path": None,
+                    "pagenumber": None,
+                    "url": None,
+                    "base_url": None,
+                    "doc_groups": None,
+                    "clinicalkg_intermediate_steps": results_obj.get("intermediate_steps"),
+                    "clinicalkg_query": results_obj.get("query"),
+                }
         return response
     except Exception as e:
         error_msg = f"Error in knowledge graph query for '{user_query}': {str(e)}"
@@ -831,7 +823,7 @@ class RetrievalService:
   
   def getPrimeKGContexts(self, user_query: str) -> Dict:
     """
-    Get knowledge graph contexts from Prime KG
+    Get knowledge graph contexts from Prime KG, including an OpenAI summary of the results.
     """
     try:
         start_time = time.monotonic()
@@ -845,10 +837,23 @@ class RetrievalService:
         if isinstance(response, dict):
             results_obj = response.get("results")
             if isinstance(results_obj, dict) and "result" in results_obj:
-                return results_obj["result"]
-
+                result_text = results_obj["result"]
+                if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+                    return {}
+                # Generate summary
+                summary = self.generate_openai_summary(user_query, results_obj["result"])
+                return {
+                    "kg_result": results_obj["result"],
+                    "readable_filename": "PrimeKG",
+                    "course_name": None,
+                    "s3_path": None,
+                    "pagenumber": None,
+                    "url": None,
+                    "base_url": None,
+                    "doc_groups": None,
+                    "text": summary,
+                }
         return response
-
     except Exception as e:  
         print(f"Error in getPrimeKGContexts: {str(e)}")
         self.sentry.capture_exception(e)
