@@ -79,38 +79,14 @@ class RetrievalService:
                            course_name: str,
                            doc_groups: List[str] | None = None,
                            top_n: int = 100) -> Union[List[Dict], str]:
-    """Here's a summary of the work.
-
-        /GET arguments
-        course name (optional) str: A json response with TBD fields.
-
-        Returns
-        JSON: A json response with TBD fields. See main.py:getTopContexts docs.
-        or
-        String: An error message with traceback.
-        """
+    """
+    Retrieve top contexts for a query, including vector search and parallel KG retrieval (PrimeKG and Clinical KG).
+    """
     if doc_groups is None:
       doc_groups = []
     try:
       start_time_overall = time.monotonic()
-      # Improvement of performance by parallelizing independent operations:
-
-      # Old:
-      # time to fetch disabledDocGroups: 0.2 seconds
-      # time to fetch publicDocGroups: 0.2 seconds
-      # time to embed query: 0.4 seconds
-      # Total time: 0.8 seconds
-      # time to vector search: 0.48 seconds
-      # Total time: 1.5 seconds
-
-      # New:
-      # time to fetch disabledDocGroups: 0.2 seconds
-      # time to fetch publicDocGroups: 0.2 seconds
-      # time to embed query: 0.4 seconds
-      # Total time: 0.5 seconds
-      # time to vector search: 0.48 seconds
-      # Total time: 0.9 seconds
-
+      # Parallelize independent operations:
       if course_name == "vyriad":
         embedding_client = self.nomic_embeddings
       elif course_name == "pubmed" or course_name == "patents":
@@ -118,7 +94,6 @@ class RetrievalService:
       else:
         embedding_client = self.embeddings
 
-      # Create tasks for parallel execution
       with self.thread_pool_executor as executor:
         loop = asyncio.get_event_loop()
         tasks = [
@@ -169,21 +144,21 @@ class RetrievalService:
           },
       )
 
-      # --- PrimeKG agent decision ---
-      primekg_context = None
-      if self.should_query_primekg(search_query):
-          primekg_context = self.getPrimeKGContexts(search_query)
-          if not primekg_context:
-              primekg_context = None
-
-      # --- Clinical KG agent decision ---
-      clinicalkg_context = None
-      if self.should_query_clinical_kg(search_query):
-          clinicalkg_context = self.getKnowledgeGraphContexts(search_query, course_name)
-          if not clinicalkg_context:
-              clinicalkg_context = None
-
       formatted = self.format_for_json(valid_docs)
+
+      # Helper to run KG context retrieval in parallel
+      async def get_kg_context(should_query_fn, kg_fn, *args):
+          if should_query_fn(search_query):
+              result = await asyncio.to_thread(kg_fn, *args)
+              if result and isinstance(result, dict) and result.get("text"):
+                  return result
+          return None
+
+      # Run both KG retrievals in parallel
+      primekg_task = get_kg_context(self.should_query_primekg, self.getPrimeKGContexts, search_query)
+      clinicalkg_task = get_kg_context(self.should_query_clinical_kg, self.getKnowledgeGraphContexts, search_query, course_name)
+      primekg_context, clinicalkg_context = await asyncio.gather(primekg_task, clinicalkg_task)
+
       if primekg_context:
           formatted.append(primekg_context)
       if clinicalkg_context:
@@ -803,6 +778,7 @@ class RetrievalService:
                 summary = self.generate_openai_summary(user_query, results_obj["result"])
                 return {
                     "text": summary,
+                    "kg_result": results_obj["result"],
                     "readable_filename": "ClinicalKG",
                     "course_name": course_name,
                     "s3_path": None,

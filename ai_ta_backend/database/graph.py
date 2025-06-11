@@ -473,13 +473,18 @@ class GraphDatabase:
   def run_kg_query_with_retries(self, user_query: str, chain, cypher_generator, max_attempts: int = 3):
     """
     Generic retry logic for KG queries using LangGraph. Tries up to max_attempts, generating a new Cypher query each time.
+
     Args:
         user_query (str): The user's natural language query.
         chain: The GraphCypherQAChain to use (e.g., self.prime_kg_chain or self.ckg_chain).
         cypher_generator (Callable): Function to generate a Cypher query for each attempt.
         max_attempts (int): Maximum number of attempts.
+
     Returns:
         dict: The final state after running the LangGraph, including queries tried and results.
+
+    Note:
+        This method is synchronous. If you want to use it in an async context, call it with asyncio.to_thread or refactor for async support.
     """
     def query_node(state: KGQueryState):
         cypher_query = cypher_generator(state["user_query"], state["attempt"])
@@ -526,9 +531,11 @@ class GraphDatabase:
   def run_primekg_query_with_retries(self, user_query: str, max_attempts: int = 3):
     """
     Retry-enabled PrimeKG query using LangGraph. Tries up to max_attempts with different Cypher strategies.
+
     Args:
         user_query (str): The user's natural language query.
         max_attempts (int): Maximum number of attempts.
+
     Returns:
         dict: The final state after running the LangGraph, including queries tried and results.
     """
@@ -542,9 +549,11 @@ class GraphDatabase:
   def run_clinicalkg_query_with_retries(self, user_query: str, max_attempts: int = 3):
     """
     Retry-enabled Clinical KG query using LangGraph. Tries up to max_attempts with different Cypher strategies.
+
     Args:
         user_query (str): The user's natural language query.
         max_attempts (int): Maximum number of attempts.
+
     Returns:
         dict: The final state after running the LangGraph, including queries tried and results.
     """
