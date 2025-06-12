@@ -11,6 +11,13 @@ load_dotenv()
 bucket_name = "clinical-trials"
 collection_name = "clinical-trials"
 embedding_url = os.environ["EMBEDDING_BASE_URL"]
+log_file = "uploaded_qdrant.log"
+
+if os.path.exists(log_file):
+    with open(log_file, "r") as f:
+        uploaded_files = set(line.strip() for line in f)
+else:
+    uploaded_files = set()
 
 minio_client = Minio(
     endpoint=os.environ["MINIO_ENDPOINT"],
@@ -25,6 +32,10 @@ qdrant_client = QdrantClient(
     https=False,
     api_key=os.environ.get('QDRANT_API_KEY')
 )
+
+#delete bucket content
+# qdrant_client.delete_collection(collection_name="clinical-trials")
+# print("✅ Collection deleted.")
 
 def make_valid_point_id(object_name):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, object_name))
@@ -57,6 +68,10 @@ print("Starting upload process...")
 objects = minio_client.list_objects(bucket_name, recursive=True)
 
 for obj in objects:
+    if obj.object_name in uploaded_files:
+        print(f"⏩ Skipping already uploaded: {obj.object_name}")
+        continue
+
     try:
         response = minio_client.get_object(bucket_name, obj.object_name)
         content = response.read().decode("utf-8")
@@ -68,8 +83,11 @@ for obj in objects:
             text = content
 
         embedding = get_ollama_embedding(text, embedding_url)
-
         point_id = make_valid_point_id(obj.object_name)
+
+        identifier = obj.object_name.split("/")[-1].split(".")[0]
+
+        url = f"https://clinicaltrials.gov/study/{identifier}"
 
         qdrant_client.upload_points(
             collection_name=collection_name,
@@ -77,10 +95,20 @@ for obj in objects:
                 models.PointStruct(
                     id=point_id,
                     vector=embedding,
-                    payload={"text": text, "filename": obj.object_name}
+                    payload={
+                        "text": text,
+                        "filename": obj.object_name,
+                        "identifier": identifier,
+                        "url": url
+                    }
                 )
             ]
         )
+
+
+        with open(log_file, "a") as f:
+            f.write(obj.object_name + "\n")
+
         print(f"✅ Uploaded: {obj.object_name}")
 
     except Exception as e:
