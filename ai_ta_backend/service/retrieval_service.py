@@ -757,12 +757,11 @@ class RetrievalService:
       return []
     
   def getKnowledgeGraphContexts(self, user_query: str, course_name: str) -> Dict:
-    """
-    Get knowledge graph contexts from Clinical KG, including an OpenAI summary of the results.
-    """
+    print(f"[DEBUG][Service] getKnowledgeGraphContexts called with user_query: {user_query}, course_name: {course_name}")
     try:
         start_time = time.monotonic()
         response = self.graphDb.run_clinicalkg_query_with_retries(user_query)
+        print(f"[DEBUG][Service] Raw KG response from ClinicalKG: {response}")
         execution_time = time.monotonic() - start_time
         print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
 
@@ -773,6 +772,7 @@ class RetrievalService:
             if isinstance(results_obj, dict) and "result" in results_obj:
                 result_text = results_obj["result"]
                 if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+                    print("[DEBUG][Service] Post-processing: Detected 'I don't know the answer', returning empty dict.")
                     return {}
                 # Generate summary
                 summary = self.generate_openai_summary(user_query, results_obj["result"])
@@ -789,22 +789,23 @@ class RetrievalService:
                     "clinicalkg_intermediate_steps": results_obj.get("intermediate_steps"),
                     "clinicalkg_query": results_obj.get("query"),
                 }
+            else:
+                print("[DEBUG][Service] Post-processing: Unexpected results_obj format or missing 'result' key.")
         return response
     except Exception as e:
-        error_msg = f"Error in knowledge graph query for '{user_query}': {str(e)}"
-        print(error_msg)
+        print(f"[ERROR][Service] Exception in getKnowledgeGraphContexts: {e}")
+        import traceback
+        traceback.print_exc()
         self.sentry.capture_exception(e)
         return {"result": "An error occurred while processing your knowledge graph query."}
 
   
   def getPrimeKGContexts(self, user_query: str) -> Dict:
-    """
-    Get knowledge graph contexts from Prime KG, including an OpenAI summary of the results.
-    """
+    print(f"[DEBUG][Service] getPrimeKGContexts called with user_query: {user_query}")
     try:
         start_time = time.monotonic()
         response = self.graphDb.run_primekg_query_with_retries(user_query)
-        print("RESPONSE pre post processing: ", response)
+        print(f"[DEBUG][Service] Raw KG response from PrimeKG: {response}")
         execution_time = time.monotonic() - start_time
         print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
 
@@ -815,6 +816,7 @@ class RetrievalService:
             if isinstance(results_obj, dict) and "result" in results_obj:
                 result_text = results_obj["result"]
                 if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+                    print("[DEBUG][Service] Post-processing: Detected 'I don't know the answer', returning empty dict.")
                     return {}
                 # Generate summary
                 summary = self.generate_openai_summary(user_query, results_obj["result"])
@@ -829,9 +831,13 @@ class RetrievalService:
                     "doc_groups": None,
                     "text": summary,
                 }
+            else:
+                print("[DEBUG][Service] Post-processing: Unexpected results_obj format or missing 'result' key.")
         return response
     except Exception as e:  
-        print(f"Error in getPrimeKGContexts: {str(e)}")
+        print(f"[ERROR][Service] Exception in getPrimeKGContexts: {e}")
+        import traceback
+        traceback.print_exc()
         self.sentry.capture_exception(e)
         return {"result": "An error occurred while processing your knowledge graph query."}
 

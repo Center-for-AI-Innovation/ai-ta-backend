@@ -115,6 +115,7 @@ def run_primekg_chain(chain, cypher_query: str):
 class GraphDatabase:
 
   def __init__(self):
+    print("[DEBUG][GraphDatabase] Initializing GraphDatabase...")
     self.clinical_kg_graph = Neo4jGraph(
         url=os.environ['CKG_NEO4J_URI'],
         username=os.environ['CKG_NEO4J_USERNAME'],
@@ -125,9 +126,9 @@ class GraphDatabase:
 
     try:
       count = self.clinical_kg_graph.query("MATCH (n) RETURN count(n) AS node_count LIMIT 1")
-      print(f"[DEBUG] Connected to Clinical KG Neo4j. Node count: {count[0]['node_count']}")
+      print(f"[DEBUG][GraphDatabase] Connected to Clinical KG Neo4j. Node count: {count[0]['node_count']}")
     except Exception as e:
-      print(f"[ERROR] Could not connect to Clinical KG Neo4j: {e}")
+      print(f"[ERROR][GraphDatabase] Could not connect to Clinical KG Neo4j: {e}")
 
     self.prime_kg_graph = Neo4jGraph(
         url=os.environ['PRIME_KG_NEO4J_URI'],
@@ -139,17 +140,33 @@ class GraphDatabase:
 
     try:
       count = self.prime_kg_graph.query("MATCH (n) RETURN count(n) AS node_count LIMIT 1")
-      print(f"[DEBUG] Connected to Prime KG Neo4j. Node count: {count[0]['node_count']}")
+      print(f"[DEBUG][GraphDatabase] Connected to Prime KG Neo4j. Node count: {count[0]['node_count']}")
     except Exception as e:
-      print(f"[ERROR] Could not connect to Prime KG Neo4j: {e}")
+      print(f"[ERROR][GraphDatabase] Could not connect to Prime KG Neo4j: {e}")
 
     # Get schema information for the system prompt
     self.ckg_schema_info = self._get_schema_info(self.clinical_kg_graph)
+    print(f"[DEBUG][GraphDatabase] Clinical KG schema info loaded. Type: {type(self.ckg_schema_info)}, Length: {len(str(self.ckg_schema_info))}")
     self.prime_kg_schema_info = self._get_schema_info(self.prime_kg_graph)
+    print(f"[DEBUG][GraphDatabase] Prime KG schema info loaded. Type: {type(self.prime_kg_schema_info)}, Length: {len(str(self.prime_kg_schema_info))}")
 
     # Create the chain with the clinical KG system prompt
-    self.ckg_chain = self._create_clinical_kg_chain()
-    self.prime_kg_chain = self._create_prime_kg_chain()
+    try:
+      self.ckg_chain = self._create_clinical_kg_chain()
+      print("[DEBUG][GraphDatabase] Clinical KG chain created successfully.")
+    except Exception as e:
+      print(f"[ERROR][GraphDatabase] Failed to create Clinical KG chain: {e}")
+      import traceback
+      traceback.print_exc()
+      self.ckg_chain = None
+    try:
+      self.prime_kg_chain = self._create_prime_kg_chain()
+      print("[DEBUG][GraphDatabase] Prime KG chain created successfully.")
+    except Exception as e:
+      print(f"[ERROR][GraphDatabase] Failed to create Prime KG chain: {e}")
+      import traceback
+      traceback.print_exc()
+      self.prime_kg_chain = None
 
   def refresh_schema(self, graph):
     """Refresh the schema and update the chain with the new schema information."""
@@ -488,9 +505,14 @@ class GraphDatabase:
     """
     def query_node(state: KGQueryState):
         cypher_query = cypher_generator(state["user_query"], state["attempt"])
+        print(f"[DEBUG][KG] Attempt {state['attempt']} - Generated Cypher Query: {cypher_query}")
         try:
             result = chain.invoke({"query": cypher_query})
-        except Exception:
+            print(f"[DEBUG][KG] Chain result (type: {type(result)}): {result}")
+        except Exception as e:
+            print(f"[ERROR][KG] Exception in chain.invoke: {e}")
+            import traceback
+            traceback.print_exc()
             result = {}
         return {
             "queries_tried": state["queries_tried"] + [cypher_query],
@@ -500,12 +522,16 @@ class GraphDatabase:
 
     def should_retry(state: KGQueryState):
         results = state["results"]
+        print(f"[DEBUG][KG] should_retry called. Attempt: {state['attempt']}, Results: {results}")
         # Only return success if the 'result' field in the results dict is non-empty
         if isinstance(results, dict) and results.get("result"):
+            print("[DEBUG][KG] should_retry: Success condition met.")
             return "success"
         elif state["attempt"] < state["max_attempts"]:
+            print("[DEBUG][KG] should_retry: Retrying...")
             return "query_node"
         else:
+            print("[DEBUG][KG] should_retry: Max attempts reached. Failing.")
             return "fail"
 
     builder = StateGraph(KGQueryState)
