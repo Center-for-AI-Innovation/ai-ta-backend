@@ -504,18 +504,31 @@ class GraphDatabase:
         This method is synchronous. If you want to use it in an async context, call it with asyncio.to_thread or refactor for async support.
     """
     def query_node(state: KGQueryState):
-        cypher_query = cypher_generator(state["user_query"], state["attempt"])
-        print(f"[DEBUG][KG] Attempt {state['attempt']} - Generated Cypher Query: {cypher_query}")
+        cypher_query_prompt = cypher_generator(state["user_query"], state["attempt"])
+        print(f"[DEBUG][KG] Attempt {state['attempt']} - Generated Cypher Query Prompt: {cypher_query_prompt}")
         try:
-            result = chain.invoke({"query": cypher_query})
+            result = chain.invoke({"query": cypher_query_prompt})
             print(f"[DEBUG][KG] Chain result (type: {type(result)}): {result}")
+            cypher_query_actual = cypher_query_prompt  # fallback
+            if isinstance(result, dict):
+                steps = result.get("intermediate_steps")
+                if steps and isinstance(steps, list):
+                    for step in steps:
+                        if isinstance(step, dict) and "query" in step and isinstance(step["query"], str):
+                            cypher_query_actual = step["query"].strip()
+                            # Remove 'cypher\n' prefix if present
+                            if cypher_query_actual.lower().startswith("cypher"):
+                                cypher_query_actual = cypher_query_actual.split("\n", 1)[-1].strip()
+                            break
         except Exception as e:
             print(f"[ERROR][KG] Exception in chain.invoke: {e}")
             import traceback
             traceback.print_exc()
             result = {}
+            cypher_query_actual = cypher_query_prompt
+
         return {
-            "queries_tried": state["queries_tried"] + [cypher_query],
+            "queries_tried": state["queries_tried"] + [cypher_query_actual],
             "results": result,
             "attempt": state["attempt"] + 1,
         }
