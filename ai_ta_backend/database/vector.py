@@ -1,12 +1,13 @@
 import os
 from typing import List
-
+import json
 import requests
 from injector import inject
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.vectorstores import Qdrant
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import FieldCondition, MatchAny, MatchValue
+from ai_ta_backend.database.graph import GraphDatabase
 
 
 class VectorDatabase():
@@ -23,7 +24,7 @@ class VectorDatabase():
     self.qdrant_client = QdrantClient(
         url=os.environ['QDRANT_URL'],
         api_key=os.environ['QDRANT_API_KEY'],
-        port=os.getenv('QDRANT_PORT') if os.getenv('QDRANT_PORT') else None,
+        port=int(os.getenv('QDRANT_PORT')) if os.getenv('QDRANT_PORT') and os.getenv('QDRANT_PORT').isdigit() else None,
         timeout=20,  # default is 5 seconds. Getting timeout errors w/ document groups.
     )
 
@@ -31,6 +32,8 @@ class VectorDatabase():
                                              port=int(os.environ['VYRIAD_QDRANT_PORT']),
                                              https=True,
                                              api_key=os.environ['VYRIAD_QDRANT_API_KEY'])
+    
+    self.graphDb = GraphDatabase()
 
     try:
       # No major uptime guarantees
@@ -44,7 +47,7 @@ class VectorDatabase():
 
     self.vectorstore = Qdrant(client=self.qdrant_client,
                               collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-                              embeddings=OpenAIEmbeddings(openai_api_key=os.environ['VLADS_OPENAI_KEY']))
+                              embeddings=OpenAIEmbeddings(api_key=os.environ['VLADS_OPENAI_KEY']))
 
   def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                     disabled_doc_groups: List[str], public_doc_groups: List[dict]):
@@ -265,3 +268,31 @@ class VectorDatabase():
             ),
         ]),
     )
+  
+  def getKnowledgeGraphContexts(self, user_query: str):
+    """
+    Get knowledge graph contexts from Clinical KG
+    """
+    try:
+        response = self.graphDb.ckg_chain.invoke({"query": user_query})
+        print("FINAL RESPONSE: ", response)
+        
+        return response
+    except Exception as e:
+        error_msg = f"Error in knowledge graph query for '{user_query}': {str(e)}"
+        print(error_msg)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  
+  def getPrimeKGContexts(self, user_query: str):
+    """
+    Get knowledge graph contexts from Prime KG
+    """
+    try:
+        response = self.graphDb.prime_kg_chain.invoke({"query": user_query})
+  
+        return response
+    
+    except Exception as e:  
+      print(f"Error in getPrimeKGContexts: {str(e)}")
+      return {"result": "An error occurred while processing your knowledge graph query."}

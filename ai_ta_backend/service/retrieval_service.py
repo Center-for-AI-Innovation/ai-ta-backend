@@ -12,6 +12,9 @@ from dateutil import parser
 from injector import inject
 from langchain.embeddings.ollama import OllamaEmbeddings
 
+from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
+from langchain_openai import ChatOpenAI
+
 # from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import Document
@@ -24,6 +27,7 @@ from ai_ta_backend.database.sql import (
     WeeklyMetric,
 )
 from ai_ta_backend.database.vector import VectorDatabase
+from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapter
 
 # from ai_ta_backend.service.nomic_service import NomicService
@@ -37,10 +41,11 @@ class RetrievalService:
   """
 
   @inject
-  def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, posthog: PosthogService,
+  def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, graphDb: GraphDatabase, posthog: PosthogService,
                sentry: SentryService, thread_pool_executor: ThreadPoolExecutorAdapter):
     self.vdb = vdb
     self.sqlDb = sqlDb
+    self.graphDb = graphDb
     self.aws = aws
     self.sentry = sentry
     self.posthog = posthog
@@ -56,8 +61,9 @@ class RetrievalService:
         # openai_api_version=os.environ["OPENAI_API_VERSION"],
     )
 
-    self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')
-
+    self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')   
+    
+    
     # self.llm = AzureChatOpenAI(
     #     temperature=0,
     #     deployment_name=os.environ["AZURE_OPENAI_ENGINE"],
@@ -67,43 +73,20 @@ class RetrievalService:
     #     openai_api_type=os.environ['OPENAI_API_TYPE'],
     # )
 
+
   async def getTopContexts(self,
                            search_query: str,
                            course_name: str,
                            doc_groups: List[str] | None = None,
                            top_n: int = 100) -> Union[List[Dict], str]:
-    """Here's a summary of the work.
-
-        /GET arguments
-        course name (optional) str: A json response with TBD fields.
-
-        Returns
-        JSON: A json response with TBD fields. See main.py:getTopContexts docs.
-        or
-        String: An error message with traceback.
-        """
+    """
+    Retrieve top contexts for a query, including vector search and parallel KG retrieval (PrimeKG and Clinical KG).
+    """
     if doc_groups is None:
       doc_groups = []
     try:
       start_time_overall = time.monotonic()
-      # Improvement of performance by parallelizing independent operations:
-
-      # Old:
-      # time to fetch disabledDocGroups: 0.2 seconds
-      # time to fetch publicDocGroups: 0.2 seconds
-      # time to embed query: 0.4 seconds
-      # Total time: 0.8 seconds
-      # time to vector search: 0.48 seconds
-      # Total time: 1.5 seconds
-
-      # New:
-      # time to fetch disabledDocGroups: 0.2 seconds
-      # time to fetch publicDocGroups: 0.2 seconds
-      # time to embed query: 0.4 seconds
-      # Total time: 0.5 seconds
-      # time to vector search: 0.48 seconds
-      # Total time: 0.9 seconds
-
+      # Parallelize independent operations:
       if course_name == "vyriad":
         embedding_client = self.nomic_embeddings
       elif course_name == "pubmed" or course_name == "patents":
@@ -111,7 +94,6 @@ class RetrievalService:
       else:
         embedding_client = self.embeddings
 
-      # Create tasks for parallel execution
       with self.thread_pool_executor as executor:
         loop = asyncio.get_event_loop()
         tasks = [
@@ -162,7 +144,26 @@ class RetrievalService:
           },
       )
 
-      return self.format_for_json(valid_docs)
+      formatted = self.format_for_json(valid_docs)
+
+      # Helper to run KG context retrieval in parallel
+      async def get_kg_context(should_query_fn, kg_fn, *args):
+          if should_query_fn(search_query):
+              result = await asyncio.to_thread(kg_fn, *args)
+              if result and isinstance(result, dict) and result.get("text"):
+                  return result
+          return None
+
+      # Run both KG retrievals in parallel
+      primekg_task = get_kg_context(self.should_query_primekg, self.getPrimeKGContexts, search_query)
+      clinicalkg_task = get_kg_context(self.should_query_clinical_kg, self.getKnowledgeGraphContexts, search_query, course_name)
+      primekg_context, clinicalkg_context = await asyncio.gather(primekg_task, clinicalkg_task)
+
+      if primekg_context:
+          formatted.append(primekg_context)
+      if clinicalkg_context:
+          formatted.append(clinicalkg_context)
+      return formatted
     except Exception as e:
       # return full traceback to front end
       # err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:\n{e}"  # type: ignore
@@ -763,3 +764,127 @@ class RetrievalService:
       print(f"Error fetching model usage counts for {project_name}: {str(e)}")
       self.sentry.capture_exception(e)
       return []
+    
+  def getKnowledgeGraphContexts(self, user_query: str, course_name: str) -> Dict:
+    print(f"[DEBUG][Service] getKnowledgeGraphContexts called with user_query: {user_query}, course_name: {course_name}")
+    try:
+        start_time = time.monotonic()
+        response = self.graphDb.run_clinicalkg_query_with_retries(user_query)
+        print(f"[DEBUG][Service] Raw KG response from ClinicalKG: {response}")
+        execution_time = time.monotonic() - start_time
+        print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
+
+        # Post-process: If the result is "I don't know the answer", return empty
+        # Try to extract the nested 'result' field from the 'results' object
+        if isinstance(response, dict):
+            results_obj = response.get("results")
+            if isinstance(results_obj, dict) and "result" in results_obj:
+                result_text = results_obj["result"]
+                if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+                    print("[DEBUG][Service] Post-processing: Detected 'I don't know the answer', returning empty dict.")
+                    return {}
+                # Generate summary
+                summary = self.generate_openai_summary(user_query, results_obj["result"])
+                return {
+                    "text": summary,
+                    "kg_result": results_obj["result"],
+                    "readable_filename": "ClinicalKG",
+                    "course_name": course_name,
+                    "s3_path": None,
+                    "pagenumber": None,
+                    "url": None,
+                    "base_url": None,
+                    "doc_groups": None,
+                    "clinicalkg_intermediate_steps": results_obj.get("intermediate_steps"),
+                    "clinicalkg_query": results_obj.get("query"),
+                }
+            else:
+                print("[DEBUG][Service] Post-processing: Unexpected results_obj format or missing 'result' key.")
+        return response
+    except Exception as e:
+        print(f"[ERROR][Service] Exception in getKnowledgeGraphContexts: {e}")
+        import traceback
+        traceback.print_exc()
+        self.sentry.capture_exception(e)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  
+  def getPrimeKGContexts(self, user_query: str) -> Dict:
+    print(f"[DEBUG][Service] getPrimeKGContexts called with user_query: {user_query}")
+    try:
+        start_time = time.monotonic()
+        response = self.graphDb.run_primekg_query_with_retries(user_query)
+        print(f"[DEBUG][Service] Raw KG response from PrimeKG: {response}")
+        execution_time = time.monotonic() - start_time
+        print(f"Knowledge graph query completed in {execution_time:.2f} seconds for query: {user_query}")
+
+        # Post-process: If the result is "I don't know the answer", return empty
+        # Try to extract the nested 'result' field from the 'results' object
+        if isinstance(response, dict):
+            results_obj = response.get("results")
+            if isinstance(results_obj, dict) and "result" in results_obj:
+                result_text = results_obj["result"]
+                if isinstance(result_text, str) and "i don't know the answer" in result_text.lower():
+                    print("[DEBUG][Service] Post-processing: Detected 'I don't know the answer', returning empty dict.")
+                    return {}
+                # Generate summary
+                summary = self.generate_openai_summary(user_query, results_obj["result"])
+                return {
+                    "kg_result": results_obj["result"],
+                    "readable_filename": "PrimeKG",
+                    "course_name": None,
+                    "s3_path": None,
+                    "pagenumber": None,
+                    "url": None,
+                    "base_url": None,
+                    "doc_groups": None,
+                    "text": summary,
+                }
+            else:
+                print("[DEBUG][Service] Post-processing: Unexpected results_obj format or missing 'result' key.")
+        return response
+    except Exception as e:  
+        print(f"[ERROR][Service] Exception in getPrimeKGContexts: {e}")
+        import traceback
+        traceback.print_exc()
+        self.sentry.capture_exception(e)
+        return {"result": "An error occurred while processing your knowledge graph query."}
+
+  def should_query_primekg(self, search_query: str) -> bool:
+    """
+    Simple agent to decide if PrimeKG should be queried based on keywords in the search query.
+    """
+    keywords = ["disease", "drug", "gene", "symptom", "side effect", "treatment", "primekg", "cell"]
+    return any(kw in search_query.lower() for kw in keywords)
+
+  def should_query_clinical_kg(self, search_query: str) -> bool:
+    """
+    Simple agent to decide if Clinical KG should be queried based on keywords in the search query.
+    """
+    keywords = ["patient", "symptom", "diagnosis", "treatment", "clinical", "disease", "drug", "gene", "side effect"]
+    return any(kw in search_query.lower() for kw in keywords)
+
+  def generate_openai_summary(self, user_query: str, kg_result: list) -> str:
+    """
+    Generate a summary using the OpenAI API, given the user query and the first 5 results from the KG.
+    """
+    from openai import OpenAI
+    import os
+
+    client = OpenAI(api_key=os.environ["VLADS_OPENAI_KEY"])
+    # Truncate or format kg_result for prompt if it's very large
+    context_str = str(kg_result)[:4000]  # adjust as needed for token limits
+
+    prompt = (
+        f"User question: {user_query}\n"
+        f"Knowledge graph results: {context_str}\n"
+        "Please provide a concise, readable summary of the key findings that answer the user's question."
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o",  # or "gpt-3.5-turbo" if you want to save cost
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=256,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
