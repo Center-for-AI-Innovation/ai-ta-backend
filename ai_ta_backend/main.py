@@ -20,6 +20,7 @@ from flask_injector import FlaskInjector, RequestScope
 from injector import Binder, SingletonScope
 
 from ai_ta_backend.database.aws import AWSStorage
+from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.database.sql import SQLDatabase
 from ai_ta_backend.database.vector import VectorDatabase
 from ai_ta_backend.executors.flask_executor import (
@@ -746,6 +747,34 @@ def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+@app.route('/getClinicalKGContexts', methods=['GET'])
+def clinicalKGContexts(graph_db: GraphDatabase) -> Response:
+  user_query = request.args.get('user_query', default='', type=str)
+
+  if user_query == '':
+    abort(400, description="Missing required parameter: 'user_query' must be provided.")
+
+  try:
+    results = graph_db.getClinicalKGContexts(user_query)
+    response = jsonify(results)
+  except Exception as e:
+    response = Response(status=500)
+    response.data = f"An unexpected error occurred: {e}".encode()
+
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getPrimeKGContexts', methods=['GET'])
+def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
+  user_query = request.args.get('user_query', default='', type=str)
+
+  if user_query == '':
+    abort(400, description="Missing required parameter: 'user_query' must be provided.")
+
+  results = graph_db.getPrimeKGContexts(user_query)
+  response = jsonify(results)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
@@ -760,6 +789,7 @@ def configure(binder: Binder) -> None:
   binder.bind(SQLDatabase, to=SQLDatabase, scope=SingletonScope)
   binder.bind(AWSStorage, to=AWSStorage, scope=SingletonScope)
   binder.bind(ExecutorInterface, to=FlaskExecutorAdapter(executor), scope=SingletonScope)
+  binder.bind(GraphDatabase, to=GraphDatabase, scope=SingletonScope)
 
 
 FlaskInjector(app=app, modules=[configure])
