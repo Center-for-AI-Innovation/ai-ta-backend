@@ -1,7 +1,7 @@
 from os import getenv
 from statistics import mean
 import uuid
-import logging
+from pathlib import Path
 
 from ai_ta_backend.service.evaluation_service.chat_models.openai_api import OpenAIAPI
 from ai_ta_backend.service.evaluation_service.chat_models.vllm_api import VLLMClient
@@ -248,11 +248,14 @@ class EvaluationService:
     ) -> dict:
 
         unique_filename = str(uuid.uuid4())
-        base_path = "ai_ta_backend/service/evaluation_service"
-        input_path = f"{base_path}/input/{unique_filename}.json"
+        base_path = "ai_ta_backend/service/evaluation_service/processing"
+        input_path = f"{base_path}/{unique_filename}.json"
+        output_path = f"{base_path}/{unique_filename}.jsonl"
+
+        Path(f"{base_path}").mkdir(parents=True, exist_ok=True)
+
         with open(input_path, "w") as input_file:
             input_file.write(json.dumps(input))
-        output_path = f"{base_path}/output/{unique_filename}.jsonl"
 
         processor = EvaluationProcessor(
             input_path=input_path,
