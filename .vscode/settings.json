@@ -10,6 +10,9 @@
     "tag:yaml.org,2002:python/name:pymdownx.superfences.fence_code_format"
   ],
   "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportOptionalMemberAccess": "none",
+  },
   "cSpell.words": [
     "availabe",
     "boto",
