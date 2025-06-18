@@ -39,7 +39,7 @@ from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
-from ai_ta_backend.service.evaluation_service import EvaluationService
+from ai_ta_backend.service.evaluation_service.service import EvaluationService
 from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
@@ -738,10 +738,12 @@ def evaluate(service: EvaluationService) -> Response:
   """
   Runs the evaluation service
   """
-  questions = request.json.get('questions', '')
-  judge = request.json.get('judge', ["gpt-4o-mini"])
-
-  result = service.evaluate(questions, judge)
+  input = request.json.get("input")
+  num_processes = request.json.get("num_processes")
+  judge_model = request.json.get("judge_model")
+  subject_model = request.json.get("subject_model")
+  judge_temperature: float = request.json.get("judge_temperature", 0.0)
+  result = service.evaluate(input, num_processes, judge_model, subject_model, judge_temperature)
   response = jsonify(result)
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response

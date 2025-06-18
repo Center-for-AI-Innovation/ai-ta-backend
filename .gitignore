@@ -168,3 +168,4 @@ pip-selfcheck.json
 .aider*
 
 .vscode/*
+.vscode/settings.json
