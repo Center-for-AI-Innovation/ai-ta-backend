@@ -24,6 +24,7 @@ def webscrape_documents(project_name: str):
   supabase_client = create_client(supabase_url, supabase_key)
 
   # use RPC to get unique base_urls
+  # TODO: Replace with call to function in SQLDatabase
   response = supabase_client.rpc("get_base_url_with_doc_groups", {"p_course_name": project_name}).execute()
   base_urls = response.data
   print(f"Total base_urls: {len(base_urls)}")

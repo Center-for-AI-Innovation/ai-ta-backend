@@ -44,6 +44,7 @@ def extractPubmedData():
                          project_api_key=os.environ['POSTHOG_API_KEY'], 
                          host="https://app.posthog.com")
 
+  # TODO: Replace with DATABASE_CLIENT
   if 'SUPABASE_CLIENT' not in globals():
         SUPABASE_CLIENT = supabase.create_client(  # type: ignore
             supabase_url=os.getenv('SUPABASE_URL'),  # type: ignore
@@ -90,6 +91,7 @@ def extractPubmedData():
 
 
 def getFilesToProcess(file_list: list):
+  # TODO: Need to find the definition for this table and add to models
   last_processed_response = SUPABASE_CLIENT.table("pubmed_daily_update").select("*").order(
       "created_at", desc=True).limit(1).execute()  # type: ignore
   last_processed_file = last_processed_response.data[0]['last_xml_file']
