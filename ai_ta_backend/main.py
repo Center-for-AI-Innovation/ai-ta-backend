@@ -125,6 +125,7 @@ def getTopContexts(service: RetrievalService) -> Response:
   course_name: str = data.get('course_name', '')
   doc_groups: List[str] = data.get('doc_groups', [])
   top_n: int = data.get('top_n', 100)
+  conversation_id: str = data.get('conversation_id', '')
 
   if search_query == '' or course_name == '':
     # proper web error "400 Bad request"
@@ -134,7 +135,7 @@ def getTopContexts(service: RetrievalService) -> Response:
         f"Missing one or more required parameters: 'search_query' and 'course_name' must be provided. Search query: `{search_query}`, Course name: `{course_name}`"
     )
 
-  found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n))
+  found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n, conversation_id))
   response = jsonify(found_documents)
   response.headers.add('Access-Control-Allow-Origin', '*')
   print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")

@@ -71,17 +71,12 @@ class RetrievalService:
                            search_query: str,
                            course_name: str,
                            doc_groups: List[str] | None = None,
-                           top_n: int = 100) -> Union[List[Dict], str]:
-    """Here's a summary of the work.
-
-        /GET arguments
-        course name (optional) str: A json response with TBD fields.
-
-        Returns
-        JSON: A json response with TBD fields. See main.py:getTopContexts docs.
-        or
-        String: An error message with traceback.
-        """
+                           top_n: int = 100,
+                           conversation_id: str = '') -> Union[List[Dict], str]:
+    """
+    Get most relevant contexts for a given search query.
+    Now includes conversation-specific files.
+    """
     if doc_groups is None:
       doc_groups = []
     try:
@@ -128,14 +123,17 @@ class RetrievalService:
       time_for_parallel_operations = time.monotonic() - start_time_overall
       start_time_vector_search = time.monotonic()
 
-      # Perform vector search
-      found_docs: list[Document] = self.vector_search(search_query=search_query,
-                                                      course_name=course_name,
-                                                      doc_groups=doc_groups,
-                                                      user_query_embedding=user_query_embedding,
-                                                      disabled_doc_groups=disabled_doc_groups,
-                                                      public_doc_groups=public_doc_groups,
-                                                      top_n=top_n)
+      # Perform vector search with conversation filter
+      found_docs: list[Document] = self.vector_search(
+          search_query=search_query,
+          course_name=course_name,
+          doc_groups=doc_groups,
+          user_query_embedding=user_query_embedding,
+          disabled_doc_groups=disabled_doc_groups,
+          public_doc_groups=public_doc_groups,
+          top_n=top_n,
+          conversation_id=conversation_id
+      )
 
       time_to_retrieve_docs = time.monotonic() - start_time_vector_search
 
@@ -485,9 +483,11 @@ class RetrievalService:
                     user_query_embedding,
                     disabled_doc_groups,
                     public_doc_groups,
-                    top_n: int = 100):
+                    top_n: int = 100,
+                    conversation_id: str = ''):
     """
-    Search the vector database for a given query, course name, and document groups.
+    Search the vector database for a given query.
+    Now includes conversation-specific files.
     """
     if doc_groups is None:
       doc_groups = []
@@ -504,24 +504,28 @@ class RetrievalService:
     # Perform the vector search
     start_time_vector_search = time.monotonic()
 
-    # ----------------------------
-    # SPECIAL CASE FOR VYRIAD, CROPWIZARD
-    # ----------------------------
-    if course_name == "vyriad":
-      search_results = self.vdb.vyriad_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                                     disabled_doc_groups, public_doc_groups)
-    elif course_name == "cropwizard":
-      search_results = self.vdb.cropwizard_vector_search(search_query, course_name, doc_groups, user_query_embedding,
-                                                         top_n, disabled_doc_groups, public_doc_groups)
-    elif course_name == "pubmed":
-      search_results = self.vdb.pubmed_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                                     disabled_doc_groups, public_doc_groups)
-    elif course_name == "patents":
-      search_results = self.vdb.patents_vector_search(search_query, course_name, doc_groups, user_query_embedding,
-                                                      top_n, disabled_doc_groups, public_doc_groups)
+    # Add conversation filter if provided
+    if conversation_id:
+        # Get conversation-specific files
+        conversation_filter = self._create_conversation_filter(conversation_id)
+        
+        # Combine with existing filter
+        combined_filter = self._combine_filters(
+            self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
+            conversation_filter
+        )
+        
+        search_results = self.vdb.vector_search_with_filter(
+            search_query, course_name, doc_groups, user_query_embedding, 
+            top_n, disabled_doc_groups, public_doc_groups, combined_filter
+        )
     else:
-      search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                              disabled_doc_groups, public_doc_groups)
+        # Use existing search logic
+        search_results = self.vdb.vector_search(
+            search_query, course_name, doc_groups, user_query_embedding, 
+            top_n, disabled_doc_groups, public_doc_groups
+        )
+    
     self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
 
     # Process the search results by extracting the page content and metadata
@@ -763,3 +767,20 @@ class RetrievalService:
       print(f"Error fetching model usage counts for {project_name}: {str(e)}")
       self.sentry.capture_exception(e)
       return []
+
+  def _create_conversation_filter(self, conversation_id: str):
+    """Create filter for conversation-specific files."""
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key='conversation_id',
+                match=models.MatchValue(value=conversation_id)
+            )
+        ]
+    )
+
+  def _combine_filters(self, filter1: models.Filter, filter2: models.Filter) -> models.Filter:
+    """Combine two filters using OR logic."""
+    return models.Filter(
+        should=[filter1, filter2]
+    )

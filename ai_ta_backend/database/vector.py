@@ -446,3 +446,21 @@ class VectorDatabase():
             ),
         ]),
     )
+
+  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str], 
+                               user_query_embedding, top_n, disabled_doc_groups: List[str], 
+                               public_doc_groups: List[dict], custom_filter: models.Filter):
+    """
+    Search the vector database with a custom filter.
+    """
+    search_results = self.qdrant_client.search(
+        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+        query_filter=custom_filter,
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,
+        search_params=models.SearchParams(
+            quantization=models.QuantizationSearchParams(rescore=False)
+        )
+    )
+    return search_results
