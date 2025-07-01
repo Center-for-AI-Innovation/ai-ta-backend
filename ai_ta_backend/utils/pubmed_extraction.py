@@ -19,23 +19,43 @@ import supabase
 from minio import Minio
 from posthog import Posthog
 
-POSTHOG = Posthog(sync_mode=False, project_api_key=os.environ['POSTHOG_API_KEY'], host="https://app.posthog.com")
+# POSTHOG = Posthog(sync_mode=False, project_api_key=os.environ['POSTHOG_API_KEY'], host="https://app.posthog.com")
 
-SUPBASE_CLIENT = supabase.create_client(  # type: ignore
-    supabase_url=os.getenv('SUPABASE_URL'),  # type: ignore
-    supabase_key=os.getenv('SUPABASE_API_KEY')  # type: ignore
-)
+# SUPBASE_CLIENT = supabase.create_client(  # type: ignore
+#     supabase_url=os.getenv('SUPABASE_URL'),  # type: ignore
+#     supabase_key=os.getenv('SUPABASE_API_KEY')  # type: ignore
+# )
 
-MINIO_CLIENT = Minio(os.environ['MINIO_URL'],
-                     access_key=os.environ['MINIO_ACCESS_KEY'],
-                     secret_key=os.environ['MINIO_SECRET_KEY'],
-                     secure=True)
+# MINIO_CLIENT = Minio(os.environ['MINIO_ENDPOINT'],
+#                      access_key=os.environ['MINIO_ACCESS_KEY'],
+#                      secret_key=os.environ['MINIO_SECRET'],
+#                      secure=True)
 
 
 def extractPubmedData():
   """
-    Main function to extract metadata and articles from the PubMed baseline folder.
-    """
+  Main function to extract metadata and articles from the PubMed baseline folder.
+  """
+  global POSTHOG, SUPABASE_CLIENT, MINIO_CLIENT
+    
+  # Initialize only if not already initialized
+  if 'POSTHOG' not in globals():
+        POSTHOG = Posthog(sync_mode=False, 
+                         project_api_key=os.environ['POSTHOG_API_KEY'], 
+                         host="https://app.posthog.com")
+
+  if 'SUPABASE_CLIENT' not in globals():
+        SUPABASE_CLIENT = supabase.create_client(  # type: ignore
+            supabase_url=os.getenv('SUPABASE_URL'),  # type: ignore
+            supabase_key=os.getenv('SUPABASE_API_KEY')  # type: ignore
+        )
+
+  if 'MINIO_CLIENT' not in globals():
+        MINIO_CLIENT = Minio(os.environ['MINIO_ENDPOINT'],
+                            access_key=os.environ['MINIO_ACCESS_KEY'],
+                            secret_key=os.environ['MINIO_SECRET'],
+                            secure=True)
+
   start_time = time.monotonic()
 
   ftp_address = "ftp.ncbi.nlm.nih.gov"
@@ -70,7 +90,7 @@ def extractPubmedData():
 
 
 def getFilesToProcess(file_list: list):
-  last_processed_response = SUPBASE_CLIENT.table("pubmed_daily_update").select("*").order(
+  last_processed_response = SUPABASE_CLIENT.table("pubmed_daily_update").select("*").order(
       "created_at", desc=True).limit(1).execute()  # type: ignore
   last_processed_file = last_processed_response.data[0]['last_xml_file']
   print("Last processed file: ", last_processed_file)
@@ -168,7 +188,7 @@ def processPubmedXML(file: str, ftp_address: str, ftp_path: str):
     print("Final metadata: ", len(final_metadata))
 
     try:
-      response = SUPBASE_CLIENT.table("publications").upsert(final_metadata).execute()  # type: ignore
+      response = SUPABASE_CLIENT.table("publications").upsert(final_metadata).execute()  # type: ignore
       print("Uploaded metadata to SQL DB.")
     except Exception as e:
       print("Error in uploading to Supabase: ", e)

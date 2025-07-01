@@ -10,7 +10,7 @@ Simple as pie! Upload your docs—whether it’s PDFs, PowerPoints, Word files, 
 
 ## Is there a community or support available?
 
-Absolutely! We’ve got a Discord community where you can hang out, ask questions, and get tips. Plus, our team is super responsive—email Kastan Day at kvday2@illinois.edu or Akylai Kasymkulova at akylaik2@illinois.edu, and we’ll get back to you in just 2-3 minutes. Yes, you read that right!
+Absolutely! We’ve got a Discord community where you can hang out, ask questions, and get tips. Plus, our team is super responsive—email Rohan Marwaha at rohan13@illinois.edu or Akylai Kasymkulova at akylaik2@illinois.edu, and we’ll get back to you in just 2-3 minutes. Yes, you read that right!
 
 ## Are there any costs associated with using the chat?
 
@@ -22,7 +22,7 @@ It’s coming soon! For now, feel free to reach out to us directly, or hop into 
 
 ## How do I contact support if I have a technical issue?
 
-We care deeply about making this product truly delightful. We're very available on email kvday2@illinois.edu (Kastan Day) or akylaik2@illinois.edu (Akylai Kasymkulova). Please let us know if you have any trouble at all and we'll make sure it’s fixed for you and all our users.
+We care deeply about making this product truly delightful. We're very available on email rohan13@illinois.edu (Rohan Marwaha) or akylaik2@illinois.edu (Akylai Kasymkulova). Please let us know if you have any trouble at all and we'll make sure it’s fixed for you and all our users.
 
 ## How can I stay updated with the new features and updates?
 

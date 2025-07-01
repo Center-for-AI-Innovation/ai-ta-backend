@@ -6,28 +6,30 @@ description: Thanks for contributing to UIUC.chat ❤️
 
 ## Start here
 
-* [ ] Send me (kvday2@illinois.edu) an email and request to be added to:
-  * GitHub Organization, <mark style="color:yellow;">include your GitHub username</mark>.
-  * Secrets manager, <mark style="color:yellow;">include your preferred email address</mark>.
+* [ ] Send me (rohan13@illinois.edu) an email and request to be added to:
+  * [GitHub Organization](https://github.com/UIUC-Chatbot) & [Frontend repo](https://github.com/Center-for-AI-Innovation/uiuc-chat-frontend), <mark style="color:yellow;">include your GitHub username</mark>.
+  * [Secrets manager](https://env.uiuc.chat/), <mark style="color:yellow;">include your preferred email address</mark>.
   * Supabase dashboard, <mark style="color:yellow;">include your GitHub's email address</mark>.
 
-👉 Skip to [Frontend](developer-quickstart.md#frontend-setup) or [Backend](developer-quickstart.md#backend-setup) setup instructions.
+<details>
 
-### Key accounts
+<summary>Background info on Key accounts</summary>
 
 * Google: `caiincsa@gmail.com`
 * Managed services: Vercel, Railway, Beam, Supabase, S3, Posthog, Sentry.
 * Self-hosted: Qdrant, Ollama.
 * Task management via [our Github Projects board](https://github.com/orgs/UIUC-Chatbot/projects/2).
 
-## Set up Infiscal
+</details>
+
+## Set up Infiscal for Environment Variables
 
 {% hint style="warning" %}
 You must setup an account before continuing, for our secrets service [Infisical](https://infisical.com/docs/documentation/getting-started/introduction).\
-Confirm you can login here: [https://env.ncsa.ai/](https://env.ncsa.ai/)
+Confirm you can login here: [https://env.uiuc.chat/](https://env.uiuc.chat/)
 {% endhint %}
 
-Instead of sharing .env files manually, we use Infiscal as a central password manager for devs. We use its CLI and web interface.
+Instead of sharing `.env` files manually, we use Infiscal as a central password manager for devs. We use its CLI and web interface.
 
 See the [CLI install docs](https://infisical.com/docs/cli/overview) for Linux/Windows instructions. Or the [CLI usage docs](https://infisical.com/docs/cli/usage).
 
@@ -52,12 +54,40 @@ sudo apt-get update && sudo apt-get install -y infisical
 {% endtab %}
 {% endtabs %}
 
+### Where are my `.env` variables?
+
+If it's running on `localhost`, the env vars come from **Infisical**, our shared secrets manager. You can add new env vars at [env.uiuc.chat](https://env.uiuc.chat/)
+
+If it's in production, or any cloud service, the env vars are stored directly in that cloud service. Those include Vercel, Railway, Beam.cloud and more. You can edit env vars in those services, just be careful.
+
 ## Frontend Setup
+
+Frontend repo: [https://github.com/Center-for-AI-Innovation/uiuc-chat-frontend](https://github.com/Center-for-AI-Innovation/uiuc-chat-frontend)
 
 ```bash
 # clone the repo somewhere good
-git clone git@github.com:KastanDay/ai-ta-frontend.git
+git clone git@github.com:Center-for-AI-Innovation/uiuc-chat-frontend.git
 ```
+
+<details>
+
+<summary>❌ Seeing an error? git@github.com: Permission denied (publickey).</summary>
+
+If you see an error like this:&#x20;
+
+```
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+Then you have to **add your local `ssh`key to your Github account** here: [https://github.com/settings/keys](https://github.com/settings/keys)
+
+Finally, attempt cloning the repo again.
+
+</details>
 
 ### (1/2) Install dev dependencies
 
@@ -82,7 +112,7 @@ Install dev dependencies
 
 ```bash
 # navigate to the root of the github
-cd path/to/ai-ta-frontend
+cd uiuc-chat-frontend
 
 # install all necessary dependencies 
 npm i 
@@ -92,11 +122,11 @@ npm i
 
 ```bash
 # navigate to the root of the github
-cd path/to/ai-ta-frontend
+cd uiuc-chat-frontend
 
 infisical login
 # ⭐️ --> select "Self Hosting"
-# ⭐️ --> enter "https://env.ncsa.ai"
+# ⭐️ --> enter "https://env.uiuc.chat"
 # ⭐️ click the login link
 # ⭐️ likely enter your main computer password
 ```
@@ -135,22 +165,54 @@ INF Injecting 32 Infisical secrets into your application process
 
 ## Backend Setup
 
+Backend repo: [https://github.com/Center-for-AI-Innovation/ai-ta-backend](https://github.com/Center-for-AI-Innovation/ai-ta-backend)
+
 ```bash
 # clone the repo somewhere good
-git clone git@github.com:UIUC-Chatbot/ai-ta-backend.git
+git clone git@github.com:Center-for-AI-Innovation/ai-ta-backend.git
 ```
+
+<details>
+
+<summary>❌ Seeing an error? git@github.com: Permission denied (publickey).</summary>
+
+If you see an error like this:&#x20;
+
+```
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+Then you have to **add your local `ssh`key to your Github account** here: [https://github.com/settings/keys](https://github.com/settings/keys)
+
+Finally, attempt cloning the repo again.
+
+</details>
 
 ### (1/2) Install dev dependencies
 
 Use a python virtual environment, here I'll use `conda`.
 
+* [Fast and easy conda install](https://www.anaconda.com/docs/getting-started/anaconda/install#macos-linux-installation) (via CLI is easiest), if you don't have it yet.
+
 Use <mark style="color:yellow;">python 3.10</mark>.
 
+1. Create and activate Conda env
+
 ```bash
-conda create --name ai-ta-backend python=3.10 -y
+conda create --name ai-ta-backend python=3.10 -y && conda activate ai-ta-backend
+```
 
-conda activate ai-ta-backend
+2. Install dependencies
 
+```bash
+# navigate to the root of the github
+cd ai-ta-backend
+
+# install dependencies
 pip install -r requirements.txt
 ```
 
@@ -158,19 +220,19 @@ pip install -r requirements.txt
 
 {% hint style="warning" %}
 You must setup an account before continuing, for our secrets service [Infisical](https://infisical.com/docs/documentation/getting-started/introduction).\
-Confirm you can login here: [https://env.ncsa.ai/](https://env.ncsa.ai/)
+Confirm you can login here: [https://env.uiuc.chat](https://env.uiuc.chat/)
 
 Also make sure to install Infiscal in your local machine as mentioned above
 {% endhint %}
 
 <pre><code># navigate to the root of the github
 cd path/to/ai-ta-backend
-<strong>
-</strong><strong>infisical login
+<strong>infisical login
 </strong># ⭐️ --> select "Self Hosting"
-# ⭐️ --> enter "https://env.ncsa.ai"
+# ⭐️ --> enter "https://env.uiuc.chat"
 # ⭐️ click the login link
 # ⭐️ likely enter your main computer password
+
 </code></pre>
 
 ### Last step: start dev server!
@@ -184,4 +246,4 @@ Now you can write new endpoints in `ai-ta-backend/main.py` and call them using [
 
 
 
-Thanks! For any questions at all just email me (kvday2@illinois.edu). I'm friendly, promise.
+Thanks! For any questions at all just email me (rohan13@illinois.edu).

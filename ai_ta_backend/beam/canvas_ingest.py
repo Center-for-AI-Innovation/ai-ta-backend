@@ -332,6 +332,7 @@ class CanvasIngest():
 
       if 'status' in files and files['status'] == 'unauthorized':
         # Student user probably blocked for Files access
+        print(f"Unauthorized to access files: {files['status']}")
         return "Unauthorized to access files!"
       else:
         # TA user or authorized user will get a JSON of file objects
@@ -339,7 +340,7 @@ class CanvasIngest():
           try:
             filename = file['filename']
             download_url = file['url']
-            #print("Downloading file: ", filename)
+            print("Downloading file: ", filename)
             response = requests.get(download_url, headers=self.headers)
             full_path = os.path.join(dest_folder, filename)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -424,12 +425,13 @@ class CanvasIngest():
 
       for module in modules:
         # check if published
+        print("Module: ", module['name'])
         if 'published' in module and not module['published']:
           print("Module not published: ", module['name'])
           continue
 
         module_number = str(module['position'])
-        #print("Downloading module: ", module_number)
+        print("Downloading module: ", module_number)
         module_items = module['items']
         for item in module_items:
           if item['type'] == 'ExternalUrl':  # EXTERNAL LINK

@@ -540,9 +540,9 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path):
     bcc_emails = []
 
     # Handle specific email cases
-    if 'kvday2@illinois.edu' in admin_emails:
-      admin_emails.remove('kvday2@illinois.edu')
-      bcc_emails.append('kvday2@illinois.edu')
+    if 'rohan13@illinois.edu' in admin_emails:
+      admin_emails.remove('rohan13@illinois.edu')
+      bcc_emails.append('rohan13@illinois.edu')
 
     admin_emails.append(course_metadata['course_owner'])
     admin_emails = list(set(admin_emails))
@@ -642,9 +642,9 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
     bcc_emails = []
 
     # check for Kastan's email and move to bcc
-    if 'kvday2@illinois.edu' in admin_emails:
-      admin_emails.remove('kvday2@illinois.edu')
-      bcc_emails.append('kvday2@illinois.edu')
+    if 'rohan13@illinois.edu' in admin_emails:
+      admin_emails.remove('rohan13@illinois.edu')
+      bcc_emails.append('rohan13@illinois.edu')
 
     # add course owner email to admin_emails
     admin_emails.append(course_metadata['course_owner'])

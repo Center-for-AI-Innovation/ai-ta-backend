@@ -9,10 +9,10 @@ from typing import List
 import pydantic
 import requests
 import sentry_sdk
-import supabase
 from dotenv import load_dotenv
 from retry import retry
 
+import supabase
 from ai_ta_backend.types.types import ClerkUser
 
 load_dotenv(override=True)
@@ -151,22 +151,22 @@ def send_html_email(subject: str, html_text: str, sender: str, receipients: list
 
 # start with 1 second delay, increment by 1 at a time. Max tries of 65 (> 1 minute)
 @retry(exceptions=Exception, tries=65, delay=1, max_delay=None, backoff=1, jitter=0)
-def send_email_safely(sender, receipient: str, message):
+def send_email_safely(sender, recipients: str, message):
   """
   Send an email using the AWS SES service. Retry if there is an exception.
   Note account limits:
     * Maximum send rate: 14 emails per second
     * Daily sending quota: 50,000 emails per 24-hour period
   """
-  print("receipient in safe-send", receipient)
+  print("receipient in safe-send", recipients)
 
   with smtplib.SMTP_SSL(os.getenv('SES_HOST'), os.getenv('SES_PORT')) as server:  # type: ignore
     server.login(os.getenv('USERNAME_SMTP'), os.getenv('PASSWORD_SMTP'))  # type: ignore
-    server.sendmail(sender, receipient, message.as_string())
+    server.sendmail(sender, recipients, message.as_string())
 
     # log successful sends
     with open("successful_sends.txt", "a") as file:
-      file.write(receipient + "\n")
+      file.write(recipients + "\n")
 
 
 if __name__ == "__main__":
@@ -179,7 +179,7 @@ if __name__ == "__main__":
     success_or_fail = send_html_email(
         subject="UIUC.chat Product Update 1",
         html_text=html_content,
-        sender="kvday2@illinois.edu",
+        sender="rohan13@illinois.edu",
     )
-    # receipients=["kvday2@illinois.edu"])
+    # receipients=["rohan13@illinois.edu"])
     print("success_or_fail:", success_or_fail)

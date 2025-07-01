@@ -20,6 +20,7 @@ from flask_injector import FlaskInjector, RequestScope
 from injector import Binder, SingletonScope
 
 from ai_ta_backend.database.aws import AWSStorage
+from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.database.sql import SQLDatabase
 from ai_ta_backend.database.vector import VectorDatabase
 from ai_ta_backend.executors.flask_executor import (
@@ -35,15 +36,15 @@ from ai_ta_backend.executors.thread_pool_executor import (
     ThreadPoolExecutorInterface,
 )
 from ai_ta_backend.service.export_service import ExportService
-#from ai_ta_backend.service.nomic_service import NomicService
+from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
 from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
-
+from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
-
+from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
 
 app = Flask(__name__)
 CORS(app)
@@ -84,6 +85,16 @@ def getTopContexts(service: RetrievalService) -> Response:
   token_limit
   doc_groups
   
+  Example Request Body:
+  ```json
+  {
+    "search_query": "What is a finite state machine?",
+    "course_name": "ECE_385",
+    "doc_groups": ["lectures", "readings"],
+    "top_n": 5
+  }
+  ```
+
   Returns
   -------
   JSON
@@ -112,8 +123,8 @@ def getTopContexts(service: RetrievalService) -> Response:
   data = request.get_json()
   search_query: str = data.get('search_query', '')
   course_name: str = data.get('course_name', '')
-  token_limit: int = data.get('token_limit', 3000)
   doc_groups: List[str] = data.get('doc_groups', [])
+  top_n: int = data.get('top_n', 100)
 
   if search_query == '' or course_name == '':
     # proper web error "400 Bad request"
@@ -123,10 +134,39 @@ def getTopContexts(service: RetrievalService) -> Response:
         f"Missing one or more required parameters: 'search_query' and 'course_name' must be provided. Search query: `{search_query}`, Course name: `{course_name}`"
     )
 
-  found_documents = asyncio.run(service.getTopContexts(search_query, course_name, token_limit, doc_groups))
+  found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n))
   response = jsonify(found_documents)
   response.headers.add('Access-Control-Allow-Origin', '*')
   print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")
+  return response
+
+
+@app.route('/llm-monitor-message', methods=['POST'])
+def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorInterface) -> Response:
+  """
+  Analyze a message from a conversation and store the results in the database.
+  """
+  start_time = time.monotonic()
+  data = request.get_json()
+  # messages: List[str] = data.get('messages', [])
+  course_name: str = data.get('course_name', None)
+  conversation_id: str = data.get('conversation_id', None)
+  user_email: str = data.get('user_email', None)
+  model_name: str = data.get('model_name', None)
+
+  if course_name == '' or conversation_id == '':
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing one or more required parameters: 'course_name' and 'conversation_id' must be provided. Course name: `{course_name}`, Conversation ID: `{conversation_id }`"
+    )
+
+  flaskExecutor.submit(service.llm_monitor_message, course_name, conversation_id, user_email, model_name)
+  response = jsonify({"outcome": "Task started"})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  print(f"⏰ Runtime of /llm-monitor-message in main.py: {(time.monotonic() - start_time):.2f} seconds")
+
   return response
 
 
@@ -178,21 +218,21 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   return response
 
 
-# @app.route('/getNomicMap', methods=['GET'])
-# def nomic_map(service: NomicService):
-#   course_name: str = request.args.get('course_name', default='', type=str)
-#   map_type: str = request.args.get('map_type', default='conversation', type=str)
+@app.route('/getNomicMap', methods=['GET'])
+def nomic_map(service: NomicService):
+  course_name: str = request.args.get('course_name', default='', type=str)
+  map_type: str = request.args.get('map_type', default='conversation', type=str)
 
-#   if course_name == '':
-#     # proper web error "400 Bad request"
-#     abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
+  if course_name == '':
+    # proper web error "400 Bad request"
+    abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
 
-#   map_id = service.get_nomic_map(course_name, map_type)
-#   print("nomic map\n", map_id)
+  map_id = service.get_nomic_map(course_name, map_type)
+  print("nomic map\n", map_id)
 
-#   response = jsonify(map_id)
-#   response.headers.add('Access-Control-Allow-Origin', '*')
-#   return response
+  response = jsonify(map_id)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route('/updateConversationMaps', methods=['GET'])
@@ -201,7 +241,7 @@ def updateConversationMaps(service: NomicService, flaskExecutor: ExecutorInterfa
 
   response = flaskExecutor.submit(service.update_conversation_maps)
 
-  response = jsonify({"Task started"})
+  response = jsonify({"outcome": "Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
@@ -212,7 +252,29 @@ def updateDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
 
   response = flaskExecutor.submit(service.update_document_maps)
 
-  response = jsonify({"Task started"})
+  response = jsonify({"outcome": "Task started"})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/cleanUpConversationMaps', methods=['GET'])
+def cleanUpConversationMaps(service: NomicService, flaskExecutor: ExecutorInterface):
+  print("Starting conversation map cleanup...")
+
+  #response = flaskExecutor.submit(service.clean_up_conversation_maps)
+
+  response = jsonify({"outcome": "Task started"})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/cleanUpDocumentMaps', methods=['GET'])
+def cleanUpDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
+  print("Starting document map cleanup...")
+
+  #response = flaskExecutor.submit(service.clean_up_document_maps)
+
+  response = jsonify({"outcome": "Document Map cleanup temporarily disabled"})
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
@@ -509,12 +571,17 @@ def switch_workflow(service: WorkflowService) -> Response:
 
 @app.route('/getConversationStats', methods=['GET'])
 def get_conversation_stats(service: RetrievalService) -> Response:
+  """
+    Retrieves statistical metrics about conversations for a specific course.
+    """
   course_name = request.args.get('course_name', default='', type=str)
+  from_date = request.args.get('from_date', default='', type=str)
+  to_date = request.args.get('to_date', default='', type=str)
 
   if course_name == '':
     abort(400, description="Missing required parameter: 'course_name' must be provided.")
 
-  conversation_stats = service.getConversationStats(course_name)
+  conversation_stats = service.getConversationStats(course_name, from_date, to_date)
 
   response = jsonify(conversation_stats)
   response.headers.add('Access-Control-Allow-Origin', '*')
@@ -578,6 +645,7 @@ def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> 
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+
 @app.route('/pubmedExtraction', methods=['GET'])
 def pubmedExtraction():
   """
@@ -604,19 +672,124 @@ def get_project_stats(service: RetrievalService) -> Response:
   return response
 
 
+@app.route('/getWeeklyTrends', methods=['GET'])
+def get_weekly_trends(service: RetrievalService) -> Response:
+  """
+    Provides week-over-week percentage changes in key project metrics.
+    """
+  project_name = request.args.get('project_name', default='', type=str)
+
+  if project_name == '':
+    abort(400, description="Missing required parameter: 'project_name' must be provided.")
+
+  weekly_trends = service.getWeeklyTrends(project_name)
+
+  response = jsonify(weekly_trends)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/getModelUsageCounts', methods=['GET'])
+def get_model_usage_counts(service: RetrievalService) -> Response:
+  """
+    Get counts of different models used in conversations.
+    """
+  project_name = request.args.get('project_name', default='', type=str)
+
+  if project_name == '':
+    abort(400, description="Missing required parameter: 'project_name' must be provided.")
+
+  model_counts = service.getModelUsageCounts(project_name)
+
+  response = jsonify(model_counts)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/send-transactional-email', methods=['POST'])
+def send_transactional_email(service: ExportService):
+  to_recipients: str = request.json.get('to_recipients_list', [])
+  bcc_recipients: str = request.json.get('bcc_recipients_list', [])
+  sender: str = request.json.get('sender', '')
+  subject: str = request.json.get('subject', '')
+  body_text: str = request.json.get('body_text', '')
+
+  if sender == '' or to_recipients == [] or body_text == '':
+    # proper web error "400 Bad request"
+    abort(400,
+          description=f"Missing required parameter: 'sender' and 'to_recipients' and 'body_text' must be provided.")
+
+  try:
+    send_email(subject=subject,
+               body_text=body_text,
+               sender=sender,
+               recipients=to_recipients,
+               bcc_recipients=bcc_recipients)
+    response = Response(status=200)
+  except Exception as e:
+    response = Response(status=500)
+    response.data = f"An unexpected error occurred: {e}".encode()
+
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/updateProjectDocuments', methods=['GET'])
+def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
+  project_name = request.args.get('project_name', default='', type=str)
+
+  if project_name == '':
+    abort(400, description="Missing required parameter: 'project_name' must be provided.")
+
+  result = flaskExecutor.submit(webscrape_documents, project_name)
+
+  response = jsonify({"message": "success"})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getClinicalKGContexts', methods=['GET'])
+def clinicalKGContexts(graph_db: GraphDatabase) -> Response:
+  user_query = request.args.get('user_query', default='', type=str)
+
+  if user_query == '':
+    abort(400, description="Missing required parameter: 'user_query' must be provided.")
+
+  try:
+    results = graph_db.getClinicalKGContexts(user_query)
+    response = jsonify(results)
+  except Exception as e:
+    response = Response(status=500)
+    response.data = f"An unexpected error occurred: {e}".encode()
+
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/getPrimeKGContexts', methods=['GET'])
+def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
+  user_query = request.args.get('user_query', default='', type=str)
+
+  if user_query == '':
+    abort(400, description="Missing required parameter: 'user_query' must be provided.")
+
+  results = graph_db.getPrimeKGContexts(user_query)
+  response = jsonify(results)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(ProcessPoolExecutorInterface, to=ProcessPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
   binder.bind(PosthogService, to=PosthogService, scope=SingletonScope)
-  binder.bind(SentryService, to=SentryService, scope=SingletonScope)
-  #binder.bind(NomicService, to=NomicService, scope=SingletonScope)
+  # binder.bind(SentryService, to=SentryService, scope=SingletonScope)
+  binder.bind(NomicService, to=NomicService, scope=SingletonScope)
   binder.bind(ExportService, to=ExportService, scope=SingletonScope)
   binder.bind(WorkflowService, to=WorkflowService, scope=SingletonScope)
   binder.bind(VectorDatabase, to=VectorDatabase, scope=SingletonScope)
   binder.bind(SQLDatabase, to=SQLDatabase, scope=SingletonScope)
   binder.bind(AWSStorage, to=AWSStorage, scope=SingletonScope)
   binder.bind(ExecutorInterface, to=FlaskExecutorAdapter(executor), scope=SingletonScope)
+  binder.bind(GraphDatabase, to=GraphDatabase, scope=SingletonScope)
 
 
 FlaskInjector(app=app, modules=[configure])

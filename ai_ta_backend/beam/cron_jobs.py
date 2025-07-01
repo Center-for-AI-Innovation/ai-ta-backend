@@ -9,9 +9,9 @@ import requests
 from beam import schedule
 
 
-@schedule(when="@daily", name="update-nomic-maps")
+@schedule(when="0 6 * * *", name="update-nomic-maps")
 def task():
-  print("Hi, from your task running at midnight daily!")
+  print("Hi, from your task running at 6 AM UTC (12 AM CST) daily!")
   base_url = "https://flask-production-751b.up.railway.app"
 
   # Update conversation maps
