@@ -122,8 +122,8 @@ class RetrievalService:
 
       disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
 
-      disabled_doc_groups = [doc_group['name'] for doc_group in disabled_doc_groups_response.data]
-      public_doc_groups = [doc_group['doc_groups'] for doc_group in public_doc_groups_response.data]
+      disabled_doc_groups = [doc_group['name'] for doc_group in disabled_doc_groups_response["data"]]
+      public_doc_groups = [doc_group['doc_groups'] for doc_group in public_doc_groups_response["data"]]
 
       time_for_parallel_operations = time.monotonic() - start_time_overall
       start_time_vector_search = time.monotonic()
@@ -178,14 +178,14 @@ class RetrievalService:
   ):
     """Get all course materials based on course name.
     Args:
-        course_name (as uploaded on supabase)
+        course_name (as uploaded on database)
     Returns:
         list of dictionaries with distinct s3 path, readable_filename and course_name, url, base_url.
     """
 
     response = self.sqlDb.getAllMaterialsForCourse(course_name)
 
-    data = response.data
+    data = response["data"]
     unique_combinations = set()
     distinct_dicts = []
 
@@ -312,7 +312,7 @@ class RetrievalService:
         raise ValueError("S3_BUCKET_NAME environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
-      print(f"Deleting {identifier_value} from S3, Qdrant, and Supabase using {identifier_key}")
+      print(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
 
       # Delete from S3
       if identifier_key == "s3_path":
@@ -321,8 +321,8 @@ class RetrievalService:
       # Delete from Qdrant
       self.delete_from_qdrant(identifier_key, identifier_value, course_name)
 
-      # Delete from Nomic and Supabase
-      self.delete_from_nomic_and_supabase(course_name, identifier_key, identifier_value)
+      # Delete from Nomic and Database
+      self.delete_from_nomic_and_database(course_name, identifier_key, identifier_value)
 
       return "Success"
 
@@ -452,30 +452,30 @@ class RetrievalService:
     #   sentry_sdk.capture_exception(e)
     #   return err
 
-  def delete_from_nomic_and_supabase(self, course_name: str, identifier_key: str, identifier_value: str):
+  def delete_from_nomic_and_database(self, course_name: str, identifier_key: str, identifier_value: str):
     # try:
     #   print(f"Nomic delete. Course: {course_name} using {identifier_key}: {identifier_value}")
     #   response = self.sqlDb.getMaterialsForCourseAndKeyAndValue(course_name, identifier_key, identifier_value)
-    #   if not response.data:
+    #   if not response["data"]:
     #     raise Exception(f"No materials found for {course_name} using {identifier_key}: {identifier_value}")
-    #   data = response.data[0]  # single record fetched
+    #   data = response["data"][0]  # single record fetched
     #   nomic_ids_to_delete = [str(data['id']) + "_" + str(i) for i in range(1, len(data['contexts']) + 1)]
 
     # delete from Nomic
     # response = self.sqlDb.getProjectsMapForCourse(course_name)
-    # if not response.data:
+    # if not response["data"]:
     #   raise Exception(f"No document map found for this course: {course_name}")
-    # project_id = response.data[0]['doc_map_id']
+    # project_id = response["data"][0]['doc_map_id']
     # self.nomicService.delete_from_document_map(project_id, nomic_ids_to_delete)
     # except Exception as e:
     #   print(f"Nomic Error in deleting. {identifier_key}: {identifier_value}", e)
     #   self.sentry.capture_exception(e)
 
     try:
-      print(f"Supabase Delete. course: {course_name} using {identifier_key}: {identifier_value}")
+      print(f"Database Delete. course: {course_name} using {identifier_key}: {identifier_value}")
       response = self.sqlDb.deleteMaterialsForCourseAndKeyAndValue(course_name, identifier_key, identifier_value)
     except Exception as e:
-      print(f"Supabase Error in delete. {identifier_key}: {identifier_value}", e)
+      print(f"Database Error in delete. {identifier_key}: {identifier_value}", e)
       self.sentry.capture_exception(e)
 
   def vector_search(self,

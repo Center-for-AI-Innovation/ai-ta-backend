@@ -4,9 +4,9 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from multiprocessing import Manager
 
-DOCUMENTS_TABLE = os.environ['SUPABASE_DOCUMENTS_TABLE']
-# SUPABASE_CLIENT = supabase.create_client(supabase_url=os.environ['SUPABASE_URL'],
-#  supabase_key=os.environ['SUPABASE_API_KEY'])  # type: ignore
+from ai_ta_backend.database.sql import SQLDatabase
+
+sql = SQLDatabase()
 
 
 def context_parent_doc_padding(found_docs, search_query, course_name):
@@ -18,20 +18,20 @@ def context_parent_doc_padding(found_docs, search_query, course_name):
 
   with Manager() as manager:
     qdrant_contexts = manager.list()
-    supabase_contexts = manager.list()
+    database_contexts = manager.list()
     partial_func1 = partial(qdrant_context_processing, course_name=course_name, result_contexts=qdrant_contexts)
-    partial_func2 = partial(supabase_context_padding, course_name=course_name, result_docs=supabase_contexts)
+    partial_func2 = partial(database_context_padding, course_name=course_name, result_docs=database_contexts)
 
     with ProcessPoolExecutor() as executor:
       executor.map(partial_func1, found_docs[5:])
       executor.map(partial_func2, found_docs[:5])
 
-    supabase_contexts_no_duplicates = []
-    for context in supabase_contexts:
-      if context not in supabase_contexts_no_duplicates:
-        supabase_contexts_no_duplicates.append(context)
+    database_contexts_no_duplicates = []
+    for context in database_contexts:
+      if context not in database_contexts_no_duplicates:
+        database_contexts_no_duplicates.append(context)
 
-    result_contexts = supabase_contexts_no_duplicates + list(qdrant_contexts)
+    result_contexts = database_contexts_no_duplicates + list(qdrant_contexts)
 
     print(f"⏰ Context padding runtime: {(time.monotonic() - start_time):.2f} seconds")
 
@@ -40,7 +40,7 @@ def context_parent_doc_padding(found_docs, search_query, course_name):
 
 def qdrant_context_processing(doc, course_name, result_contexts):
   """
-    Re-factor QDRANT objects into Supabase objects and append to result_docs
+    Re-factor QDRANT objects into database objects and append to result_docs
     """
   context_dict = {
       'text': doc.page_content,
@@ -60,7 +60,7 @@ def qdrant_context_processing(doc, course_name, result_contexts):
   return result_contexts
 
 
-def supabase_context_padding(doc, course_name, result_docs):
+def database_context_padding(doc, course_name, result_docs):
   """
     Does context padding for given doc.
     """
@@ -68,14 +68,10 @@ def supabase_context_padding(doc, course_name, result_docs):
   # query by url or s3_path
   if 'url' in doc.metadata.keys() and doc.metadata['url']:
     parent_doc_id = doc.metadata['url']
-    response = SUPABASE_CLIENT.table(DOCUMENTS_TABLE).select('*').eq('course_name',
-                                                                     course_name).eq('url', parent_doc_id).execute()
-
+    response = sql.getMatrialsForCourseAndUrl(course_name, parent_doc_id)
   else:
     parent_doc_id = doc.metadata['s3_path']
-    response = SUPABASE_CLIENT.table(DOCUMENTS_TABLE).select('*').eq('course_name',
-                                                                     course_name).eq('s3_path',
-                                                                                     parent_doc_id).execute()
+    response = sql.getMaterialsForCourseAndS3Path(course_name, parent_doc_id)
 
   data = response.data
 
@@ -116,7 +112,7 @@ def supabase_context_padding(doc, course_name, result_docs):
 
     else:
       #print("inside else")
-      # refactor as a Supabase object and append
+      # refactor as a database object and append
       context_dict = {
           'text': doc.page_content,
           'embedding': '',
