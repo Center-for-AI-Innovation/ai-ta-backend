@@ -1,4 +1,4 @@
-from os import getenv
+from datetime import datetime
 from statistics import mean
 import uuid
 from pathlib import Path
@@ -16,6 +16,9 @@ import os
 import time
 import json
 import re
+
+from supabase import create_client, Client
+from supabase import PostgrestAPIResponse
 
 
 class Score(BaseModel):
@@ -188,7 +191,7 @@ Please only output the scores without any other content. You should output JSON 
                     )
                     response = self._parse_score(response)
                 elif self.judge_model.startswith("gpt"):
-                    openai_api_key = str(getenv("EVALUATION_OPENAI_API_KEY"))
+                    openai_api_key = str(os.environ["EVALUATION_OPENAI_API_KEY"])
                     client = OpenAIAPI(openai_api_key, model_name=self.judge_model)
                     response, info, history = client.chat(
                         prompt=prompt["prompt"],
@@ -196,7 +199,7 @@ Please only output the scores without any other content. You should output JSON 
                         text_format=Score,
                     )
 
-                    response = response.to_json() # type: ignore
+                    response = response.to_json()  # type: ignore
 
                 else:
                     raise ValueError(f"Unsupported judge model: {self.judge_model}")
@@ -284,11 +287,22 @@ class EvaluationService:
         os.remove(output_path)
 
         processed_scores = self.process_scores(scores)
+        url = os.environ["EVALUATION_SUPABASE_URL"]
+        key = os.environ["EVALUATION_SUPABASE_API_KEY"]
+        supabase: Client = create_client(url, key)
 
-        return {
-            "scores": processed_scores,
-            "results": results
+        scores_entry = {
+            "accuracy": processed_scores["accuracy"],
+            "completeness": processed_scores["completeness"],
+            "parsimony": processed_scores["parsimony"],
+            "relevance": processed_scores["relevance"],
+            "judge_model": judge_model,
+            "subject_model": subject_model,
         }
+
+        supabase.table("evaluation_scores").insert(scores_entry).execute()
+
+        return {"scores": scores_entry, "results": results_list }
 
     @staticmethod
     def process_scores(scores: list[dict]) -> dict:

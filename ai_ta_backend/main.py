@@ -418,7 +418,7 @@ def export_conversations_custom(service: ExportService):
   course_name: str = request.args.get('course_name', default='', type=str)
   from_date: str = request.args.get('from_date', default='', type=str)
   to_date: str = request.args.get('to_date', default='', type=str)
-  emails: str = request.args.getlist('destination_emails_list')
+  emails: list = request.args.getlist('destination_emails_list')
 
   if course_name == '' and emails == []:
     # proper web error "400 Bad request"
@@ -708,8 +708,8 @@ def get_model_usage_counts(service: RetrievalService) -> Response:
 
 @app.route('/send-transactional-email', methods=['POST'])
 def send_transactional_email(service: ExportService):
-  to_recipients: str = request.json.get('to_recipients_list', [])
-  bcc_recipients: str = request.json.get('bcc_recipients_list', [])
+  to_recipients: list = request.json.get('to_recipients_list', [])
+  bcc_recipients: list = request.json.get('bcc_recipients_list', [])
   sender: str = request.json.get('sender', '')
   subject: str = request.json.get('subject', '')
   body_text: str = request.json.get('body_text', '')
