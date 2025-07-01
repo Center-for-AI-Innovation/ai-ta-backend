@@ -35,12 +35,15 @@ from ai_ta_backend.executors.thread_pool_executor import (
     ThreadPoolExecutorInterface,
 )
 from ai_ta_backend.service.export_service import ExportService
-from ai_ta_backend.service.nomic_service import NomicService
+#from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
 from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
+
+from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
+
 
 app = Flask(__name__)
 CORS(app)
@@ -175,39 +178,41 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   return response
 
 
-@app.route('/getNomicMap', methods=['GET'])
-def nomic_map(service: NomicService):
-  course_name: str = request.args.get('course_name', default='', type=str)
-  map_type: str = request.args.get('map_type', default='conversation', type=str)
+# @app.route('/getNomicMap', methods=['GET'])
+# def nomic_map(service: NomicService):
+#   course_name: str = request.args.get('course_name', default='', type=str)
+#   map_type: str = request.args.get('map_type', default='conversation', type=str)
 
-  if course_name == '':
-    # proper web error "400 Bad request"
-    abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
+#   if course_name == '':
+#     # proper web error "400 Bad request"
+#     abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
 
-  map_id = service.get_nomic_map(course_name, map_type)
-  print("nomic map\n", map_id)
+#   map_id = service.get_nomic_map(course_name, map_type)
+#   print("nomic map\n", map_id)
 
-  response = jsonify(map_id)
-  response.headers.add('Access-Control-Allow-Origin', '*')
-  return response
+#   response = jsonify(map_id)
+#   response.headers.add('Access-Control-Allow-Origin', '*')
+#   return response
 
 
 @app.route('/updateConversationMaps', methods=['GET'])
 def updateConversationMaps(service: NomicService, flaskExecutor: ExecutorInterface):
+  print("Starting conversation map update...")
 
-  response = flaskExecutor.submit(service.update_conversation_maps).result()
+  response = flaskExecutor.submit(service.update_conversation_maps)
 
-  response = jsonify(response)
+  response = jsonify({"Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
 
 @app.route('/updateDocumentMaps', methods=['GET'])
 def updateDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
+  print("Starting conversation map update...")
 
-  response = flaskExecutor.submit(service.update_document_maps).result()
+  response = flaskExecutor.submit(service.update_document_maps)
 
-  response = jsonify(response)
+  response = jsonify({"Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
@@ -573,6 +578,17 @@ def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> 
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+@app.route('/pubmedExtraction', methods=['GET'])
+def pubmedExtraction():
+  """
+  Extracts metadata and download papers from PubMed.
+  """
+  result = extractPubmedData()
+
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
 
 @app.route('/getProjectStats', methods=['GET'])
 def get_project_stats(service: RetrievalService) -> Response:
@@ -594,7 +610,7 @@ def configure(binder: Binder) -> None:
   binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
   binder.bind(PosthogService, to=PosthogService, scope=SingletonScope)
   binder.bind(SentryService, to=SentryService, scope=SingletonScope)
-  binder.bind(NomicService, to=NomicService, scope=SingletonScope)
+  #binder.bind(NomicService, to=NomicService, scope=SingletonScope)
   binder.bind(ExportService, to=ExportService, scope=SingletonScope)
   binder.bind(WorkflowService, to=WorkflowService, scope=SingletonScope)
   binder.bind(VectorDatabase, to=VectorDatabase, scope=SingletonScope)

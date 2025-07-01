@@ -30,13 +30,12 @@ class RetrievalService:
 
   @inject
   def __init__(self, vdb: VectorDatabase, sqlDb: SQLDatabase, aws: AWSStorage, posthog: PosthogService,
-               sentry: SentryService, thread_pool_executor: ThreadPoolExecutorAdapter): # nomicService: NomicService,
+               sentry: SentryService, thread_pool_executor: ThreadPoolExecutorAdapter):
     self.vdb = vdb
     self.sqlDb = sqlDb
     self.aws = aws
     self.sentry = sentry
     self.posthog = posthog
-    # self.nomicService = nomicService
     self.thread_pool_executor = thread_pool_executor
     openai.api_key = os.environ["VLADS_OPENAI_KEY"]
 
