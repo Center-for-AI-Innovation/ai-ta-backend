@@ -11,6 +11,7 @@ import pytz
 from dateutil import parser
 from injector import inject
 from langchain.embeddings.ollama import OllamaEmbeddings
+from qdrant_client.http import models
 
 # from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
@@ -784,3 +785,22 @@ class RetrievalService:
     return models.Filter(
         should=[filter1, filter2]
     )
+
+  def _create_search_filter(self, course_name, doc_groups, disabled_doc_groups, public_doc_groups):
+    """
+    Create a Qdrant filter for course, doc groups, and public/disabled doc groups.
+    """
+    must_conditions = []
+    if course_name:
+        must_conditions.append(models.FieldCondition(
+            key="course_name",
+            match=models.MatchValue(value=course_name)
+        ))
+    if doc_groups:
+        must_conditions.append(models.FieldCondition(
+            key="doc_groups",
+            match=models.MatchAny(value=doc_groups)
+        ))
+    # Optionally, you can add filters for disabled/public doc groups if needed
+    # (depends on your schema and use case)
+    return models.Filter(must=must_conditions)
