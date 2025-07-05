@@ -12,6 +12,7 @@ from beam import QueueDepthAutoscaler  # RequestLatencyAutoscaler,
 if beam.env.is_remote():
   # Only import these in the Cloud container, not when building the container.
   import asyncio
+  import gc
   import inspect
   import json
   import logging
@@ -23,6 +24,7 @@ if beam.env.is_remote():
   import time
   import traceback
   import uuid
+  from datetime import datetime
   from pathlib import Path
   from tempfile import NamedTemporaryFile
 
@@ -32,6 +34,7 @@ if beam.env.is_remote():
   import fitz
   import openai
   import pdfplumber
+  import psutil
   import pytesseract
   import sentry_sdk
   import supabase
@@ -58,15 +61,16 @@ if beam.env.is_remote():
   from qdrant_client.models import PointStruct
   from requests.exceptions import Timeout
   from supabase.client import ClientOptions
+  from unstructured.partition.pdf import partition_pdf
 
-  sentry_sdk.init(
-      dsn=os.getenv("SENTRY_DSN"),
-      # Set traces_sample_rate to 1.0 to capture 100% of transactions for performance monitoring.
-      traces_sample_rate=1.0,
-      # Set profiles_sample_rate to 1.0 to profile 100% of sampled transactions.
-      # We recommend adjusting this value in production.
-      profiles_sample_rate=1.0,
-      enable_tracing=True)
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN"),
+    # Set traces_sample_rate to 1.0 to capture 100% of transactions for performance monitoring.
+    traces_sample_rate=1.0,
+    # Set profiles_sample_rate to 1.0 to profile 100% of sampled transactions.
+    # We recommend adjusting this value in production.
+    profiles_sample_rate=1.0,
+    enable_tracing=True)
 
 requirements = [
     "openai<1.0",
@@ -93,13 +97,21 @@ requirements = [
     "beautifulsoup4==4.12.2",
     "sentry-sdk==1.39.1",
     "pdfplumber==0.11.0",  # PDF OCR, better performance than Fitz/PyMuPDF in my Gies PDF testing.
+    "psutil==5.9.8",  # For memory monitoring
+    "paddleocr==2.7.0",  # For improved OCR
+    "paddlepaddle==2.5.2",  # Required by paddleocr
 ]
 
-image = (beam.Image(
-    python_version="python3.10",
-    commands=(["apt-get update && apt-get install -y ffmpeg tesseract-ocr"]),
-    python_packages=requirements,
-))
+image = (
+    beam.Image(
+        python_version="python3.10",
+        commands=([
+            "apt-get update && apt-get install -y ffmpeg tesseract-ocr",
+            # Additional system dependencies for unstructured
+            "apt-get install -y libmagic1 poppler-utils tesseract-ocr libreoffice pandoc"
+        ]),
+        python_packages=requirements,
+    ))
 
 # autoscaler = RequestLatencyAutoscaler(desired_latency=30, max_replicas=2)
 autoscaler = QueueDepthAutoscaler(tasks_per_container=300, max_containers=3)
@@ -351,6 +363,56 @@ class Ingest():
     self.s3_client = s3_client
     self.supabase_client = supabase_client
     self.posthog = posthog
+
+  def _insert_cedar_document(self,
+                             course_name: str,
+                             s3_path: str,
+                             readable_filename: str,
+                             url: str = None,
+                             base_url: str = None) -> int:
+    """Insert document into cedar_documents table and return the document id."""
+    try:
+      result = self.supabase_client.table('cedar_documents').insert({
+          "course_name": course_name,
+          "s3_path": s3_path,
+          "readable_filename": readable_filename,
+          "url": url,
+          "base_url": base_url,
+          "created_at": datetime.now().isoformat()
+      }).execute()
+
+      if result.data and len(result.data) > 0:
+        return result.data[0]['id']
+      raise Exception("Failed to insert document - no id returned")
+    except Exception as e:
+      print(f"Error inserting cedar document: {e}")
+      sentry_sdk.capture_exception(e)
+      raise
+
+  def _insert_cedar_chunks(self, document_id: int, chunks: List[Dict[str, Any]]):
+    """Insert chunks into cedar_chunks table."""
+    try:
+      chunk_records = []
+      for i, chunk in enumerate(chunks):
+        record = {
+            "document_id": document_id,
+            "chunk_number": i,
+            "chunk_type": chunk.get('type', 'text'),
+            "content": chunk.get('text', ''),
+            "table_html": chunk.get('table_html', None),
+            "table_image_paths": chunk.get('table_image_paths', []),
+            "chunk_metadata": chunk.get('metadata', {}),
+            "orig_elements": chunk.get('orig_elements', None),
+            "created_at": datetime.now().isoformat()
+        }
+        chunk_records.append(record)
+
+      result = self.supabase_client.table('cedar_chunks').insert(chunk_records).execute()
+      return result
+    except Exception as e:
+      print(f"Error inserting cedar chunks: {e}")
+      sentry_sdk.capture_exception(e)
+      raise
 
   def bulk_ingest(self, course_name: str, s3_paths: Union[str, List[str]],
                   **kwargs) -> Dict[str, None | str | Dict[str, str]]:
@@ -900,76 +962,176 @@ class Ingest():
 
   def _ingest_single_pdf(self, s3_path: str, course_name: str, **kwargs):
     """
-    Both OCR the PDF. And grab the first image as a PNG.
-      LangChain `Documents` have .metadata and .page_content attributes.
-    Be sure to use TemporaryFile() to avoid memory leaks!
+    Process a PDF file using unstructured library with advanced features:
+    - Extract text with layout preservation
+    - Extract and save tables
+    - Extract and save images
+    - OCR when needed
+    - Store in new cedar_documents and cedar_chunks tables
     """
     print("IN PDF ingest: s3_path: ", s3_path, "and kwargs:", kwargs)
 
     try:
-      with NamedTemporaryFile() as pdf_tmpfile:
-        # download from S3 into pdf_tmpfile
+      # First create the document record
+      doc_id = self._insert_cedar_document(course_name=course_name,
+                                           s3_path=s3_path,
+                                           readable_filename=kwargs.get('readable_filename',
+                                                                        Path(s3_path).name[37:]),
+                                           url=kwargs.get('url', ''),
+                                           base_url=kwargs.get('base_url', ''))
+
+      with NamedTemporaryFile(suffix='.pdf') as pdf_tmpfile:
+        # Download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=pdf_tmpfile)
-        ### READ OCR of PDF
-        try:
-          doc = fitz.open(pdf_tmpfile.name)  # type: ignore
-        except fitz.fitz.EmptyFileError as e:
-          print(f"Empty PDF file: {s3_path}")
-          return "Failed ingest: Could not detect ANY text in the PDF. OCR did not help. PDF appears empty of text."
 
-        # improve quality of the image
-        zoom_x = 2.0  # horizontal zoom
-        zoom_y = 2.0  # vertical zoom
-        mat = fitz.Matrix(zoom_x, zoom_y)  # zoom factor 2 in each dimension
+        # Create temporary directory for extracted images
+        with NamedTemporaryFile(suffix='.png') as image_dir:
+          image_output_dir = Path(image_dir.name).parent / "extracted_images"
+          image_output_dir.mkdir(exist_ok=True)
 
-        pdf_pages_no_OCR: List[Dict] = []
-        for i, page in enumerate(doc):  # type: ignore
+          # Set environment variables for better extraction
+          os.environ["EXTRACT_IMAGE_BLOCK_CROP_HORIZONTAL_PAD"] = "20"
+          os.environ["EXTRACT_IMAGE_BLOCK_CROP_VERTICAL_PAD"] = "120"
+          os.environ["OCR_AGENT"] = "unstructured.partition.utils.ocr_models.paddle_ocr.OCRAgentPaddle"
 
-          # UPLOAD FIRST PAGE IMAGE to S3
-          if i == 0:
-            with NamedTemporaryFile(suffix=".png") as first_page_png:
-              pix = page.get_pixmap(matrix=mat)
-              pix.save(first_page_png)  # store image as a PNG
+          try:
+            # Extract content with unstructured
+            elements = partition_pdf(filename=pdf_tmpfile.name,
+                                     mode="elements",
+                                     strategy="hi_res",
+                                     hi_res_model_name="yolox",
+                                     infer_table_structure=True,
+                                     extract_images_in_pdf=True,
+                                     extract_image_block_types=["Image", "Table"],
+                                     extract_image_block_to_payload=False,
+                                     extract_image_block_output_dir=str(image_output_dir),
+                                     include_metadata=True,
+                                     include_original_elements=True)
 
-              s3_upload_path = str(Path(s3_path)).rsplit('.pdf')[0] + "-pg1-thumb.png"
-              first_page_png.seek(0)  # Seek the file pointer back to the beginning
-              with open(first_page_png.name, 'rb') as f:
-                print("Uploading image png to S3")
-                self.s3_client.upload_fileobj(f, os.getenv('S3_BUCKET_NAME'), s3_upload_path)
+            if not elements:
+              raise ValueError("No elements extracted from PDF")
 
-          # Extract text
-          text = page.get_text().encode("utf8").decode("utf8", errors='ignore')  # get plain text (is in UTF-8)
-          pdf_pages_no_OCR.append(dict(text=text, page_number=i, readable_filename=Path(s3_path).name[37:]))
+            # Create chunks for elements (text, tables, etc.)
+            chunks = []
+            for element in elements:
+              chunk = {
+                  'type': element.type,
+                  'text': element.text if hasattr(element, 'text') else '',
+                  'table_image_paths': [],  # Initialize for all chunks
+                  'metadata': {
+                      'coordinates': element.coordinates if hasattr(element, 'coordinates') else None,
+                      'filename': element.filename if hasattr(element, 'filename') else None,
+                      'filetype': element.filetype if hasattr(element, 'filetype') else None,
+                      'page_number': element.metadata.page_number if hasattr(element, 'metadata') else None
+                  }
+              }
 
-        metadatas: List[Dict[str, Any]] = [
-            {
-                'course_name': course_name,
-                's3_path': s3_path,
-                'pagenumber': page['page_number'] + 1,  # +1 for human indexing
-                'timestamp': '',
-                'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
-                'url': kwargs.get('url', ''),
-                'base_url': kwargs.get('base_url', ''),
-            } for page in pdf_pages_no_OCR
-        ]
-        pdf_texts = [page['text'] for page in pdf_pages_no_OCR]
+              # Handle tables
+              if hasattr(element, 'table_html'):
+                chunk['table_html'] = element.table_html
 
-        # count the total number of words in the pdf_texts. If it's less than 100, we'll OCR the PDF
-        has_words = any(text.strip() for text in pdf_texts)
-        if has_words:
-          success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, **kwargs)
-        else:
-          print("⚠️ PDF IS EMPTY -- OCR-ing the PDF.")
-          success_or_failure = self._ocr_pdf(s3_path=s3_path, course_name=course_name, **kwargs)
+              chunks.append(chunk)
 
-        return success_or_failure
+            # Upload images to S3 and map them to appropriate chunks
+            original_filename = Path(s3_path).stem
+            image_paths = list(image_output_dir.glob('**/*.[jJ][pP][gG]'))
+
+            # Extract page numbers for all images and organize by page
+            image_map_by_page = {}
+            for img_path in image_paths:
+              image_name = img_path.name
+              s3_img_path = f"{Path(s3_path).parent}/images/{original_filename}/{image_name}"
+              page_num = None
+
+              # Extract page number from filename
+              parts = image_name.split('-')
+              if len(parts) >= 2 and parts[1].isdigit():
+                page_num = int(parts[1])
+
+              # Upload image to S3
+              with open(img_path, 'rb') as f:
+                self.s3_client.upload_fileobj(f, os.getenv('S3_BUCKET_NAME'), s3_img_path)
+
+              # Store by page number for later assignment
+              if page_num not in image_map_by_page:
+                image_map_by_page[page_num] = []
+
+              image_map_by_page[page_num].append({
+                  's3_path': s3_img_path,
+                  'name': image_name,
+                  'is_table': image_name.startswith('table')
+              })
+
+            # Assign images to appropriate chunks
+            for chunk in chunks:
+              page_num = chunk['metadata'].get('page_number')
+              if page_num is not None and page_num in image_map_by_page:
+                # Get all images for this page
+                page_images = image_map_by_page[page_num]
+
+                if chunk['type'] == 'Table':
+                  # For tables, assign table images
+                  for img in page_images:
+                    if img['is_table']:
+                      chunk['table_image_paths'].append(img['s3_path'])
+                else:
+                  # For text chunks, assign non-table images
+                  for img in page_images:
+                    if not img['is_table']:
+                      chunk['table_image_paths'].append(img['s3_path'])
+
+            # Insert chunks into cedar_chunks table
+            self._insert_cedar_chunks(doc_id, chunks)
+
+            # Create embeddings and upload to Qdrant for ALL chunks
+            # Convert each chunk into a searchable text representation
+            texts = []
+            metadatas = []
+
+            for chunk_id, chunk in enumerate(chunks):
+              # Create searchable text based on chunk type
+              if chunk['type'] == 'Table':
+                search_text = f"Table from PDF: {chunk.get('table_html', '')}"
+              else:
+                search_text = chunk['text']
+
+              if search_text.strip():  # Only include non-empty chunks
+                texts.append(search_text)
+                metadatas.append({
+                    'course_name': course_name,
+                    's3_path': s3_path,
+                    'chunk_id': chunk_id,
+                    'document_id': doc_id,
+                    'chunk_type': chunk['type'],
+                    'page_number': chunk['metadata'].get('page_number', ''),
+                    'readable_filename': kwargs.get('readable_filename',
+                                                    Path(s3_path).name[37:]),
+                    'url': kwargs.get('url', ''),
+                    'base_url': kwargs.get('base_url', '')
+                })
+
+            if texts:  # Only call split_and_upload if we have texts to process
+              self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+
+            return "Success"
+
+          except Exception as e:
+            # Update document with error
+            self.supabase_client.table('cedar_documents').update({"last_error": str(e)}).eq('id', doc_id).execute()
+            raise e
+
+          finally:
+            # Cleanup
+            if image_output_dir.exists():
+              import shutil
+              shutil.rmtree(image_output_dir)
+
     except Exception as e:
-      err = f"❌❌ Error in PDF ingest (no OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
-      )  # type: ignore
+      err = f"❌❌ Error in PDF ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      )
       print(err)
       sentry_sdk.capture_exception(e)
       return err
-    return "Success"
 
   def _ocr_pdf(self, s3_path: str, course_name: str, **kwargs):
     self.posthog.capture('distinct_id_of_the_user',
@@ -1460,7 +1622,7 @@ class Ingest():
           sentry_sdk.capture_exception(e)
         # Delete from Qdrant
         # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
-        # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
+        # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
         try:
           if course_name == 'cropwizard-1.5':
             print("Deleting from cropwizard collection...")
