@@ -42,6 +42,7 @@ langgraph==0.2.69
 boto3==1.36.20
 qdrant-client==1.13.2
 supabase==2.13.0
+websockets==13.0
 minio==7.2.15
 redis[hiredis]==5.2.1
 
