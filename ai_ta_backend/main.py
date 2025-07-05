@@ -45,6 +45,9 @@ from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
 from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
+from ai_ta_backend.utils.copy_course_vectors import copy_course_vectors_api
+from ai_ta_backend.utils.document_copier import copy_documents_api
+from ai_ta_backend.utils.export_course_vectors import export_vectors_for_course_api
 
 app = Flask(__name__)
 CORS(app)
@@ -775,6 +778,86 @@ def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
   response = jsonify(results)
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
+
+@app.route('/copy-course-vectors', methods=['POST'])
+def copy_course_vectors_endpoint():
+    """
+    Copy all vector data from a source course to a destination course in Qdrant.
+
+    Usage:
+      1. HTTP API:
+         POST /copy-course-vectors
+         Body: {"source_course": "A", "destination_course": "B"}
+         Example:
+           curl -X POST http://localhost:8000/copy-course-vectors \
+             -H "Content-Type: application/json" \
+             -d '{"source_course": "A", "destination_course": "B"}'
+
+      2. Python script:
+         python ai_ta_backend/utils/copy_course_vectors.py A B
+         (See script for advanced options)
+    """
+    data = request.get_json() or {}
+    source_course = data.get('source_course')
+    destination_course = data.get('destination_course')
+    retry_failed = data.get('retry_failed', False)
+    if not source_course or not destination_course:
+        abort(400, description="'source_course' and 'destination_course' are required.")
+    # All connection info is from env vars
+    result = copy_course_vectors_api(
+        source_course,
+        destination_course,
+        retry_failed=retry_failed,
+        source_url=None,
+        source_key=None,
+        dest_url=None,
+        dest_key=None,
+        source_collection=os.environ["QDRANT_COLLECTION_NAME"],
+        destination_collection=os.environ["NEW_CROPWIZARD_QDRANT_COLLECTION"],
+        source_url_env='QDRANT_URL',
+        source_key_env='QDRANT_API_KEY',
+        dest_url_env='NEW_CROPWIZARD_QDRANT_URL',
+        dest_key_env='NEW_CROPWIZARD_QDRANT_KEY'
+    )
+    return jsonify(result)
+
+@app.route('/copy-documents', methods=['POST'])
+def copy_documents_endpoint():
+    data = request.get_json() or {}
+    source_course = data.get('source_course')
+    target_course = data.get('target_course')
+    dry_run = data.get('dry_run', False)
+    batch_size = data.get('batch_size', 1000)
+    retry_file = data.get('retry_file')
+    id_field = data.get('id_field', 'readable_filename')
+    source_url = data.get('source_url')
+    source_key = data.get('source_key')
+    destination_url = data.get('destination_url')
+    destination_key = data.get('destination_key')
+    if not source_course or not target_course:
+        abort(400, description="'source_course' and 'target_course' are required.")
+    result = copy_documents_api(
+        source_course,
+        target_course,
+        dry_run=dry_run,
+        batch_size=batch_size,
+        retry_file=retry_file,
+        id_field=id_field,
+        source_url=source_url,
+        source_key=source_key,
+        destination_url=destination_url,
+        destination_key=destination_key
+    )
+    return jsonify(result)
+
+@app.route('/export-course-vectors', methods=['GET'])
+def export_course_vectors_endpoint():
+    course_name = request.args.get('course_name', type=str)
+    if not course_name:
+        abort(400, description="'course_name' is required.")
+    vectors = export_vectors_for_course_api(course_name)
+    return jsonify({"vectors": vectors})
+
 
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
