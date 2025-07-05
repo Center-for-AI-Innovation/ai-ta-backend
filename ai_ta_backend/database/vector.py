@@ -70,14 +70,24 @@ class VectorDatabase():
     Search the vector database for a given query.
     """
     top_n = 120
-
-    search_results = self.cropwizard_qdrant_client.search(
-        collection_name='cropwizard',
-        query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
-        with_vectors=False,
-        query_vector=user_query_embedding,
-        limit=top_n,  # Return n closest points
-    )
+    if course_name == 'cropwizard-1.5':
+      search_results = self.cropwizard_qdrant_client.search(
+          collection_name='cropwizard',
+          query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
+          with_vectors=False,
+          query_vector=user_query_embedding,
+          limit=top_n,  # Return n closest points
+      )
+    elif course_name == 'ag-research':
+      search_results = self.cropwizard_qdrant_client.search(
+          collection_name='ag-research',
+          query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
+          with_vectors=False,
+          query_vector=user_query_embedding,
+          limit=top_n,  # Return n closest points
+      )
+    else:
+      raise ValueError(f"Invalid course name: {course_name}")
 
     return search_results
 
@@ -432,12 +442,12 @@ class VectorDatabase():
         ]),
     )
 
-  def delete_data_cropwizard(self, key: str, value: str):
+  def delete_data_cropwizard(self, collection_name: str, key: str, value: str):
     """
     Delete data from the vector database.
     """
     return self.cropwizard_qdrant_client.delete(
-        collection_name='cropwizard',
+        collection_name=collection_name,
         wait=True,
         points_selector=models.Filter(must=[
             models.FieldCondition(
