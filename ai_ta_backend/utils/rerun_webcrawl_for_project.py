@@ -28,7 +28,7 @@ def webscrape_documents(project_name: str):
   base_urls = response.data
   print(f"Total base_urls: {len(base_urls)}")
 
-  webcrawl_url = "https://crawlee-production.up.railway.app/crawl"
+  webcrawl_url = "http://100.119.166.122:3034/crawl" # self-hosted webcrawl deployed on Kastan's cropwizard server
 
   payload = {
       "params": {
