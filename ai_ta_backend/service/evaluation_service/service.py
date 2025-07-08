@@ -59,7 +59,7 @@ class EvaluationService:
         # return s3_client.list_buckets()
 
         unique_filename = str(uuid.uuid4())
-        base_path = "ai_ta_backend/service/evaluation_service/processing"
+        base_path = "ai_ta_backend/../processing"
         input_path = f"{base_path}/{unique_filename}.json"
         output_path = f"{base_path}/{unique_filename}.jsonl"
 

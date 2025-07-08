@@ -5,7 +5,7 @@ from ai_ta_backend.service.evaluation_service.chat_models.multi_processor import
 from ai_ta_backend.service.evaluation_service.chat_models.openai_api import OpenAIAPI
 from ai_ta_backend.service.evaluation_service.chat_models.vllm_api import VLLMClient
 
-
+import traceback
 import json
 import os
 import re
@@ -171,62 +171,64 @@ Please only output the scores without any other content. You should output JSON 
         item_id = item.get("id", "unknown_id")
 
         for attempt in range(self.max_retries):
-            # try:
-            if self.judge_model.startswith("Qwen/Qwen3"):
-                client = VLLMClient(
-                    model_name=self.judge_model,
-                    openai_api_base=self.openai_api_base,
+            try:
+                if self.judge_model.startswith("Qwen/Qwen3"):
+                    client = VLLMClient(
+                        model_name=self.judge_model,
+                        openai_api_base=self.openai_api_base,
+                    )
+                    response, reasoning, info, history = client.reasoning_chat(
+                        prompt=prompt["prompt"],
+                        temperature=self.judge_temperature,
+                        max_tokens=8192,
+                    )
+                    response = self._parse_score(response)
+                elif self.judge_model.startswith("gpt"):
+                    openai_api_key = str(self.openai_api_key)
+                    client = OpenAIAPI(openai_api_key, model_name=self.judge_model)
+                    response, info, history = client.chat(
+                        prompt=prompt["prompt"],
+                        temperature=self.judge_temperature,
+                        text_format=Score,
+                    )
+                    
+                    response = response.to_json()  # type: ignore
+
+                else:
+                    raise ValueError(f"Unsupported judge model: {self.judge_model}")
+                assert (
+                    "accuracy" in response
+                    and "relevance" in response
+                    and "completeness" in response
+                    and "parsimony" in response
+                ), "Score should contain all four keys"
+
+                # Success! Add results to the item and return it.
+                new_item = {
+                    "id": item_id,
+                    "prompt": prompt["prompt"],
+                    "gold_answer": prompt["gold_answer"],
+                    "subject_model": self.subject_model,
+                    "model_response": prompt["model_response"],
+                    "judge_model": self.judge_model_name_key,
+                    "score": response,
+                    "info": info,
+                    "history": history,
+                }
+
+                if self.judge_model.startswith("Qwen/Qwen3"):
+                    new_item["thinking"] = reasoning
+
+                return new_item
+
+            except Exception as e:
+                tb = traceback.format_exc()
+
+                print(
+                    f"Error on item {item_id} (attempt {attempt + 1}/{self.max_retries}): {tb}"
                 )
-                response, reasoning, info, history = client.reasoning_chat(
-                    prompt=prompt["prompt"],
-                    temperature=self.judge_temperature,
-                    max_tokens=8192,
-                )
-                response = self._parse_score(response)
-            elif self.judge_model.startswith("gpt"):
-                openai_api_key = str(self.openai_api_key)
-                client = OpenAIAPI(openai_api_key, model_name=self.judge_model)
-                response, info, history = client.chat(
-                    prompt=prompt["prompt"],
-                    temperature=self.judge_temperature,
-                    text_format=Score,
-                )
-
-                response = response.to_json()  # type: ignore
-
-            else:
-                raise ValueError(f"Unsupported judge model: {self.judge_model}")
-            assert (
-                "accuracy" in response
-                and "relevance" in response
-                and "completeness" in response
-                and "parsimony" in response
-            ), "Score should contain all four keys"
-
-            # Success! Add results to the item and return it.
-            new_item = {
-                "id": item_id,
-                "prompt": prompt["prompt"],
-                "gold_answer": prompt["gold_answer"],
-                "subject_model": self.subject_model,
-                "model_response": prompt["model_response"],
-                "judge_model": self.judge_model_name_key,
-                "score": response,
-                "info": info,
-                "history": history,
-            }
-
-            if self.judge_model.startswith("Qwen/Qwen3"):
-                new_item["thinking"] = reasoning
-
-            return new_item
-
-            # except Exception as e:
-            #     print(
-            #         f"Error on item {item_id} (attempt {attempt + 1}/{self.max_retries}): {e.args}"
-            #     )
-            #     if attempt < self.max_retries - 1:
-            #         time.sleep(self.retry_delay)
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
                     
 
         # All retries failed, return None to signify failure.
