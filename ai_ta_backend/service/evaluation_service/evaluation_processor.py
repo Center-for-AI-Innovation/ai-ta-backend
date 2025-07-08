@@ -70,6 +70,7 @@ class EvaluationProcessor(BaseMultiProcessor):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.openai_api_base = openai_api_base
+        self.openai_api_key = os.environ["EVALUATION_OPENAI_API_KEY"]
 
     def _is_item_processed(self, item: Dict[str, Any]) -> bool:
         """
@@ -183,7 +184,7 @@ Please only output the scores without any other content. You should output JSON 
                     )
                     response = self._parse_score(response)
                 elif self.judge_model.startswith("gpt"):
-                    openai_api_key = str(os.environ["EVALUATION_OPENAI_API_KEY"])
+                    openai_api_key = str(self.openai_api_key)
                     client = OpenAIAPI(openai_api_key, model_name=self.judge_model)
                     response, info, history = client.chat(
                         prompt=prompt["prompt"],
