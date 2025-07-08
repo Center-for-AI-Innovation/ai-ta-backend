@@ -40,6 +40,7 @@ from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
+from ai_ta_backend.service.evaluation_service.service import EvaluationService
 from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
@@ -418,7 +419,7 @@ def export_conversations_custom(service: ExportService):
   course_name: str = request.args.get('course_name', default='', type=str)
   from_date: str = request.args.get('from_date', default='', type=str)
   to_date: str = request.args.get('to_date', default='', type=str)
-  emails: str = request.args.getlist('destination_emails_list')
+  emails: list = request.args.getlist('destination_emails_list')
 
   if course_name == '' and emails == []:
     # proper web error "400 Bad request"
@@ -708,8 +709,8 @@ def get_model_usage_counts(service: RetrievalService) -> Response:
 
 @app.route('/send-transactional-email', methods=['POST'])
 def send_transactional_email(service: ExportService):
-  to_recipients: str = request.json.get('to_recipients_list', [])
-  bcc_recipients: str = request.json.get('bcc_recipients_list', [])
+  to_recipients: list = request.json.get('to_recipients_list', [])
+  bcc_recipients: list = request.json.get('bcc_recipients_list', [])
   sender: str = request.json.get('sender', '')
   subject: str = request.json.get('subject', '')
   body_text: str = request.json.get('body_text', '')
@@ -733,6 +734,30 @@ def send_transactional_email(service: ExportService):
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+@app.route('/evaluation/evaluate', methods=['POST'])
+def evaluate(service: EvaluationService) -> Response:
+  """
+  Runs the evaluation service
+  """
+  input = request.json.get("input")
+  num_processes = request.json.get("num_processes")
+  judge_model = request.json.get("judge_model")
+  subject_model = request.json.get("subject_model")
+  judge_temperature: float = request.json.get("judge_temperature", 0.0)
+  result = service.evaluate(input, num_processes, judge_model, subject_model, judge_temperature)
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/evaluation/getresults', methods=['GET'])
+def getEvalulationResults(service: EvaluationService) -> Response:
+  """
+  Runs the evaluation service
+  """
+  result = service.getEvaluationResults()
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 @app.route('/updateProjectDocuments', methods=['GET'])
 def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
@@ -781,6 +806,7 @@ def configure(binder: Binder) -> None:
   binder.bind(ProcessPoolExecutorInterface, to=ProcessPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
   binder.bind(PosthogService, to=PosthogService, scope=SingletonScope)
+  binder.bind(EvaluationService, to=EvaluationService, scope=SingletonScope)
   # binder.bind(SentryService, to=SentryService, scope=SingletonScope)
   binder.bind(NomicService, to=NomicService, scope=SingletonScope)
   binder.bind(ExportService, to=ExportService, scope=SingletonScope)
