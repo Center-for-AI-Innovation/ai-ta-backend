@@ -733,7 +733,7 @@ def send_transactional_email(service: ExportService):
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
-@app.route('/evaluate', methods=['POST'])
+@app.route('/evaluation/evaluate', methods=['POST'])
 def evaluate(service: EvaluationService) -> Response:
   """
   Runs the evaluation service
@@ -744,6 +744,16 @@ def evaluate(service: EvaluationService) -> Response:
   subject_model = request.json.get("subject_model")
   judge_temperature: float = request.json.get("judge_temperature", 0.0)
   result = service.evaluate(input, num_processes, judge_model, subject_model, judge_temperature)
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/evaluation/getresults', methods=['GET'])
+def getEvalulationResults(service: EvaluationService) -> Response:
+  """
+  Runs the evaluation service
+  """
+  result = service.getEvaluationResults()
   response = jsonify(result)
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
