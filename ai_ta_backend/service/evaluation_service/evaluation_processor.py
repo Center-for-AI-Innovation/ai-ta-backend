@@ -223,7 +223,7 @@ Please only output the scores without any other content. You should output JSON 
 
             except Exception as e:
                 print(
-                    f"Error on item {item_id} (attempt {attempt + 1}/{self.max_retries}): {e.with_traceback}"
+                    f"Error on item {item_id} (attempt {attempt + 1}/{self.max_retries}): {e.args}"
                 )
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay)
