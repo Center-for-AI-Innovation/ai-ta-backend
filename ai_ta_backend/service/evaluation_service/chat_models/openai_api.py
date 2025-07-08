@@ -2,6 +2,7 @@ from openai import OpenAI
 import base64
 import math
 from PIL import Image
+import json
 
 
 def encode_image(image_path):
@@ -101,6 +102,7 @@ class OpenAIAPI:
         self.record.append({"role": "user", "content": record_content})
 
         if text_format:
+            print(dir(self.client))
             response = self.client.responses.parse(
                 model=self.model_name,
                 input=self.messages,
