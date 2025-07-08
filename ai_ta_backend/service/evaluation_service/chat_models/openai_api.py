@@ -102,7 +102,6 @@ class OpenAIAPI:
         self.record.append({"role": "user", "content": record_content})
 
         if text_format:
-            print(dir(self.client))
             response = self.client.responses.parse(
                 model=self.model_name,
                 input=self.messages,
