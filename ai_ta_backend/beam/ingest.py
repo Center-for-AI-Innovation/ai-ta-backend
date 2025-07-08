@@ -771,6 +771,7 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
+            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -838,6 +839,7 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
+            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -905,6 +907,7 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
+            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -968,6 +971,7 @@ class Ingest():
                 'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
                 'url': kwargs.get('url', ''),
                 'base_url': kwargs.get('base_url', ''),
+                'conversation_id': kwargs.get('conversation_id', None),
             } for page in pdf_pages_no_OCR
         ]
         pdf_texts = [page['text'] for page in pdf_pages_no_OCR]
@@ -1069,7 +1073,8 @@ class Ingest():
           'pagenumber': '',
           'timestamp': '',
           'url': kwargs.get('url', ''),
-          'base_url': kwargs.get('base_url', '')
+          'base_url': kwargs.get('base_url', ''),
+          'conversation_id': kwargs.get('conversation_id', None),
       }]
       print("Prior to ingest", metadatas)
 
@@ -1104,7 +1109,8 @@ class Ingest():
             'pagenumber': '',
             'timestamp': '',
             'url': kwargs.get('url', ''),
-            'base_url': kwargs.get('base_url', '')
+            'base_url': kwargs.get('base_url', ''),
+            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
