@@ -482,8 +482,8 @@ class RetrievalService:
                     top_n: int = 100,
                     conversation_id: str = ''):
     """
-    Search the vector database for a given query.
-    Now includes conversation-specific files.
+    Search the vector database for a given query, course name, and document groups.
+    Now includes optional conversation-specific filtering.
     """
     if doc_groups is None:
       doc_groups = []
@@ -500,28 +500,36 @@ class RetrievalService:
     # Perform the vector search
     start_time_vector_search = time.monotonic()
 
-    # Add conversation filter if provided
-    if conversation_id:
-        # Get conversation-specific files
-        conversation_filter = self._create_conversation_filter(conversation_id)
-        
-        # Combine with existing filter
-        combined_filter = self._combine_filters(
-            self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
-            conversation_filter
-        )
-        
-        search_results = self.vdb.vector_search_with_filter(
-            search_query, course_name, doc_groups, user_query_embedding, 
-            top_n, disabled_doc_groups, public_doc_groups, combined_filter
-        )
+    if course_name == "vyriad":
+      search_results = self.vdb.vyriad_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
+                                                     disabled_doc_groups, public_doc_groups)
+    elif course_name == "cropwizard":
+      search_results = self.vdb.cropwizard_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                         top_n, disabled_doc_groups, public_doc_groups)
+    elif course_name == "pubmed":
+      search_results = self.vdb.pubmed_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
+                                                     disabled_doc_groups, public_doc_groups)
+    elif course_name == "patents":
+      search_results = self.vdb.patents_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                      top_n, disabled_doc_groups, public_doc_groups)
     else:
-        # Use existing search logic
-        search_results = self.vdb.vector_search(
-            search_query, course_name, doc_groups, user_query_embedding, 
-            top_n, disabled_doc_groups, public_doc_groups
-        )
-    
+      # Handle conversation filtering for normal courses
+      if conversation_id:
+          conversation_filter = self._create_conversation_filter(conversation_id)
+          combined_filter = self._combine_filters(
+              self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
+              conversation_filter
+          )
+          
+          search_results = self.vdb.vector_search_with_filter(
+              search_query, course_name, doc_groups, user_query_embedding, 
+              top_n, disabled_doc_groups, public_doc_groups, combined_filter
+          )
+      else:
+          # Normal course logic without conversation filtering
+          search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
+                                                 disabled_doc_groups, public_doc_groups)
+  
     self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
 
     # Process the search results by extracting the page content and metadata
@@ -862,10 +870,10 @@ class RetrievalService:
                     text_content, conversation_id, course_name, readable_filename, s3_path
                 )
                 
-                if success:
-                    return "Success"
+                if success['success']:
+                    return f"Success: {success['chunks_created']} chunks created."
                 else:
-                    return "Failed to store content"
+                    return f"Failed to store content: {success['error']}"
             else:
                 return "No content extracted"
                 
@@ -873,6 +881,80 @@ class RetrievalService:
         import traceback
         traceback.print_exc()
         return f"Error: {e}"
+
+  def process_chat_file_sync(self, conversation_id: str, s3_path: str, course_name: str, 
+                          readable_filename: str, user_id: str = None, is_chat_upload: bool = True):
+    """
+    Synchronous chat file processor - handles all allowed file types without Beam dependencies.
+    Supported types: html, py, pdf, txt, md, srt, vtt, docx, ppt, pptx, xlsx, xls, xlsm, 
+    xlsb, xltx, xltm, xlt, xml, xlam, xla, xlw, xlr, csv, png, jpg
+    """
+    try:
+        
+        # Download file from S3 to process locally
+        import tempfile
+        import os
+        import mimetypes
+        from pathlib import Path
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(s3_path).suffix) as tmp_file:
+            
+            # Use the S3 client to download the file
+            self.aws.s3_client.download_fileobj(
+                Bucket=os.environ['S3_BUCKET_NAME'], 
+                Key=s3_path, 
+                Fileobj=tmp_file
+            )
+            tmp_file.flush()
+            
+            # Determine file type and extract content
+            file_extension = Path(s3_path).suffix.lower()
+            mime_type = str(mimetypes.guess_type(tmp_file.name, strict=False)[0])
+            mime_category = mime_type.split('/')[0] if '/' in mime_type else mime_type
+            
+            # Validate file type is allowed
+            allowed_extensions = [
+                '.html', '.py', '.pdf', '.txt', '.md', '.srt', '.vtt', '.docx', '.ppt', '.pptx',
+                '.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm', '.xlt', '.xml', '.xlam', 
+                '.xla', '.xlw', '.xlr', '.csv', '.png', '.jpg'
+            ]
+            
+            if file_extension not in allowed_extensions:
+                os.unlink(tmp_file.name)
+                return {
+                    'success': False,
+                    'chunks_created': 0,
+                    'error': f"File type {file_extension} not supported. Allowed types: {', '.join(allowed_extensions)}"
+                }
+            
+            # Extract text based on file type
+            text_content = self._extract_file_content(tmp_file.name, file_extension, mime_category)
+            
+            # Clean up temp file
+            os.unlink(tmp_file.name)
+            
+            if text_content and text_content.strip():
+                # Store in vector database with conversation_id
+                result = self._store_conversation_content(
+                    text_content, conversation_id, course_name, readable_filename, s3_path
+                )
+                
+                return result
+            else:
+                return {
+                    'success': False,
+                    'chunks_created': 0,
+                    'error': "No content extracted from file"
+                }
+                
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'chunks_created': 0,
+            'error': f"Processing error: {str(e)}"
+        }
 
   def _extract_file_content(self, file_path: str, file_extension: str, mime_category: str) -> str:
     """
@@ -1022,7 +1104,7 @@ class RetrievalService:
         return f"DOCX processing error: {e}"
 
   def _store_conversation_content(self, text_content: str, conversation_id: str, 
-                                 course_name: str, readable_filename: str, s3_path: str) -> bool:
+                               course_name: str, readable_filename: str, s3_path: str) -> dict:
     """Store extracted content in vector database with conversation_id."""
     try:
         
@@ -1088,15 +1170,28 @@ class RetrievalService:
                 wait=True
             )
             
-            return True
+            return {
+                'success': True,
+                'chunks_created': len(documents),
+                'total_chunks_attempted': len(chunks)
+            }
         else:
-            return False
+            return {
+                'success': False,
+                'chunks_created': 0,
+                'total_chunks_attempted': len(chunks)
+            }
             
     except Exception as e:
         import traceback
         traceback.print_exc()
         self.sentry.capture_exception(e)
-        return False
+        return {
+            'success': False,
+            'chunks_created': 0,
+            'total_chunks_attempted': 0,
+            'error': str(e)
+        }
 
   def _extract_excel_content(self, file_path: str) -> str:
     """Extract text from Excel files (.xlsx, .xls, etc.) with calculated values."""

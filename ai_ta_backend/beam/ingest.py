@@ -58,6 +58,7 @@ if beam.env.is_remote():
   from qdrant_client.models import PointStruct
   from requests.exceptions import Timeout
   from supabase.client import ClientOptions
+  import datetime  # 🔧 FIX 1: Added missing datetime import
 
   sentry_sdk.init(
       dsn=os.getenv("SENTRY_DSN"),
@@ -180,7 +181,6 @@ def loader():
 
 
 # Triggers determine how your app is deployed
-# @app.rest_api(
 @beam.task_queue(
     name='ingest_task_queue',
     workers=4,
@@ -217,16 +217,17 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
 
     def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, groups):
         if content:
-            return ingester.ingest_single_web_text(course_name, base_url, url, content, readable_filename, groups=groups)
+            return ingester.ingest_single_web_text(course_name, base_url, url, content, readable_filename, groups=groups, conversation_id=conversation_id)
         elif readable_filename == '':
-            return ingester.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url, groups=groups)
+            return ingester.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url, groups=groups, conversation_id=conversation_id)
         else:
             return ingester.bulk_ingest(course_name,
                                         s3_paths,
                                         readable_filename=readable_filename,
                                         base_url=base_url,
                                         url=url,
-                                        groups=groups)
+                                        groups=groups,
+                                        conversation_id=conversation_id)
 
     # First try
     # Full Exception is unexpected, don't bother retrying
@@ -523,6 +524,7 @@ class Ingest():
           'timestamp': '',
           'url': url,
           'base_url': base_url,
+          'conversation_id': kwargs.get('conversation_id', None),
       }]
       self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       self.posthog.capture('distinct_id_of_the_user',
@@ -565,6 +567,7 @@ class Ingest():
           'timestamp': '',
           'url': kwargs.get('url', ''),
           'base_url': kwargs.get('base_url', ''),
+          'conversation_id': kwargs.get('conversation_id', None),
       } for doc in documents]
       #print(texts)
       os.remove(file_path)
@@ -601,6 +604,7 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
+            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -635,6 +639,7 @@ class Ingest():
           'base_url': kwargs.get('base_url', ''),
           'pagenumber': '',
           'timestamp': '',
+          'conversation_id': kwargs.get('conversation_id', None),  # 🔧 FIX 3: Added conversation_id
       }]
 
       success_or_failure = self.split_and_upload(text, metadata, **kwargs)
@@ -742,6 +747,7 @@ class Ingest():
           'timestamp': text.index(txt),
           'url': kwargs.get('url', ''),
           'base_url': kwargs.get('base_url', ''),
+          'conversation_id': kwargs.get('conversation_id', None),
       } for txt in text]
 
       self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
@@ -806,6 +812,7 @@ class Ingest():
           'timestamp': '',
           'url': kwargs.get('url', ''),
           'base_url': kwargs.get('base_url', ''),
+          'conversation_id': kwargs.get('conversation_id', None),
       }]
       if len(text) == 0:
         return "Error: SRT file appears empty. Skipping."
@@ -856,12 +863,6 @@ class Ingest():
       with NamedTemporaryFile() as tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=tmpfile)
-        """
-        # Unstructured image loader makes the install too large (700MB --> 6GB. 3min -> 12 min build times). AND nobody uses it.
-        # The "hi_res" strategy will identify the layout of the document using detectron2. "ocr_only" uses pdfminer.six. https://unstructured-io.github.io/unstructured/core/partition.html#partition-image
-        loader = UnstructuredImageLoader(tmpfile.name, unstructured_kwargs={'strategy': "ocr_only"})
-        documents = loader.load()
-        """
 
         res_str = pytesseract.image_to_string(Image.open(tmpfile.name))
         print("IMAGE PARSING RESULT:", res_str)
@@ -877,6 +878,7 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
+            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -971,7 +973,7 @@ class Ingest():
                 'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
                 'url': kwargs.get('url', ''),
                 'base_url': kwargs.get('base_url', ''),
-                'conversation_id': kwargs.get('conversation_id', None),
+                'conversation_id': kwargs.get('conversation_id', None),  # 🔧 FIX 3: Added conversation_id
             } for page in pdf_pages_no_OCR
         ]
         pdf_texts = [page['text'] for page in pdf_pages_no_OCR]
@@ -1024,6 +1026,7 @@ class Ingest():
               'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
               'url': kwargs.get('url', ''),
               'base_url': kwargs.get('base_url', ''),
+              'conversation_id': kwargs.get('conversation_id', None),
           } for page in pdf_pages_OCRed
       ]
       pdf_texts = [page['text'] for page in pdf_pages_OCRed]
@@ -1154,6 +1157,7 @@ class Ingest():
             'url': f"{github_url}/blob/main/{doc.metadata['file_path']}",
             'pagenumber': '',
             'timestamp': '',
+            'conversation_id': kwargs.get('conversation_id', None),
         }
         self.split_and_upload(texts=[texts], metadatas=[metadatas])
       return "Success"

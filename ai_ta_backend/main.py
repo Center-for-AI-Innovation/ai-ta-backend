@@ -166,51 +166,70 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   return response
 
 @app.route('/process-chat-file', methods=['POST'])
-def process_chat_file(service: RetrievalService, flaskExecutor: ExecutorInterface):
+def process_chat_file_sync(service: RetrievalService):
     """
-    Process files uploaded in chat conversations.
-    This is conversation-focused, not course-focused.
+    Process files uploaded in chat conversations synchronously.
     """
+    
     try:
         data = request.get_json()
+        print(f"📋 Request data: {data}")
+        
         # Extract required parameters
         conversation_id = data.get('conversation_id')
         s3_path = data.get('s3_path')
-        course_name = data.get('course_name', 'chat')  # Default to 'chat'
+        course_name = data.get('course_name', 'chat')
         readable_filename = data.get('readable_filename', '')
+        user_id = data.get('user_id', '')
         
         if not conversation_id or not s3_path:
-            return jsonify({
+            error_response = {
                 "success": False,
+                "status": "error",
                 "error": "Missing required parameters: conversation_id and s3_path"
-            }), 400
-      
-        # Create processing parameters
-        processing_params = {
-            'conversation_id': conversation_id,
-            's3_path': s3_path,
-            'course_name': course_name,
-            'readable_filename': readable_filename,
-            'is_chat_upload': True
-        }
+            }
+            
+            return jsonify(error_response), 400
         
-        # Submit for background processing
-        flaskExecutor.submit(service.process_chat_file_async, **processing_params)
+        # Process file synchronously (wait for completion)
+        result = service.process_chat_file_sync(
+            conversation_id=conversation_id,
+            s3_path=s3_path,
+            course_name=course_name,
+            readable_filename=readable_filename,
+            user_id=user_id,
+            is_chat_upload=True
+        )
         
-        response = jsonify({
-            "success": True,
-            "message": "File processing started",
-            "conversation_id": conversation_id,
-            "s3_path": s3_path
-        })
+        if result['success']:
+            response_data = {
+                'success': True,
+                'chunks_created': result['chunks_created'],
+                'status': 'completed',
+                'message': 'File processed and ready for chat',
+            }
+            response = jsonify(response_data)
+        else:
+            response_data = {
+                'success': False,
+                'chunks_created': result.get('chunks_created', 0),
+                'status': 'failed',
+                'error': result.get('error', 'Unknown error occurred')
+            }
+            response = jsonify(response_data)
+            response.status_code = 500
+        
         response.headers.add('Access-Control-Allow-Origin', '*')
         return response
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        error_response = {
+            'success': False,
+            'chunks_created': 0,
+            'status': 'failed',
+            'error': f'Server error: {str(e)}'
+        }
+        return jsonify(error_response), 500
 
 
 @app.route('/getNomicMap', methods=['GET'])

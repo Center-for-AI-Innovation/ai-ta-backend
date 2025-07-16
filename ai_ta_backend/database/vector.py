@@ -143,7 +143,7 @@ class VectorDatabase():
   def vyriad_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
-    Search the vector database for a given query, combining results from both pubmed and patents collections.
+    Search the vector database for a given query, combining results from pubmed, patents, ncbi_books, and clinicaltrials collections.
     """
     top_n = 50
 
@@ -326,6 +326,156 @@ class VectorDatabase():
         print(error_msg)
         return ('clinicaltrials', [], error_msg)
 
+    def search_pubmed():
+      """Search pubmed collection with error handling"""
+      try:
+        results = self.vyriad_qdrant_client.search(
+            collection_name='pubmed',
+            with_vectors=False,
+            query_vector=user_query_embedding,
+            limit=top_n,
+        )
+        return results
+      except Exception as e:
+        print(f"Error searching pubmed: {e}")
+        return []
+
+    def search_patents():
+      """Search patents collection with error handling"""
+      try:
+        results = self.vyriad_qdrant_client.search(
+            collection_name='patents',
+            with_vectors=False,
+            query_vector=user_query_embedding,
+            limit=top_n,
+        )
+        return results
+      except Exception as e:
+        print(f"Error searching patents: {e}")
+        return []
+
+    def search_ncbi_books():
+      """Search ncbi_books collection with error handling"""
+      try:
+        results = self.vyriad_qdrant_client.search(
+            collection_name='ncbi_pdfs',
+            with_vectors=False,
+            query_vector=user_query_embedding,
+            limit=top_n,
+        )
+        return results
+      except Exception as e:
+        print(f"Error searching ncbi_books: {e}")
+        return []
+
+    def search_clinicaltrials():
+      """Search clinicaltrials collection with error handling"""
+      try:
+        results = self.vyriad_qdrant_client.search(
+            collection_name='clinical-file',
+            with_vectors=False,
+            query_vector=user_query_embedding,
+            limit=top_n,
+        )
+        return results
+      except Exception as e:
+        print(f"Error searching clinicaltrials: {e}")
+        return []
+
+    # Execute all searches in parallel
+    with ThreadPoolExecutor(max_workers=4) as executor:
+      future_to_collection = {
+          executor.submit(search_pubmed): 'pubmed',
+          executor.submit(search_patents): 'patents',
+          executor.submit(search_ncbi_books): 'ncbi_books',
+          executor.submit(search_clinicaltrials): 'clinicaltrials'
+      }
+
+      results = {}
+      for future in as_completed(future_to_collection):
+        collection_name = future_to_collection[future]
+        try:
+          results[collection_name] = future.result()
+        except Exception as e:
+          print(f"Error getting results for {collection_name}: {e}")
+          results[collection_name] = []
+
+    # Process results from each collection
+    def process_pubmed_results(results):
+      """Process pubmed results"""
+      updated_results = []
+      for result in results:
+        result.payload['page_content'] = result.payload['page_content']
+        result.payload['readable_filename'] = result.payload['readable_filename']
+        result.payload['s3_path'] = result.payload['s3_path']
+        result.payload['pagenumber'] = result.payload['pagenumber']
+        result.payload['course_name'] = course_name
+        updated_results.append(result)
+      return updated_results
+
+    def process_patents_results(results):
+      """Process patents results"""
+      updated_results = []
+      for result in results:
+        result.payload['page_content'] = result.payload['text']
+        result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
+        result.payload['course_name'] = course_name
+        result.payload['url'] = result.payload['uspto_url']
+        result.payload['s3_path'] = result.payload['s3_path']
+        updated_results.append(result)
+      return updated_results
+
+    def process_ncbi_books_results(results):
+      """Process ncbi_books results"""
+      updated_results = []
+      for result in results:
+        result.payload['page_content'] = result.payload['page_content']
+        result.payload['readable_filename'] = result.payload['readable_filename']
+        result.payload['s3_path'] = result.payload['s3_path']
+        result.payload['pagenumber'] = result.payload['pagenumber']
+        result.payload['course_name'] = course_name
+        updated_results.append(result)
+      return updated_results
+
+    def process_clinicaltrials_results(results):
+      """Process clinicaltrials results"""
+      updated_results = []
+      for result in results:
+        result.payload['page_content'] = result.payload['page_content']
+        result.payload['readable_filename'] = result.payload['readable_filename']
+        result.payload['s3_path'] = result.payload['s3_path']
+        result.payload['pagenumber'] = result.payload['pagenumber']
+        result.payload['course_name'] = course_name
+        updated_results.append(result)
+      return updated_results
+
+    try:
+      # Process all results in parallel
+      with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_processor = {
+            executor.submit(process_pubmed_results, results['pubmed']): 'pubmed',
+            executor.submit(process_patents_results, results['patents']): 'patents',
+            executor.submit(process_ncbi_books_results, results['ncbi_books']): 'ncbi_books',
+            executor.submit(process_clinicaltrials_results, results['clinicaltrials']): 'clinicaltrials'
+        }
+
+        processed_results = {}
+        for future in as_completed(future_to_processor):
+          collection_name = future_to_processor[future]
+          try:
+            processed_results[collection_name] = future.result()
+          except Exception as e:
+            print(f"Error processing {collection_name}: {e}")
+            processed_results[collection_name] = []
+
+      # Combine all results
+      updated_pubmed_results = processed_results['pubmed']
+      updated_patents_results = processed_results['patents']
+      updated_ncbi_books_results = processed_results['ncbi_books']
+      updated_clinicaltrials_results = processed_results['clinicaltrials']
+
+      combined_results = updated_pubmed_results + updated_patents_results + updated_ncbi_books_results + updated_clinicaltrials_results
+
     # Process all results in parallel
     processing_functions_and_data = [(process_pubmed_results, pubmed_results),
                                      (process_patents_results, patents_results),
@@ -334,6 +484,11 @@ class VectorDatabase():
 
     processed_results = {}
     processing_errors = []
+      print(f"Final combined results: {len(combined_results)} total documents")
+      print(f"Pubmed: {len(updated_pubmed_results)}, Patents: {len(updated_patents_results)}, NCBI Books: {len(updated_ncbi_books_results)}, Clinical Trials: {len(updated_clinicaltrials_results)}")
+
+      # Return combined results (remove the top_n limit to return all results)
+      return combined_results
 
     with ThreadPoolExecutor(max_workers=4) as executor:
       # Submit all processing tasks
@@ -417,6 +572,47 @@ class VectorDatabase():
     print(f"Vector search filter: {vector_search_filter}")
     return vector_search_filter
 
+  def _create_conversation_filter(self, conversation_id: str) -> models.Filter:
+    """
+    Create a filter for conversation-specific documents.
+    """
+    return models.Filter(
+        must=[
+            FieldCondition(
+                key='conversation_id',
+                match=MatchValue(value=conversation_id)
+            )
+        ]
+    )
+
+  def _combine_filters(self, search_filter: models.Filter, conversation_filter: models.Filter) -> models.Filter:
+    """
+    Combine search filter with conversation filter using OR logic.
+    This allows searching both regular course documents AND conversation-specific documents.
+    """
+    return models.Filter(
+        should=[search_filter, conversation_filter]
+    )
+
+  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str], 
+                               user_query_embedding, top_n, disabled_doc_groups: List[str], 
+                               public_doc_groups: List[dict], custom_filter: models.Filter):
+    """
+    Search the vector database with a custom filter.
+    Used for conversation-specific document filtering.
+    """
+    search_results = self.qdrant_client.search(
+        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+        query_filter=custom_filter,
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,
+        search_params=models.SearchParams(
+            quantization=models.QuantizationSearchParams(rescore=False)
+        )
+    )
+    return search_results
+
   def delete_data(self, collection_name: str, key: str, value: str):
     """
     Delete data from the vector database.
@@ -446,21 +642,3 @@ class VectorDatabase():
             ),
         ]),
     )
-
-  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str], 
-                               user_query_embedding, top_n, disabled_doc_groups: List[str], 
-                               public_doc_groups: List[dict], custom_filter: models.Filter):
-    """
-    Search the vector database with a custom filter.
-    """
-    search_results = self.qdrant_client.search(
-        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-        query_filter=custom_filter,
-        with_vectors=False,
-        query_vector=user_query_embedding,
-        limit=top_n,
-        search_params=models.SearchParams(
-            quantization=models.QuantizationSearchParams(rescore=False)
-        )
-    )
-    return search_results
