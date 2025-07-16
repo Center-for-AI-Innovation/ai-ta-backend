@@ -58,7 +58,6 @@ if beam.env.is_remote():
   from qdrant_client.models import PointStruct
   from requests.exceptions import Timeout
   from supabase.client import ClientOptions
-  import datetime  # 🔧 FIX 1: Added missing datetime import
 
   sentry_sdk.init(
       dsn=os.getenv("SENTRY_DSN"),
@@ -181,12 +180,14 @@ def loader():
 
 
 # Triggers determine how your app is deployed
+# @app.rest_api(
 @beam.task_queue(
     name='ingest_task_queue',
     workers=4,
     cpu=1,
     memory=3_072,
     max_pending_tasks=15_000,
+    # DEPRICATED, not needed -- callback_url='https://uiuc.chat/api/UIUC-api/ingestTaskCallback',
     timeout=60 * 25,
     retries=1,
     secrets=ourSecrets,
@@ -194,113 +195,93 @@ def loader():
     image=image,
     autoscaler=autoscaler)
 def ingest(context, **inputs: Dict[str | List[str], Any]):
-    """Main ingest function - now handles both course and chat uploads."""
-    
-    # Extract parameters
-    course_name = inputs.get('course_name', '')
-    s3_paths = inputs.get('s3_paths', '')
-    readable_filename = inputs.get('readable_filename', '')
-    url = inputs.get('url', '')
-    base_url = inputs.get('base_url', '')
-    content = inputs.get('content', '')
-    doc_groups = inputs.get('doc_groups', '')
-    
-    # NEW: Extract chat upload parameters
-    conversation_id = inputs.get('conversation_id', '')
-    is_chat_upload = inputs.get('is_chat_upload', False)
-    
-    print(f"Processing ingest - Course: {course_name}, Chat Upload: {is_chat_upload}, Conversation: {conversation_id}")
-    
-    qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog = context.on_start_value
+  qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog = context.on_start_value
+  course_name: List[str] | str = inputs.get('course_name', '')
+  s3_paths: List[str] | str = inputs.get('s3_paths', '')
+  url: List[str] | str | None = inputs.get('url', None)
+  base_url: List[str] | str | None = inputs.get('base_url', None)
+  readable_filename: List[str] | str = inputs.get('readable_filename', '')
+  content: str | List[str] | None = inputs.get('content', None)
+  doc_groups: List[str] | str = inputs.get('groups', [])
 
-    ingester = Ingest(qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog)
+  print(
+      f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
+  )
 
-    def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, groups):
-        if content:
-            return ingester.ingest_single_web_text(course_name, base_url, url, content, readable_filename, groups=groups, conversation_id=conversation_id)
-        elif readable_filename == '':
-            return ingester.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url, groups=groups, conversation_id=conversation_id)
-        else:
-            return ingester.bulk_ingest(course_name,
-                                        s3_paths,
-                                        readable_filename=readable_filename,
-                                        base_url=base_url,
-                                        url=url,
-                                        groups=groups,
-                                        conversation_id=conversation_id)
+  ingester = Ingest(qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog)
 
-    # First try
-    # Full Exception is unexpected, don't bother retrying
-    # If success_fail_dict has failures, then enter retry loop
-    success_fail_dict = {}
-    try:
-        success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, doc_groups)
-    except Exception as e:
-        # Don't bother retrying
-        print("Exception in main ingest", e)
-        success_fail_dict = {'failure_ingest': str(e)}
-        handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
+  def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, groups):
+    if content:
+      return ingester.ingest_single_web_text(course_name, base_url, url, content, readable_filename, groups=groups)
+    elif readable_filename == '':
+      return ingester.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url, groups=groups)
+    else:
+      return ingester.bulk_ingest(course_name,
+                                  s3_paths,
+                                  readable_filename=readable_filename,
+                                  base_url=base_url,
+                                  url=url,
+                                  groups=groups)
 
-    # Catch failed ingest that is not unexpected exception
-    if isinstance(success_fail_dict, str):
-        success_fail_dict = {'failure_ingest': success_fail_dict}
+  # First try
+  # Full Exception is unexpected, don't bother retrying
+  # If success_fail_dict has failures, then enter retry loop
+  success_fail_dict = {}
+  try:
+    success_fail_dict = run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, doc_groups)
+  except Exception as e:
+    # Don't bother retrying
+    print("Exception in main ingest", e)
+    success_fail_dict = {'failure_ingest': str(e)}
+    handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
 
-    # Retry failed ingests (but not unexpected exceptions)
-    if success_fail_dict.get('failure_ingest'):
-        success_fail_dict = retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url,
-                                         readable_filename, content, doc_groups)
-        if isinstance(success_fail_dict, str) or success_fail_dict.get('failure_ingest'):
-            error = str(success_fail_dict if isinstance(success_fail_dict, str) else success_fail_dict['failure_ingest'])
-            handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error)
+  # Catch failed ingest that is not unexpected exception
+  if isinstance(success_fail_dict, str):
+    success_fail_dict = {'failure_ingest': success_fail_dict}
 
-    # Cleanup: Remove from docs_in_progress table
-    try:
-        if base_url:
-            print('Removing URL-based document from in_progress')
-            supabase_client.table('documents_in_progress').delete()\
-                .eq('url', url)\
-                .eq('base_url', base_url)\
-                .execute()
-        else:
-            supabase_client.table('documents_in_progress').delete()\
-                .eq('course_name', course_name)\
-                .eq('s3_path', s3_paths)\
-                .eq('readable_filename', readable_filename)\
-                .execute()
-    except Exception as e:
-        print(f"Error cleaning up documents_in_progress: {e}")
-        sentry_sdk.capture_exception(e)
-    
-    # Update file_uploads table on success if this was a chat upload
-    if success_fail_dict.get('success_ingest') and is_chat_upload and conversation_id:
-        try:
-            supabase_client.table('file_uploads').update({
-                'contexts': {
-                    'status': 'completed',
-                    'completed_at': datetime.now().isoformat(),
-                    'success': True
-                }
-            }).eq('conversation_id', conversation_id).eq('s3_path', s3_paths).execute()
-        except Exception as update_error:
-            print(f"Error updating file_uploads on success: {update_error}")
-    
-    if success_fail_dict.get('success_ingest'):
-        posthog.capture('distinct_id_of_the_user',
-                        event='ingest_success',
-                        properties={
-                            'course_name': course_name,
-                            's3_path': s3_paths,
-                            's3_paths': s3_paths,
-                            'url': url,
-                            'base_url': base_url,
-                            'readable_filename': readable_filename,
-                            'content': content,
-                            'doc_groups': doc_groups,
-                        })
+  # Retry failed ingests (but not unexpected exceptions)
+  if success_fail_dict.get('failure_ingest'):
+    success_fail_dict = retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url,
+                                     readable_filename, content, doc_groups)
+    if isinstance(success_fail_dict, str) or success_fail_dict.get('failure_ingest'):
+      error = str(success_fail_dict if isinstance(success_fail_dict, str) else success_fail_dict['failure_ingest'])
+      handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error)
 
-    print(f"Final success_fail_dict: {success_fail_dict}")
-    sentry_sdk.flush(timeout=20)
-    return json.dumps(success_fail_dict)
+  # Cleanup: Remove from docs_in_progress table
+  try:
+    if base_url:
+      print('Removing URL-based document from in_progress')
+      supabase_client.table('documents_in_progress').delete()\
+          .eq('url', url)\
+          .eq('base_url', base_url)\
+          .execute()
+    else:
+      supabase_client.table('documents_in_progress').delete()\
+          .eq('course_name', course_name)\
+          .eq('s3_path', s3_paths)\
+          .eq('readable_filename', readable_filename)\
+          .execute()
+  except Exception as e:
+    print(f"Error cleaning up documents_in_progress: {e}")
+    sentry_sdk.capture_exception(e)
+
+  if success_fail_dict.get('success_ingest'):
+    posthog.capture('distinct_id_of_the_user',
+                    event='ingest_success',
+                    properties={
+                        'course_name': course_name,
+                        's3_path': s3_paths,
+                        's3_paths': s3_paths,
+                        'url': url,
+                        'base_url': base_url,
+                        'readable_filename': readable_filename,
+                        'content': content,
+                        'doc_groups': doc_groups,
+                    })
+
+  print(f"Final success_fail_dict: {success_fail_dict}")
+  sentry_sdk.flush(timeout=20)
+  return json.dumps(success_fail_dict)
 
 
 def handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error):
@@ -524,7 +505,6 @@ class Ingest():
           'timestamp': '',
           'url': url,
           'base_url': base_url,
-          'conversation_id': kwargs.get('conversation_id', None),
       }]
       self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       self.posthog.capture('distinct_id_of_the_user',
@@ -567,7 +547,6 @@ class Ingest():
           'timestamp': '',
           'url': kwargs.get('url', ''),
           'base_url': kwargs.get('base_url', ''),
-          'conversation_id': kwargs.get('conversation_id', None),
       } for doc in documents]
       #print(texts)
       os.remove(file_path)
@@ -604,7 +583,6 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
-            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -639,7 +617,6 @@ class Ingest():
           'base_url': kwargs.get('base_url', ''),
           'pagenumber': '',
           'timestamp': '',
-          'conversation_id': kwargs.get('conversation_id', None),  # 🔧 FIX 3: Added conversation_id
       }]
 
       success_or_failure = self.split_and_upload(text, metadata, **kwargs)
@@ -747,7 +724,6 @@ class Ingest():
           'timestamp': text.index(txt),
           'url': kwargs.get('url', ''),
           'base_url': kwargs.get('base_url', ''),
-          'conversation_id': kwargs.get('conversation_id', None),
       } for txt in text]
 
       self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
@@ -777,7 +753,6 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
-            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -812,7 +787,6 @@ class Ingest():
           'timestamp': '',
           'url': kwargs.get('url', ''),
           'base_url': kwargs.get('base_url', ''),
-          'conversation_id': kwargs.get('conversation_id', None),
       }]
       if len(text) == 0:
         return "Error: SRT file appears empty. Skipping."
@@ -846,7 +820,6 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
-            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -863,6 +836,12 @@ class Ingest():
       with NamedTemporaryFile() as tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=tmpfile)
+        """
+        # Unstructured image loader makes the install too large (700MB --> 6GB. 3min -> 12 min build times). AND nobody uses it.
+        # The "hi_res" strategy will identify the layout of the document using detectron2. "ocr_only" uses pdfminer.six. https://unstructured-io.github.io/unstructured/core/partition.html#partition-image
+        loader = UnstructuredImageLoader(tmpfile.name, unstructured_kwargs={'strategy': "ocr_only"})
+        documents = loader.load()
+        """
 
         res_str = pytesseract.image_to_string(Image.open(tmpfile.name))
         print("IMAGE PARSING RESULT:", res_str)
@@ -878,7 +857,6 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
-            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -909,7 +887,6 @@ class Ingest():
             'timestamp': '',
             'url': kwargs.get('url', ''),
             'base_url': kwargs.get('base_url', ''),
-            'conversation_id': kwargs.get('conversation_id', None),
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -973,7 +950,6 @@ class Ingest():
                 'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
                 'url': kwargs.get('url', ''),
                 'base_url': kwargs.get('base_url', ''),
-                'conversation_id': kwargs.get('conversation_id', None),  # 🔧 FIX 3: Added conversation_id
             } for page in pdf_pages_no_OCR
         ]
         pdf_texts = [page['text'] for page in pdf_pages_no_OCR]
@@ -1026,7 +1002,6 @@ class Ingest():
               'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
               'url': kwargs.get('url', ''),
               'base_url': kwargs.get('base_url', ''),
-              'conversation_id': kwargs.get('conversation_id', None),
           } for page in pdf_pages_OCRed
       ]
       pdf_texts = [page['text'] for page in pdf_pages_OCRed]
@@ -1076,8 +1051,7 @@ class Ingest():
           'pagenumber': '',
           'timestamp': '',
           'url': kwargs.get('url', ''),
-          'base_url': kwargs.get('base_url', ''),
-          'conversation_id': kwargs.get('conversation_id', None),
+          'base_url': kwargs.get('base_url', '')
       }]
       print("Prior to ingest", metadatas)
 
@@ -1112,8 +1086,7 @@ class Ingest():
             'pagenumber': '',
             'timestamp': '',
             'url': kwargs.get('url', ''),
-            'base_url': kwargs.get('base_url', ''),
-            'conversation_id': kwargs.get('conversation_id', None),
+            'base_url': kwargs.get('base_url', '')
         } for doc in documents]
 
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
@@ -1157,7 +1130,6 @@ class Ingest():
             'url': f"{github_url}/blob/main/{doc.metadata['file_path']}",
             'pagenumber': '',
             'timestamp': '',
-            'conversation_id': kwargs.get('conversation_id', None),
         }
         self.split_and_upload(texts=[texts], metadatas=[metadatas])
       return "Success"
@@ -1488,7 +1460,7 @@ class Ingest():
           sentry_sdk.capture_exception(e)
         # Delete from Qdrant
         # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
-        # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
+        # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
         try:
           if course_name == 'cropwizard-1.5':
             print("Deleting from cropwizard collection...")
