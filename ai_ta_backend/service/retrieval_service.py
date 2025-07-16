@@ -11,7 +11,6 @@ import pytz
 from dateutil import parser
 from injector import inject
 from langchain.embeddings.ollama import OllamaEmbeddings
-from qdrant_client.http import models
 
 # from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
@@ -74,10 +73,16 @@ class RetrievalService:
                            doc_groups: List[str] | None = None,
                            top_n: int = 100,
                            conversation_id: str = '') -> Union[List[Dict], str]:
-    """
-    Get most relevant contexts for a given search query.
-    Now includes conversation-specific files.
-    """
+    """Here's a summary of the work.
+
+        /GET arguments
+        course name (optional) str: A json response with TBD fields.
+
+        Returns
+        JSON: A json response with TBD fields. See main.py:getTopContexts docs.
+        or
+        String: An error message with traceback.
+        """
     if doc_groups is None:
       doc_groups = []
     try:
@@ -141,6 +146,11 @@ class RetrievalService:
       valid_docs = []
       for doc in found_docs:
         valid_docs.append(doc)
+
+      print(f"Course: {course_name} ||| search_query: {search_query}\n"
+            f"⏰ Runtime of getTopContexts: {(time.monotonic() - start_time_overall):.2f} seconds\n"
+            f"Runtime for parallel operations: {time_for_parallel_operations:.2f} seconds, "
+            f"Runtime to complete vector_search: {time_to_retrieve_docs:.2f} seconds")
       if len(valid_docs) == 0:
         return []
 
@@ -500,6 +510,9 @@ class RetrievalService:
     # Perform the vector search
     start_time_vector_search = time.monotonic()
 
+    # ----------------------------
+    # SPECIAL CASE FOR VYRIAD, CROPWIZARD
+    # ----------------------------
     if course_name == "vyriad":
       search_results = self.vdb.vyriad_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
                                                      disabled_doc_groups, public_doc_groups)
@@ -529,18 +542,22 @@ class RetrievalService:
           # Normal course logic without conversation filtering
           search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
                                                  disabled_doc_groups, public_doc_groups)
-  
     self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
 
     # Process the search results by extracting the page content and metadata
     start_time_process_search_results = time.monotonic()
     found_docs = self._process_search_results(search_results, course_name)
     time_for_process_search_results = time.monotonic() - start_time_process_search_results
+
     # Capture the search succeeded event to PostHog with the vector scores
     start_time_capture_search_succeeded_event = time.monotonic()
     self._capture_search_succeeded_event(search_query, course_name, search_results)
     time_for_capture_search_succeeded_event = time.monotonic() - start_time_capture_search_succeeded_event
 
+    print(f"Runtime for embedding query: {self.openai_embedding_latency:.2f} seconds\n"
+          f"Runtime for vector search: {self.qdrant_latency_sec:.2f} seconds\n"
+          f"Runtime for process search results: {time_for_process_search_results:.2f} seconds\n"
+          f"Runtime for capture search succeeded event: {time_for_capture_search_succeeded_event:.2f} seconds")
     return found_docs
 
   def _embed_query_and_measure_latency(self, search_query, embedding_client):
