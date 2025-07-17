@@ -5,6 +5,9 @@ import time
 import traceback
 from collections import defaultdict
 from typing import Dict, List, Union
+import tempfile
+import mimetypes
+from pathlib import Path
 
 import openai
 import pytz
@@ -834,71 +837,6 @@ class RetrievalService:
 
   # Add all these methods at the end of the RetrievalService class
 
-  def process_chat_file_async(self, conversation_id: str, s3_path: str, course_name: str, 
-                           readable_filename: str, is_chat_upload: bool = True):
-    """
-    Complete chat file processor - handles all allowed file types without Beam dependencies.
-    Supported types: html, py, pdf, txt, md, srt, vtt, docx, ppt, pptx, xlsx, xls, xlsm, 
-    xlsb, xltx, xltm, xlt, xml, xlam, xla, xlw, xlr, csv, png, jpg
-    """
-    try:
-        
-        # Download file from S3 to process locally
-        import tempfile
-        import os
-        import mimetypes
-        from pathlib import Path
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(s3_path).suffix) as tmp_file:
-            
-            # Use the S3 client to download the file
-            self.aws.s3_client.download_fileobj(
-                Bucket=os.environ['S3_BUCKET_NAME'], 
-                Key=s3_path, 
-                Fileobj=tmp_file
-            )
-            tmp_file.flush()
-            
-            # Determine file type and extract content
-            file_extension = Path(s3_path).suffix.lower()
-            mime_type = str(mimetypes.guess_type(tmp_file.name, strict=False)[0])
-            mime_category = mime_type.split('/')[0] if '/' in mime_type else mime_type
-            
-            # Validate file type is allowed
-            allowed_extensions = [
-                '.html', '.py', '.pdf', '.txt', '.md', '.srt', '.vtt', '.docx', '.ppt', '.pptx',
-                '.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm', '.xlt', '.xml', '.xlam', 
-                '.xla', '.xlw', '.xlr', '.csv', '.png', '.jpg'
-            ]
-            
-            if file_extension not in allowed_extensions:
-                os.unlink(tmp_file.name)
-                return f"File type {file_extension} not supported. Allowed types: {', '.join(allowed_extensions)}"
-            
-            # Extract text based on file type
-            text_content = self._extract_file_content(tmp_file.name, file_extension, mime_category)
-            
-            # Clean up temp file
-            os.unlink(tmp_file.name)
-            
-            if text_content and text_content.strip():
-                # Store in vector database with conversation_id
-                success = self._store_conversation_content(
-                    text_content, conversation_id, course_name, readable_filename, s3_path
-                )
-                
-                if success['success']:
-                    return f"Success: {success['chunks_created']} chunks created."
-                else:
-                    return f"Failed to store content: {success['error']}"
-            else:
-                return "No content extracted"
-                
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"Error: {e}"
-
   def process_chat_file_sync(self, conversation_id: str, s3_path: str, course_name: str, 
                           readable_filename: str, user_id: str = None, is_chat_upload: bool = True):
     """
@@ -909,10 +847,6 @@ class RetrievalService:
     try:
         
         # Download file from S3 to process locally
-        import tempfile
-        import os
-        import mimetypes
-        from pathlib import Path
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(s3_path).suffix) as tmp_file:
             
@@ -937,7 +871,6 @@ class RetrievalService:
             ]
             
             if file_extension not in allowed_extensions:
-                os.unlink(tmp_file.name)
                 return {
                     'success': False,
                     'chunks_created': 0,
@@ -947,8 +880,6 @@ class RetrievalService:
             # Extract text based on file type
             text_content = self._extract_file_content(tmp_file.name, file_extension, mime_category)
             
-            # Clean up temp file
-            os.unlink(tmp_file.name)
             
             if text_content and text_content.strip():
                 # Store in vector database with conversation_id
