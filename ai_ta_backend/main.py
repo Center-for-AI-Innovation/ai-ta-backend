@@ -113,7 +113,7 @@ def getTopContexts(service: RetrievalService) -> Response:
       'text': 'In FSM, we do this...'
     }, 
   ]
-  
+
   Raises
   ------
   Exception
@@ -167,7 +167,7 @@ def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorI
   response = jsonify({"outcome": "Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
   print(f"⏰ Runtime of /llm-monitor-message in main.py: {(time.monotonic() - start_time):.2f} seconds")
-  
+
   return response
 
 
@@ -450,12 +450,12 @@ def export_convo_history_user(service: ExportService):
 
   if user_email == '' or project_name == '':
     abort(400, description=f"Missing required parameters: 'user_email' and 'project_name' must be provided.")
-  
+
   print("user_email: ", user_email)
   print("project_name: ", project_name)
   export_status = service.export_convo_history_user(user_email, project_name)
   print("Export processing response: ", export_status)
-  
+
   if export_status['response'] == "No data found for the given user and project.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
