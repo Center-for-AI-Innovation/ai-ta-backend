@@ -1612,3 +1612,4 @@ if __name__ == "__main__":
   raise NotImplementedError("This file is not meant to be run directly")
   text = "Testing 123"
   # ingest(text=text)
+  
