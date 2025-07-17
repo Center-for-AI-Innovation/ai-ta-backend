@@ -77,6 +77,7 @@ def getTopContexts(service: RetrievalService) -> Response:
   """Get most relevant contexts for a given search query.
   
   Return value
+
   ## POST body
   course name (optional) str
       A json response with TBD fields.
@@ -93,6 +94,7 @@ def getTopContexts(service: RetrievalService) -> Response:
     "top_n": 5
   }
   ```
+
   Returns
   -------
   JSON
@@ -111,6 +113,7 @@ def getTopContexts(service: RetrievalService) -> Response:
       'text': 'In FSM, we do this...'
     }, 
   ]
+  
   Raises
   ------
   Exception
@@ -133,11 +136,11 @@ def getTopContexts(service: RetrievalService) -> Response:
     )
 
   found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n, conversation_id))
-
   response = jsonify(found_documents)
   response.headers.add('Access-Control-Allow-Origin', '*')
   print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")
   return response
+
 
 @app.route('/llm-monitor-message', methods=['POST'])
 def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorInterface) -> Response:
@@ -164,6 +167,7 @@ def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorI
   response = jsonify({"outcome": "Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
   print(f"⏰ Runtime of /llm-monitor-message in main.py: {(time.monotonic() - start_time):.2f} seconds")
+  
   return response
 
 
@@ -292,6 +296,7 @@ def nomic_map(service: NomicService):
 
   map_id = service.get_nomic_map(course_name, map_type)
   print("nomic map\n", map_id)
+
   response = jsonify(map_id)
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
@@ -300,6 +305,7 @@ def nomic_map(service: NomicService):
 @app.route('/updateConversationMaps', methods=['GET'])
 def updateConversationMaps(service: NomicService, flaskExecutor: ExecutorInterface):
   print("Starting conversation map update...")
+
   response = flaskExecutor.submit(service.update_conversation_maps)
 
   response = jsonify({"outcome": "Task started"})
@@ -310,6 +316,7 @@ def updateConversationMaps(service: NomicService, flaskExecutor: ExecutorInterfa
 @app.route('/updateDocumentMaps', methods=['GET'])
 def updateDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
   print("Starting conversation map update...")
+
   response = flaskExecutor.submit(service.update_document_maps)
 
   response = jsonify({"outcome": "Task started"})
@@ -320,6 +327,7 @@ def updateDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
 @app.route('/cleanUpConversationMaps', methods=['GET'])
 def cleanUpConversationMaps(service: NomicService, flaskExecutor: ExecutorInterface):
   print("Starting conversation map cleanup...")
+
   #response = flaskExecutor.submit(service.clean_up_conversation_maps)
 
   response = jsonify({"outcome": "Task started"})
@@ -330,6 +338,7 @@ def cleanUpConversationMaps(service: NomicService, flaskExecutor: ExecutorInterf
 @app.route('/cleanUpDocumentMaps', methods=['GET'])
 def cleanUpDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
   print("Starting document map cleanup...")
+
   #response = flaskExecutor.submit(service.clean_up_document_maps)
 
   response = jsonify({"outcome": "Document Map cleanup temporarily disabled"})
@@ -379,6 +388,7 @@ def export_convo_history(service: ExportService):
 
   export_status = service.export_convo_history_json(course_name, from_date, to_date)
   print("EXPORT FILE LINKS: ", export_status)
+
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -414,6 +424,7 @@ def export_convo_history_v2(service: ExportService):
 
   export_status = service.export_convo_history(course_name, from_date, to_date)
   print("Export processing response: ", export_status)
+
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -439,11 +450,12 @@ def export_convo_history_user(service: ExportService):
 
   if user_email == '' or project_name == '':
     abort(400, description=f"Missing required parameters: 'user_email' and 'project_name' must be provided.")
+  
   print("user_email: ", user_email)
   print("project_name: ", project_name)
   export_status = service.export_convo_history_user(user_email, project_name)
-
   print("Export processing response: ", export_status)
+  
   if export_status['response'] == "No data found for the given user and project.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -481,6 +493,7 @@ def export_conversations_custom(service: ExportService):
 
   export_status = service.export_conversations(course_name, from_date, to_date, emails)
   print("EXPORT FILE LINKS: ", export_status)
+
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -511,6 +524,7 @@ def exportDocuments(service: ExportService):
 
   export_status = service.export_documents_json(course_name, from_date, to_date)
   print("EXPORT FILE LINKS: ", export_status)
+
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
