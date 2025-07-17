@@ -74,7 +74,48 @@ def index() -> Response:
 
 @app.route('/getTopContexts', methods=['POST'])
 def getTopContexts(service: RetrievalService) -> Response:
-  """Get most relevant contexts for a given search query."""
+  """Get most relevant contexts for a given search query.
+  
+  Return value
+  ## POST body
+  course name (optional) str
+      A json response with TBD fields.
+  search_query
+  token_limit
+  doc_groups
+  
+  Example Request Body:
+  ```json
+  {
+    "search_query": "What is a finite state machine?",
+    "course_name": "ECE_385",
+    "doc_groups": ["lectures", "readings"],
+    "top_n": 5
+  }
+  ```
+  Returns
+  -------
+  JSON
+      A json response with TBD fields.
+  Metadata fields
+  * pagenumber_or_timestamp
+  * readable_filename
+  * s3_pdf_path
+  
+  Example: 
+  [
+    {
+      'readable_filename': 'Lumetta_notes', 
+      'pagenumber_or_timestamp': 'pg. 19', 
+      's3_pdf_path': '/courses/<course>/Lumetta_notes.pdf', 
+      'text': 'In FSM, we do this...'
+    }, 
+  ]
+  Raises
+  ------
+  Exception
+      Testing how exceptions are handled.
+  """
   start_time = time.monotonic()
   data = request.get_json()
   search_query: str = data.get('search_query', '')
@@ -84,12 +125,18 @@ def getTopContexts(service: RetrievalService) -> Response:
   conversation_id: str = data.get('conversation_id', '')
 
   if search_query == '' or course_name == '':
-    abort(400, description=f"Missing one or more required parameters: 'search_query' and 'course_name' must be provided. Search query: `{search_query}`, Course name: `{course_name}`")
+    # proper web error "400 Bad request"
+    abort(
+        400,
+        description=
+        f"Missing one or more required parameters: 'search_query' and 'course_name' must be provided. Search query: `{search_query}`, Course name: `{course_name}`"
+    )
 
   found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n, conversation_id))
 
   response = jsonify(found_documents)
   response.headers.add('Access-Control-Allow-Origin', '*')
+  print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")
   return response
 
 @app.route('/llm-monitor-message', methods=['POST'])
@@ -116,7 +163,7 @@ def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorI
   flaskExecutor.submit(service.llm_monitor_message, course_name, conversation_id, user_email, model_name)
   response = jsonify({"outcome": "Task started"})
   response.headers.add('Access-Control-Allow-Origin', '*')
-
+  print(f"⏰ Runtime of /llm-monitor-message in main.py: {(time.monotonic() - start_time):.2f} seconds")
   return response
 
 
@@ -160,6 +207,8 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   start_time = time.monotonic()
   # background execution of tasks!!
   flaskExecutor.submit(service.delete_data, course_name, s3_path, source_url)
+  print(f"From {course_name}, deleted file: {s3_path}")
+  print(f"⏰ Runtime of FULL delete func: {(time.monotonic() - start_time):.2f} seconds")
   # we need instant return. Delets are "best effort" assume always successful... sigh :(
   response = jsonify({"outcome": 'success'})
   response.headers.add('Access-Control-Allow-Origin', '*')
@@ -242,7 +291,7 @@ def nomic_map(service: NomicService):
     abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
 
   map_id = service.get_nomic_map(course_name, map_type)
-
+  print("nomic map\n", map_id)
   response = jsonify(map_id)
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
@@ -250,7 +299,7 @@ def nomic_map(service: NomicService):
 
 @app.route('/updateConversationMaps', methods=['GET'])
 def updateConversationMaps(service: NomicService, flaskExecutor: ExecutorInterface):
-
+  print("Starting conversation map update...")
   response = flaskExecutor.submit(service.update_conversation_maps)
 
   response = jsonify({"outcome": "Task started"})
@@ -260,7 +309,7 @@ def updateConversationMaps(service: NomicService, flaskExecutor: ExecutorInterfa
 
 @app.route('/updateDocumentMaps', methods=['GET'])
 def updateDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
-
+  print("Starting conversation map update...")
   response = flaskExecutor.submit(service.update_document_maps)
 
   response = jsonify({"outcome": "Task started"})
@@ -270,7 +319,7 @@ def updateDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
 
 @app.route('/cleanUpConversationMaps', methods=['GET'])
 def cleanUpConversationMaps(service: NomicService, flaskExecutor: ExecutorInterface):
-
+  print("Starting conversation map cleanup...")
   #response = flaskExecutor.submit(service.clean_up_conversation_maps)
 
   response = jsonify({"outcome": "Task started"})
@@ -280,7 +329,7 @@ def cleanUpConversationMaps(service: NomicService, flaskExecutor: ExecutorInterf
 
 @app.route('/cleanUpDocumentMaps', methods=['GET'])
 def cleanUpDocumentMaps(service: NomicService, flaskExecutor: ExecutorInterface):
-
+  print("Starting document map cleanup...")
   #response = flaskExecutor.submit(service.clean_up_document_maps)
 
   response = jsonify({"outcome": "Document Map cleanup temporarily disabled"})
@@ -329,7 +378,7 @@ def export_convo_history(service: ExportService):
     abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
 
   export_status = service.export_convo_history_json(course_name, from_date, to_date)
-
+  print("EXPORT FILE LINKS: ", export_status)
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -364,7 +413,7 @@ def export_convo_history_v2(service: ExportService):
     abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
 
   export_status = service.export_convo_history(course_name, from_date, to_date)
-
+  print("Export processing response: ", export_status)
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -390,8 +439,11 @@ def export_convo_history_user(service: ExportService):
 
   if user_email == '' or project_name == '':
     abort(400, description=f"Missing required parameters: 'user_email' and 'project_name' must be provided.")
+  print("user_email: ", user_email)
+  print("project_name: ", project_name)
   export_status = service.export_convo_history_user(user_email, project_name)
 
+  print("Export processing response: ", export_status)
   if export_status['response'] == "No data found for the given user and project.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -405,6 +457,8 @@ def export_convo_history_user(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
+    print("export_status['response'][2]: ", export_status['response'][2])
+    print("export_status['response'][1]: ", export_status['response'][1])
     response = make_response(
         send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -426,7 +480,7 @@ def export_conversations_custom(service: ExportService):
     abort(400, description=f"Missing required parameter: 'course_name' and 'destination_email_ids' must be provided.")
 
   export_status = service.export_conversations(course_name, from_date, to_date, emails)
-
+  print("EXPORT FILE LINKS: ", export_status)
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -456,7 +510,7 @@ def exportDocuments(service: ExportService):
     abort(400, description=f"Missing required parameter: 'course_name' must be provided. Course name: `{course_name}`")
 
   export_status = service.export_documents_json(course_name, from_date, to_date)
-
+  print("EXPORT FILE LINKS: ", export_status)
   if export_status['response'] == "No data found between the given dates.":
     response = Response(status=204)
     response.headers.add('Access-Control-Allow-Origin', '*')
