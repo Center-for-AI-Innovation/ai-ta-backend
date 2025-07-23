@@ -1,11 +1,10 @@
 import os
-from concurrent.futures import as_completed
+from concurrent.futures import as_completed, ThreadPoolExecutor
+import argparse
 
 import requests
 from dotenv import load_dotenv
 from supabase import create_client
-
-from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapter
 
 load_dotenv()
 
@@ -15,12 +14,15 @@ def send_request(webcrawl_url, payload):
   return response.json()
 
 
-def webscrape_documents(project_name: str):
+def webscrape_documents(project_name: str, source_url=None, source_key=None, destination_url=None, destination_key=None):
   print(f"Scraping documents for project: {project_name}")
 
-  # create Supabase client
-  supabase_url = os.getenv("SUPABASE_URL")
-  supabase_key = os.getenv("SUPABASE_API_KEY")
+  # create Supabase client (source)
+  supabase_url = source_url or os.getenv("SUPABASE_URL")
+  supabase_key = source_key or os.getenv("SUPABASE_API_KEY") or os.getenv("SUPABASE_KEY")
+  if not supabase_url or not supabase_key:
+    print("Error: SUPABASE_URL and SUPABASE_API_KEY (or SUPABASE_KEY) environment variables must be set or provided as arguments.")
+    return
   supabase_client = create_client(supabase_url, supabase_key)
 
   # use RPC to get unique base_urls
@@ -83,7 +85,9 @@ def webscrape_documents(project_name: str):
           "scrapeStrategy": "same-hostname",
           "maxPagesToCrawl": 15000,
           "maxTokens": 2000000,
-          "courseName": project_name
+          "courseName": project_name,
+          "destinationSupabaseUrl": destination_url,
+          "destinationSupabaseKey": destination_key,
       }
   }
 
@@ -97,7 +101,7 @@ def webscrape_documents(project_name: str):
 
   print(f"Processed file name: {processed_file_name}")
 
-  with ThreadPoolExecutorAdapter(max_workers=batch_size) as executor:
+  with ThreadPoolExecutor(max_workers=batch_size) as executor:
     for base_url in base_urls:
       document_groups = base_urls[base_url]
       payload["params"]["url"] = base_url
@@ -115,9 +119,6 @@ def webscrape_documents(project_name: str):
       payload["params"]["documentGroups"] = base_urls[base_url]
       print("Payload: ", payload)
 
-      with open(processed_file_name, 'a') as file:
-        file.write(base_url + '\n')
-
       tasks.append(executor.submit(send_request, webcrawl_url, payload.copy()))
       count += 1
 
@@ -125,6 +126,10 @@ def webscrape_documents(project_name: str):
         for future in as_completed(tasks):
           response = future.result()
           print("Response from crawl: ", response)
+          # Only write to processed file after a successful crawl
+          if response and (isinstance(response, dict) or isinstance(response, str)):
+            with open(processed_file_name, 'a') as file:
+              file.write(payload["params"]["url"] + '\n')
         tasks = []
         #return "Webscrape done."
 
@@ -132,6 +137,10 @@ def webscrape_documents(project_name: str):
     for future in as_completed(tasks):
       response = future.result()
       print("Response from crawl: ", response)
+      # Only write to processed file after a successful crawl
+      if response and (isinstance(response, dict) or isinstance(response, str)):
+        with open(processed_file_name, 'a') as file:
+          file.write(payload["params"]["url"] + '\n')
 
   # if os.path.exists(processed_file_name):
   #     os.remove(processed_file_name)
@@ -141,10 +150,25 @@ def webscrape_documents(project_name: str):
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print("Usage: python rerun_webcrawl_for_project.py <project_name>")
-        sys.exit(1)
-    project_name = sys.argv[1]
-    result = webscrape_documents(project_name)
+    parser = argparse.ArgumentParser(description="Webscrape documents for a project using flexible Supabase credentials.")
+    parser.add_argument("project_name", help="Project/course name to scrape")
+    parser.add_argument("--source-url", type=str, help="Source Supabase URL (overrides env SUPABASE_URL)")
+    parser.add_argument("--source-key", type=str, help="Source Supabase Key (overrides env SUPABASE_API_KEY/SUPABASE_KEY)")
+    parser.add_argument("--destination-url", type=str, help="Destination Supabase URL (overrides env CROPWIZARD_SUPABASE_URL)")
+    parser.add_argument("--destination-key", type=str, help="Destination Supabase Key (overrides env CROPWIZARD_SUPABASE_KEY)")
+    args = parser.parse_args()
+
+    # Set source credentials: prefer CLI args, then SUPABASE_*
+    source_url = args.source_url or os.environ.get("SUPABASE_URL")
+    source_key = args.source_key or os.environ.get("SUPABASE_API_KEY") or os.environ.get("SUPABASE_KEY")
+    # Set destination credentials: prefer CLI args, then CROPWIZARD_*
+    destination_url = args.destination_url or os.environ.get("CROPWIZARD_SUPABASE_URL")
+    destination_key = args.destination_key or os.environ.get("CROPWIZARD_SUPABASE_KEY")
+
+    # Warn if source and destination credentials are the same
+    if (source_url and destination_url and source_url == destination_url \
+        and source_key and destination_key and source_key == destination_key):
+        print("Warning: Source and destination Supabase credentials are identical. You are scraping within the same database/account.")
+
+    result = webscrape_documents(args.project_name, source_url, source_key, destination_url, destination_key)
     print(result)
