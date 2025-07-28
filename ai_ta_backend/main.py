@@ -705,7 +705,7 @@ def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> 
   project_name = data.get('project_name', '')
   project_description = data.get('project_description', '')
   project_owner_email = data.get('project_owner_email', '')
-  is_private = data.get('is_private', True)
+  is_private = data.get('is_private', False)
 
   if project_name == '':
     # proper web error "400 Bad request"

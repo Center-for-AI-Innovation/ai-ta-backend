@@ -40,7 +40,7 @@ class ProjectService:
         self.sqlDb.insertProject(sql_row)
 
     def create_project(self, project_name: str, project_description: str | None, project_owner_email: str,
-                       is_private: bool = True) -> str:
+                       is_private: bool = False) -> str:
         """
             This function takes in a project name and description and creates a project in the database.
             1. Generate metadata schema using project_name and project_description
