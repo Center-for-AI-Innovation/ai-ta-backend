@@ -1,0 +1,14 @@
+{
+	"configurations": [
+		{
+			"name": "Python Debugger: Flask",
+			"type": "debugpy",
+			"request": "launch",
+			"module": "flask",
+			"env": { "FLASK_APP": "ai_ta_backend/main.py", "FLASK_DEBUG": "1" },
+			"args": ["run", "--no-debugger", "--no-reload"],
+			"jinja": true,
+			"autoStartBrowser": false
+		}
+	]
+}

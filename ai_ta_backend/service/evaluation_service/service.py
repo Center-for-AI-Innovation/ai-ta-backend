@@ -16,6 +16,7 @@ from supabase import create_client, Client
 
 from ai_ta_backend.service.posthog_service import PosthogService
 
+
 class EvaluationService:
 
     @inject
@@ -38,7 +39,7 @@ class EvaluationService:
         subject_model: str,
         judge_temperature: float = 0.0,
         openai_api_base: str = "None",
-    ) -> dict:
+    ):
 
         properties = {
             "judge_model": judge_model,
@@ -59,7 +60,7 @@ class EvaluationService:
         # return s3_client.list_buckets()
 
         unique_filename = str(uuid.uuid4())
-        base_path = "../processing"
+        base_path = "processing"
         input_path = f"{base_path}/{unique_filename}.json"
         output_path = f"{base_path}/{unique_filename}.jsonl"
 
@@ -86,10 +87,32 @@ class EvaluationService:
         scores = []
         results = []
 
+        evaluations_entry = {
+            "judge_model": judge_model,
+            "subject_model": subject_model,
+        }
+
+        insert_result = (
+            self.supabase.table("evaluations").insert(evaluations_entry).execute()
+        )
+
+        evaluation_id = insert_result.data[0]["id"]
+        score_entries = []
+
         for result_str in results_list:
             result = json.loads(result_str)
-            results.append(result)
-            scores.append(result["score"])
+            question_id = result["id"]
+            score_entries.append(
+                {
+                    "evaluation_id": evaluation_id,
+                    "accuracy": result["accuracy"],
+                    "completeness": result["completeness"],
+                    "parsimony": result["parsimony"],
+                    "relevance": result["relevance"],
+                }
+            )
+
+        return score_entries
 
         processed_scores = self.process_scores(scores)
 
