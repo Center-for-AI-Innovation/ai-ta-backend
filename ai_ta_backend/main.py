@@ -705,12 +705,13 @@ def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> 
   project_name = data.get('project_name', '')
   project_description = data.get('project_description', '')
   project_owner_email = data.get('project_owner_email', '')
+  is_private = data.get('is_private', True)
 
   if project_name == '':
     # proper web error "400 Bad request"
     abort(400, description=f"Missing one or more required parameters: 'project_name' must be provided.")
   print(f"In /createProject for: {project_name}")
-  result = service.create_project(project_name, project_description, project_owner_email)
+  result = service.create_project(project_name, project_description, project_owner_email, is_private)
 
   # Do long-running LLM task in the background.
   flaskExecutor.submit(service.generate_json_schema, project_name, project_description)
