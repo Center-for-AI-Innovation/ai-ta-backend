@@ -42,6 +42,8 @@ if beam.env.is_remote():
       GitLoader,
       PythonLoader,
       TextLoader,
+  )
+  from langchain_community.document_loaders import (
       UnstructuredExcelLoader,
       UnstructuredPowerPointLoader,
   )
@@ -50,7 +52,7 @@ if beam.env.is_remote():
   from langchain.schema import Document
   from langchain.text_splitter import RecursiveCharacterTextSplitter
   from langchain.vectorstores import Qdrant
-  from OpenaiEmbeddings import OpenAIAPIProcessor
+  from .OpenaiEmbeddings import OpenAIAPIProcessor
   from PIL import Image
   from posthog import Posthog
   from pydub import AudioSegment
@@ -88,7 +90,8 @@ requirements = [
     "openpyxl==3.1.2",  # excel
     "networkx==3.2.1",  # unused part of excel partitioning :(
     "python-pptx==0.6.23",
-    "unstructured==0.15.12",
+    "unstructured==0.18.9",
+    "langchain-community",
     "GitPython==3.1.40",
     "beautifulsoup4==4.12.2",
     "sentry-sdk==1.39.1",
@@ -1073,6 +1076,8 @@ class Ingest():
         # download from S3 into pdf_tmpfile
         #print("in ingest PPTX")
         self.s3_client.download_fileobj(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path, Fileobj=tmpfile)
+        tmpfile.flush()  # Ensure all data is written to disk
+        tmpfile.seek(0)  # Reset file pointer to beginning
 
         loader = UnstructuredPowerPointLoader(tmpfile.name)
         documents = loader.load()
