@@ -120,6 +120,8 @@ ourSecrets = [
     "CROPWIZARD_QDRANT_URL",
     "CROPWIZARD_QDRANT_API_KEY",
     "CROPWIZARD_OPENAI_KEY",
+    "CROPWIZARD_SUPABASE_URL",
+    "CROPWIZARD_SUPABASE_SECRET",
     # "AZURE_OPENAI_KEY",
     # "AZURE_OPENAI_ENGINE",
     # "AZURE_OPENAI_KEY",
@@ -151,7 +153,7 @@ def loader():
       collection_name=os.environ['QDRANT_COLLECTION_NAME'],
       embeddings=OpenAIEmbeddings(
           openai_api_type=os.environ['OPENAI_API_TYPE'],  # "openai" or "azure"
-          openai_api_key=os.getenv('VLADS_OPENAI_KEY')))
+          api_key=os.getenv('VLADS_OPENAI_KEY')))
 
   # S3
   s3_client = boto3.client(
@@ -160,10 +162,15 @@ def loader():
       aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
   )
 
-  # Create a Supabase client
+  # Create Supabase clients
   supabase_client = supabase.create_client(  # type: ignore
       supabase_url=os.environ['SUPABASE_URL'],
       supabase_key=os.environ['SUPABASE_API_KEY'],
+      options=ClientOptions(postgrest_client_timeout=60,))
+  
+  cropwizard_supabase_client = supabase.create_client(  # type: ignore
+      supabase_url=os.environ['CROPWIZARD_SUPABASE_URL'],
+      supabase_key=os.environ['CROPWIZARD_SUPABASE_SECRET'],
       options=ClientOptions(postgrest_client_timeout=60,))
 
   # llm = AzureChatOpenAI(
@@ -176,7 +183,7 @@ def loader():
 
   posthog = Posthog(sync_mode=True, project_api_key=os.environ['POSTHOG_API_KEY'], host='https://app.posthog.com')
 
-  return qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog
+  return qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog
 
 
 # Triggers determine how your app is deployed
@@ -195,7 +202,7 @@ def loader():
     image=image,
     autoscaler=autoscaler)
 def ingest(context, **inputs: Dict[str | List[str], Any]):
-  qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog = context.on_start_value
+  qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog = context.on_start_value
   course_name: List[str] | str = inputs.get('course_name', '')
   s3_paths: List[str] | str = inputs.get('s3_paths', '')
   url: List[str] | str | None = inputs.get('url', None)
@@ -208,7 +215,7 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
       f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
   )
 
-  ingester = Ingest(qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog)
+  ingester = Ingest(qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog)
 
   def run_ingest(course_name, s3_paths, base_url, url, readable_filename, content, groups):
     if content:
@@ -233,7 +240,7 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
     # Don't bother retrying
     print("Exception in main ingest", e)
     success_fail_dict = {'failure_ingest': str(e)}
-    handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
+    handle_ingest_failure(supabase_client, cropwizard_supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
 
   # Catch failed ingest that is not unexpected exception
   if isinstance(success_fail_dict, str):
@@ -241,22 +248,23 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
 
   # Retry failed ingests (but not unexpected exceptions)
   if success_fail_dict.get('failure_ingest'):
-    success_fail_dict = retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url,
+    success_fail_dict = retry_ingest(supabase_client, cropwizard_supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url,
                                      readable_filename, content, doc_groups)
     if isinstance(success_fail_dict, str) or success_fail_dict.get('failure_ingest'):
       error = str(success_fail_dict if isinstance(success_fail_dict, str) else success_fail_dict['failure_ingest'])
-      handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error)
+      handle_ingest_failure(supabase_client, cropwizard_supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error)
 
   # Cleanup: Remove from docs_in_progress table
   try:
+    client = get_client_for_course(course_name, supabase_client, cropwizard_supabase_client)
     if base_url:
       print('Removing URL-based document from in_progress')
-      supabase_client.table('documents_in_progress').delete()\
+      client.table('documents_in_progress').delete()\
           .eq('url', url)\
           .eq('base_url', base_url)\
           .execute()
     else:
-      supabase_client.table('documents_in_progress').delete()\
+      client.table('documents_in_progress').delete()\
           .eq('course_name', course_name)\
           .eq('s3_path', s3_paths)\
           .eq('readable_filename', readable_filename)\
@@ -284,7 +292,22 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
   return json.dumps(success_fail_dict)
 
 
-def handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error):
+def get_client_for_course(course_name: str, supabase_client, cropwizard_supabase_client):
+  """
+  Helper function to select the appropriate client based on course name.
+  If course_name starts with 'cropwizard', use CropWizard database.
+  Otherwise, use the regular database.
+  """
+  if course_name and course_name.startswith('cropwizard'):
+    return cropwizard_supabase_client
+  else:
+    return supabase_client
+
+
+def handle_ingest_failure(supabase_client, cropwizard_supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, error):
+  # Select the appropriate client based on course name
+  client = get_client_for_course(course_name, supabase_client, cropwizard_supabase_client)
+    
   document = {
       "course_name": course_name,
       "s3_path": s3_paths,
@@ -294,7 +317,7 @@ def handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, reada
       "error": str(error)
   }
   # Check if document already exists
-  existing = supabase_client.table('documents_failed')\
+  existing = client.table('documents_failed')\
       .select('*')\
       .eq('course_name', course_name)\
       .eq('s3_path', s3_paths)\
@@ -305,7 +328,7 @@ def handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, reada
 
   # Only insert if no matching document exists
   if not existing.data:
-    supabase_client.table('documents_failed').insert(document).execute()
+    client.table('documents_failed').insert(document).execute()
 
   posthog.capture('distinct_id_of_the_user',
                   event='ingest_failure',
@@ -319,7 +342,7 @@ def handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, reada
                   })
 
 
-def retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url, readable_filename, content,
+def retry_ingest(supabase_client, cropwizard_supabase_client, posthog, run_ingest, course_name, s3_paths, base_url, url, readable_filename, content,
                  doc_groups):
   num_retries = 3
   last_error = None
@@ -336,7 +359,7 @@ def retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, ba
     except Exception as e:
       print(f"Exception in ingest retry loop {retry_num}", e)
       last_error = {'failure_ingest': str(e)}
-      handle_ingest_failure(supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
+      handle_ingest_failure(supabase_client, cropwizard_supabase_client, posthog, course_name, s3_paths, readable_filename, url, base_url, e)
       time.sleep(13 * retry_num)
 
   return last_error or {'failure_ingest': 'All retries failed'}
@@ -344,15 +367,30 @@ def retry_ingest(supabase_client, posthog, run_ingest, course_name, s3_paths, ba
 
 class Ingest():
 
-  def __init__(self, qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, posthog):
+  def __init__(self, qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog):
     self.qdrant_client = qdrant_client
     self.cropwizard_qdrant_client = cropwizard_qdrant_client
     self.vectorstore = vectorstore
     self.s3_client = s3_client
     self.supabase_client = supabase_client
+    self.cropwizard_supabase_client = cropwizard_supabase_client
     self.posthog = posthog
+    
+    # Default to regular client
+    self.current_client = self.supabase_client
 
-  def bulk_ingest(self, course_name: str, s3_paths: Union[str, List[str]],
+  def set_client_for_course(self, course_name: str):
+    """
+    Set the current client based on course name.
+    If course_name starts with 'cropwizard', use CropWizard database.
+    Otherwise, use the regular database.
+    """
+    if course_name and course_name.startswith('cropwizard'):
+      self.current_client = self.cropwizard_supabase_client
+    else:
+      self.current_client = self.supabase_client
+
+  def bulk_ingest(self, course_name: str, s3_paths: str | List[str],
                   **kwargs) -> Dict[str, None | str | Dict[str, str]]:
     """ 
     Bulk ingest a list of s3 paths into the vectorstore, and also into the supabase database.
@@ -1285,7 +1323,8 @@ class Ingest():
       document_size_mb = len(json.dumps(document).encode('utf-8')) / (1024 * 1024)
       print(f"Document size: {document_size_mb:.2f} MB")
 
-      response = self.supabase_client.table(
+      self.set_client_for_course(metadatas[0].get('course_name'))
+      response = self.current_client.table(
           os.getenv('REFACTORED_MATERIALS_SUPABASE_TABLE')).insert(document).execute()  # type: ignore
 
       # need to update Supabase tables with doc group info
@@ -1295,7 +1334,7 @@ class Ingest():
         if groups:
           # call the supabase function to add the document to the group
           if contexts[0].metadata.get('url'):
-            data, count = self.supabase_client.rpc(
+            data, count = self.current_client.rpc(
                 'add_document_to_group_url', {
                     "p_course_name": contexts[0].metadata.get('course_name'),
                     "p_s3_path": contexts[0].metadata.get('s3_path'),
@@ -1304,7 +1343,7 @@ class Ingest():
                     "p_doc_groups": groups,
                 }).execute()
           else:
-            data, count = self.supabase_client.rpc(
+            data, count = self.current_client.rpc(
                 'add_document_to_group', {
                     "p_course_name": contexts[0].metadata.get('course_name'),
                     "p_s3_path": contexts[0].metadata.get('s3_path'),
@@ -1360,7 +1399,8 @@ class Ingest():
         original_filename = incoming_filename
       print(f"Filename after removing uuid: {original_filename}")
 
-      supabase_contents = self.supabase_client.table(doc_table).select('id', 'contexts', 's3_path').eq(
+      self.set_client_for_course(course_name)
+      supabase_contents = self.current_client.table(doc_table).select('id', 'contexts', 's3_path').eq(
           'course_name', course_name).like('s3_path', '%' + original_filename + '%').order('id', desc=True).execute()
       supabase_contents = supabase_contents.data
       print(f"No. of S3 path based records retrieved: {len(supabase_contents)}"
@@ -1368,7 +1408,7 @@ class Ingest():
 
     elif url:
       original_filename = url
-      supabase_contents = self.supabase_client.table(doc_table).select('id', 'contexts', 'url').eq(
+      supabase_contents = self.current_client.table(doc_table).select('id', 'contexts', 'url').eq(
           'course_name', course_name).eq('url', url).order('id', desc=True).execute()
       supabase_contents = supabase_contents.data
       print(f"No. of URL-based records retrieved: {len(supabase_contents)}")
@@ -1460,7 +1500,7 @@ class Ingest():
           sentry_sdk.capture_exception(e)
         # Delete from Qdrant
         # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
-        # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students’ Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
+        # Qdrant "points" look like this: Record(id='000295ca-bd28-ac4a-6f8d-c245f7377f90', payload={'metadata': {'course_name': 'zotero-extreme', 'pagenumber_or_timestamp': 15, 'readable_filename': 'Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf', 's3_path': 'courses/zotero-extreme/Dunlosky et al. - 2013 - Improving Students' Learning With Effective Learni.pdf'}, 'page_content': '18  \nDunlosky et al.\n3.3 Effects in representative educational contexts. Sev-\neral of the large summarization-training studies have been \nconducted in regular classrooms, indicating the feasibility of \ndoing so. For example, the study by A. King (1992) took place \nin the context of a remedial study-skills course for undergrad-\nuates, and the study by Rinehart et al. (1986) took place in \nsixth-grade classrooms, with the instruction led by students \nregular teachers. In these and other cases, students benefited \nfrom the classroom training. We suspect it may actually be \nmore feasible to conduct these kinds of training  ...
         try:
           if course_name == 'cropwizard-1.5':
             print("Deleting from cropwizard collection...")
@@ -1493,7 +1533,8 @@ class Ingest():
             sentry_sdk.capture_exception(e)
 
         try:
-          self.supabase_client.from_(os.environ['REFACTORED_MATERIALS_SUPABASE_TABLE']).delete().eq(
+          self.set_client_for_course(course_name)
+          self.current_client.from_(os.environ['REFACTORED_MATERIALS_SUPABASE_TABLE']).delete().eq(
               's3_path', s3_path).eq('course_name', course_name).execute()
         except Exception as e:
           print("Error in deleting file from supabase:", e)
@@ -1523,7 +1564,8 @@ class Ingest():
 
         try:
           # delete from Supabase
-          self.supabase_client.from_(os.environ['REFACTORED_MATERIALS_SUPABASE_TABLE']).delete().eq(
+          self.set_client_for_course(course_name)
+          self.current_client.from_(os.environ['REFACTORED_MATERIALS_SUPABASE_TABLE']).delete().eq(
               'url', source_url).eq('course_name', course_name).execute()
         except Exception as e:
           print("Error in deleting file from supabase:", e)
