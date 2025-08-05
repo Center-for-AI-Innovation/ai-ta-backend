@@ -494,8 +494,8 @@ class SQLDatabase:
               "avg_messages_per_conversation": 0.0
           }
 
-          if response and hasattr(response, 'data') and response.data:
-              base_stats = response.data[0]
+          if response and "data" in response and response["data"]:
+              base_stats = response["data"][0]
               stats.update(base_stats)
 
               if stats["unique_users"] > 0:
