@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
 from sqlalchemy.sql import text
-
+from ..utils.datetime_utils import to_utc_datetime
 try:
     import ai_ta_backend.rabbitmq.models as models
 except ModuleNotFoundError:
@@ -447,18 +447,20 @@ class SQLDatabase:
               .where(models.LlmConvoMonitor.course_name == course_name)
           )
 
+          from_date = to_utc_datetime(from_date)
+          to_date = to_utc_datetime(to_date, end_of_day=True)
+
           if from_date:
               query = query.where(models.LlmConvoMonitor.created_at >= from_date)
+
           if to_date:
               query = query.where(models.LlmConvoMonitor.created_at <= to_date)
-
-          query = query.order_by(models.LlmConvoMonitor.created_at.asc())
 
           results = self.session.execute(query).scalars().all()
           response = DatabaseResponse(data=results, count=len(results)).to_dict()
 
           if response["count"] <= 0:
-              print(f"No conversations found for course: {course_name}")
+              print(f"No conversations found for course: {course_name} for duration {from_date} to {to_date}")
               return [], 0
 
           return response["data"], response["count"]
