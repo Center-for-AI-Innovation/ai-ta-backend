@@ -92,6 +92,7 @@ requirements = [
     "python-pptx==0.6.23",
     "unstructured==0.18.9",
     "langchain-community",
+    "msoffcrypto-tool",
     "GitPython==3.1.40",
     "beautifulsoup4==4.12.2",
     "sentry-sdk==1.39.1",
