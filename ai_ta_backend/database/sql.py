@@ -438,58 +438,33 @@ class SQLDatabase:
       response = DatabaseResponse(data=result, count=len(result)).to_dict()
       return response
 
-  def getConversationsCreatedAtByCourse(self, course_name: str, from_date: str = '', to_date: str = ''):
+  def getConversationsCreatedAtByCourse(
+          self, course_name: str, from_date: str = "", to_date: str = ""
+  ):
       try:
           query = (
               select(models.LlmConvoMonitor.created_at)
               .where(models.LlmConvoMonitor.course_name == course_name)
           )
+
           if from_date:
               query = query.where(models.LlmConvoMonitor.created_at >= from_date)
           if to_date:
               query = query.where(models.LlmConvoMonitor.created_at <= to_date)
+
           query = query.order_by(models.LlmConvoMonitor.created_at.asc())
-          result = self.session.execute(query).scalars().all()
-          response = DatabaseResponse(data=result, count=len(result)).to_dict()
-          total_count = response.count if hasattr(response, 'count') else 0
-          if total_count <= 0:
+
+          results = self.session.execute(query).scalars().all()
+          response = DatabaseResponse(data=results, count=len(results)).to_dict()
+
+          if response["count"] <= 0:
               print(f"No conversations found for course: {course_name}")
               return [], 0
 
-          all_data = []
-          batch_size = 1000
-          start = 0
-          while start < total_count:
-              end = min(start + batch_size - 1, total_count - 1)
+          return response["data"], response["count"]
 
-              try:
-                  batch_query = (
-                      select(models.LlmConvoMonitor.created_at)
-                      .where(models.LlmConvoMonitor.course_name == course_name)
-                  )
-                  if from_date:
-                      batch_query = batch_query.where(models.LlmConvoMonitor.created_at >= from_date)
-                  if to_date:
-                      batch_query = batch_query.where(models.LlmConvoMonitor.created_at <= to_date)
-                  batch_query = batch_query.order_by(models.LlmConvoMonitor.created_at.asc())
-                  batch_query = batch_query.range(start, end)
-                  result = self.session.execute(batch_query).scalars().all()
-                  response = DatabaseResponse(data=result, count=len(result)).to_dict()
-                  total_count = response.count if hasattr(response, 'count') else 0
-                  if not response or not hasattr(response, 'data') or not response.data:
-                      print(f"No data returned for range {start} to {end}.")
-                      break
-                  all_data.extend(response.data)
-                  start += batch_size
-              except Exception as batch_error:
-                  print(f"Error fetching batch {start}-{end}: {str(batch_error)}")
-                  continue
-          if not all_data:
-              print(f"No conversation data could be retrieved for course: {course_name}")
-              return [], 0
-          return all_data, len(all_data)
       except Exception as e:
-          print(f"Error in getConversationsCreatedAtByCourse for {course_name}: {str(e)}")
+          print(f"Error in getConversationsCreatedAtByCourse for {course_name}: {e}")
           return [], 0
 
   def getProjectStats(self, project_name: str) -> ProjectStats:

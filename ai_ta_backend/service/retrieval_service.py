@@ -664,10 +664,9 @@ class RetrievalService:
           'heatmap': defaultdict(lambda: defaultdict(int)),
       }
 
-      for record in conversations:
+      for created_at in conversations:
         try:
-          created_at = record['created_at']
-          parsed_date = parser.parse(created_at).astimezone(central_tz)
+          parsed_date = created_at.astimezone(central_tz)
 
           day = parsed_date.date()
           hour = parsed_date.hour
