@@ -65,7 +65,7 @@ class ProjectService:
           "system_prompt": None,
           "disabled_models": None,
           "project_description": project_description if project_description else None,
-          "removeCitations": False,
+          #"removeCitations": False,
       }
 
       # Set course_metadatas
