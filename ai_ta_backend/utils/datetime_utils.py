@@ -11,7 +11,7 @@ def to_utc_datetime(dt: Union[str, datetime, None], end_of_day: bool = False) ->
     Returns:
         UTC-aware datetime, or None if input is None.
     """
-    if dt is None:
+    if dt is None or dt == "":
         return None
 
     if isinstance(dt, str):

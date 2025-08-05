@@ -163,10 +163,14 @@ class SQLDatabase:
           select(models.Document.id)
           .where(models.Document.course_name == course_name)
       )
-      if from_date != '':
+      from_date = to_utc_datetime(from_date)
+      to_date = to_utc_datetime(to_date, end_of_day=True)
+
+      if from_date:
           query = query.where(models.Document.created_at >= from_date)
-          if to_date != '':
-              query = query.where(models.Document.created_at <= to_date)
+      if to_date:
+          query = query.where(models.Document.created_at <= to_date)
+
       query = query.order_by(models.Document.id.asc())
 
       result = self.session.execute(query).scalars().all()
@@ -178,10 +182,13 @@ class SQLDatabase:
           select(models.LlmConvoMonitor.id)
           .where(models.LlmConvoMonitor.course_name == course_name)
       )
-      if from_date != '':
+      from_date = to_utc_datetime(from_date)
+      to_date = to_utc_datetime(to_date, end_of_day=True)
+      if from_date:
           query = query.where(models.LlmConvoMonitor.created_at >= from_date)
-          if to_date != '':
-              query = query.where(models.LlmConvoMonitor.created_at <= to_date)
+      if to_date:
+          query = query.where(models.LlmConvoMonitor.created_at <= to_date)
+
       query = query.order_by(models.LlmConvoMonitor.id.asc())
 
       result = self.session.execute(query).scalars().all()
