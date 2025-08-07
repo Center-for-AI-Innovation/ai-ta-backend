@@ -367,370 +367,370 @@ class SQLDatabase:
         return response
 
 
-def getDocMapFromProjects(self, course_name: str):
-    query = (
-        select(models.Project.doc_map_id)
-        .where(models.Project.course_name == course_name)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def getConvoMapFromProjects(self, course_name: str):
-    query = (
-        select(models.Project)
-        .where(models.Project.course_name == course_name)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def updateProjects(self, course_name: str, data: dict):
-    query = (
-        select(models.Project)
-        .where(models.Project.course_name == course_name)
-        .update(data)
-    )
-    with self.get_session() as session:
-        result = session.execute(query)
-
-    return result
-
-
-def getLatestWorkflowId(self):
-    query = (
-        select(models.N8nWorkflows)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).scalars().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def lockWorkflow(self, id: int):
-    with self.get_session() as session:
-        try:
-            insert_stmt = insert(models.N8nWorkflows).values({"latest_workflow_id": id, "is_locked": True})
-            session.execute(insert_stmt)
-            session.commit()
-            return True  # Insertion successful
-        except SQLAlchemyError as e:
-            session.rollback()  # Rollback in case of error
-            print(f"Insertion failed: {e}")
-            return False  # Insertion failed
-
-
-def deleteLatestWorkflowId(self, id: int):
-    query = (
-        delete(models.N8nWorkflows)
-        .where(models.N8nWorkflows.latest_workflow_id == id)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).scalars().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def unlockWorkflow(self, id: int):
-    query = (
-        select(models.N8nWorkflows)
-        .where(models.N8nWorkflows.latest_workflow_id == id)
-        .update({"is_locked": False})
-    )
-    with self.get_session() as session:
-        result = session.execute(query)
-
-    return result
-
-
-def check_and_lock_flow(self, id):
-    with self.get_session() as session:
-        return session.query(func.check_and_lock_flows_v2(id)).all()
-
-
-def getConversation(self, course_name: str, key: str, value: str):
-    query = (
-        select(models.LlmConvoMonitor)
-        .where(getattr(models.LlmConvoMonitor, key) == value)
-        .where(models.LlmConvoMonitor.course_name == course_name)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).scalars().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def getDisabledDocGroups(self, course_name: str):
-    query = (
-        select(models.DocGroup.name)
-        .where(models.DocGroup.course_name == course_name)
-        .where(models.DocGroup.enabled == False)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).scalars().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def getPublicDocGroups(self, course_name: str):
-    query = (
-        select(models.DocGroup.name, models.DocGroup.course_name, models.DocGroup.enabled,
-               models.DocGroup.private, models.DocGroup.doc_count)
-        .where(models.DocGroup.course_name == course_name)
-    )
-    with Session(self.engine) as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-        return response
-
-
-def getAllConversationsForUserAndProject(self, user_email: str, project_name: str, curr_count: int = 0):
-    query = (
-        select(models.Conversations, models.Messages)
-        .join(models.Messages, models.Messages.conversation_id == models.Conversations.id)
-        .where(models.Conversations.user_email == user_email)
-        .where(models.Conversations.project_name == project_name)
-        .order_by(models.Conversations.updated_at.desc())
-        .limit(500)
-        .offset(curr_count)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def getPreAssignedAPIKeys(self, email: str):
-    query = (
-        select(models.PreAuthAPIKeys)
-        .where(models.PreAuthAPIKeys.emails.contains([email]))
-    )
-    with self.get_session() as session:
-        result = session.execute(query).scalars().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
-
-
-def getConversationsCreatedAtByCourse(
-        self, course_name: str, from_date: str = "", to_date: str = ""
-):
-    try:
+    def getDocMapFromProjects(self, course_name: str):
         query = (
-            select(models.LlmConvoMonitor.created_at)
-            .where(models.LlmConvoMonitor.course_name == course_name)
-        )
-
-        from_date = to_utc_datetime(from_date)
-        to_date = to_utc_datetime(to_date, end_of_day=True)
-
-        if from_date:
-            query = query.where(models.LlmConvoMonitor.created_at >= from_date)
-
-        if to_date:
-            query = query.where(models.LlmConvoMonitor.created_at <= to_date)
-
-        with self.get_session() as session:
-            results = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=results, count=len(results)).to_dict()
-
-        if response["count"] <= 0:
-            print(f"No conversations found for course: {course_name} for duration {from_date} to {to_date}")
-            return [], 0
-
-        return response["data"], response["count"]
-
-    except Exception as e:
-        print(f"Error in getConversationsCreatedAtByCourse for {course_name}: {e}")
-        return [], 0
-
-
-def getProjectStats(self, project_name: str) -> ProjectStats:
-    try:
-        query = (
-            select(models.ProjectStats.total_messages, models.ProjectStats.total_conversations,
-                   models.ProjectStats.unique_users)
-            .where(models.ProjectStats.project_name == project_name)
+            select(models.Project.doc_map_id)
+            .where(models.Project.course_name == course_name)
         )
         with self.get_session() as session:
             result = session.execute(query).mappings().all()
             response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
-        stats = {
-            "total_messages": 0,
-            "total_conversations": 0,
-            "unique_users": 0,
-            "avg_conversations_per_user": 0.0,
-            "avg_messages_per_user": 0.0,
-            "avg_messages_per_conversation": 0.0
-        }
-
-        if response and "data" in response and response["data"]:
-            base_stats = response["data"][0]
-            stats.update(base_stats)
-
-            if stats["unique_users"] > 0:
-                stats["avg_conversations_per_user"] = float(
-                    round(stats["total_conversations"] / stats["unique_users"], 2))
-                stats["avg_messages_per_user"] = float(round(stats["total_messages"] / stats["unique_users"], 2))
-
-            if stats["total_conversations"] > 0:
-                stats["avg_messages_per_conversation"] = float(
-                    round(stats["total_messages"] / stats["total_conversations"], 2))
-
-        stats_typed = {
-            "total_messages": int(stats["total_messages"]),
-            "total_conversations": int(stats["total_conversations"]),
-            "unique_users": int(stats["unique_users"]),
-            "avg_conversations_per_user": float(stats["avg_conversations_per_user"]),
-            "avg_messages_per_user": float(stats["avg_messages_per_user"]),
-            "avg_messages_per_conversation": float(stats["avg_messages_per_conversation"])
-        }
-        return ProjectStats(**stats_typed)
-
-    except Exception as e:
-        print(f"Error fetching project stats for {project_name}: {str(e)}")
-        return ProjectStats(total_messages=0,
-                            total_conversations=0,
-                            unique_users=0,
-                            avg_conversations_per_user=0.0,
-                            avg_messages_per_user=0.0,
-                            avg_messages_per_conversation=0.0)
+        return response
 
 
-def getWeeklyTrends(self, project_name: str) -> List[WeeklyMetric]:
-    with self.get_session() as session:
-        response = session.query(func.calculate_weekly_trends(project_name)).all()
-        if response and hasattr(response, 'data'):
-            return [
-                WeeklyMetric(current_week_value=item['current_week_value'],
-                             metric_name=item['metric_name'],
-                             percentage_change=item['percentage_change'],
-                             previous_week_value=item['previous_week_value']) for item in response.data
-            ]
+    def getConvoMapFromProjects(self, course_name: str):
+        query = (
+            select(models.Project)
+            .where(models.Project.course_name == course_name)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
-    return []
+        return response
 
 
-def getModelUsageCounts(self, project_name: str) -> List[ModelUsage]:
-    with self.get_session() as session:
-        response = session.query(func.count_models_by_project(project_name)).all()
-        if response and hasattr(response, 'data'):
-            total_count = sum(item['count'] for item in response.data if item.get('model'))
+    def updateProjects(self, course_name: str, data: dict):
+        query = (
+            select(models.Project)
+            .where(models.Project.course_name == course_name)
+            .update(data)
+        )
+        with self.get_session() as session:
+            result = session.execute(query)
 
-            model_counts = []
-            for item in response.data:
-                if item.get('model'):
-                    percentage = round((item['count'] / total_count * 100), 2) if total_count > 0 else 0
-                    model_counts.append(
-                        ModelUsage(model_name=item['model'], count=item['count'], percentage=percentage))
-
-            return model_counts
-
-    return []
+        return result
 
 
-def getAllProjects(self):
-    query = (
-        select(models.Project.course_name,
-               models.Project.doc_map_id,
-               models.Project.convo_map_id,
-               models.Project.last_uploaded_doc_id,
-               models.Project.last_uploaded_convo_id
-               )
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
+    def getLatestWorkflowId(self):
+        query = (
+            select(models.N8nWorkflows)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
-    return response
+        return response
 
 
-def getConvoMapDetails(self):
-    with self.get_session() as session:
-        return session.query(func.get_convo_maps()).all()
+    def lockWorkflow(self, id: int):
+        with self.get_session() as session:
+            try:
+                insert_stmt = insert(models.N8nWorkflows).values({"latest_workflow_id": id, "is_locked": True})
+                session.execute(insert_stmt)
+                session.commit()
+                return True  # Insertion successful
+            except SQLAlchemyError as e:
+                session.rollback()  # Rollback in case of error
+                print(f"Insertion failed: {e}")
+                return False  # Insertion failed
 
 
-def getDocMapDetails(self):
-    with self.get_session() as session:
-        return session.query(func.get_doc_map_details()).all()
+    def deleteLatestWorkflowId(self, id: int):
+        query = (
+            delete(models.N8nWorkflows)
+            .where(models.N8nWorkflows.latest_workflow_id == id)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
 
 
-def getProjectsWithConvoMaps(self):
-    query = (
-        select(models.Project.course_name,
-               models.Project.convo_map_id,
-               models.Project.last_uploaded_doc_id,
-               models.Project.last_uploaded_convo_id)
-        .where(models.Project.convo_map_id is not None)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
+    def unlockWorkflow(self, id: int):
+        query = (
+            select(models.N8nWorkflows)
+            .where(models.N8nWorkflows.latest_workflow_id == id)
+            .update({"is_locked": False})
+        )
+        with self.get_session() as session:
+            result = session.execute(query)
 
-    return response
+        return result
 
 
-def getProjectsWithDocMaps(self):
-    query = (
-        select(models.Project.course_name,
-               models.Project.doc_map_id,
-               models.Project.last_uploaded_doc_id,
-               models.Project.document_map_index
-               )
-        .where(models.Project.doc_map_id is not None)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
+    def check_and_lock_flow(self, id):
+        with self.get_session() as session:
+            return session.query(func.check_and_lock_flows_v2(id)).all()
 
 
-def getProjectMapName(self, course_name, field_name):
-    query = text(f"""
-                    SELECT {field_name} FROM projects 
-                    WHERE projects.course_name = {course_name}
-                  """)
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
+    def getConversation(self, course_name: str, key: str, value: str):
+        query = (
+            select(models.LlmConvoMonitor)
+            .where(getattr(models.LlmConvoMonitor, key) == value)
+            .where(models.LlmConvoMonitor.course_name == course_name)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
-    return response
-
-
-def getMessagesFromConvoID(self, convo_id):
-    query = (
-        select(models.Messages)
-        .where(models.Messages.conversation_id == convo_id)
-        .limit(500)
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
-
-    return response
+        return response
 
 
-def updateMessageFromLlmMonitor(self, message_id, llm_monitor_tags):
-    query = (
-        select(models.Message)
-        .where(models.Message.id == message_id)
-        .update({"llm_monitor_tags": llm_monitor_tags})
-    )
-    with self.get_session() as session:
-        result = session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
+    def getDisabledDocGroups(self, course_name: str):
+        query = (
+            select(models.DocGroup.name)
+            .where(models.DocGroup.course_name == course_name)
+            .where(models.DocGroup.enabled == False)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
-    return response
+        return response
+
+
+    def getPublicDocGroups(self, course_name: str):
+        query = (
+            select(models.DocGroup.name, models.DocGroup.course_name, models.DocGroup.enabled,
+                   models.DocGroup.private, models.DocGroup.doc_count)
+            .where(models.DocGroup.course_name == course_name)
+        )
+        with Session(self.engine) as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            return response
+
+
+    def getAllConversationsForUserAndProject(self, user_email: str, project_name: str, curr_count: int = 0):
+        query = (
+            select(models.Conversations, models.Messages)
+            .join(models.Messages, models.Messages.conversation_id == models.Conversations.id)
+            .where(models.Conversations.user_email == user_email)
+            .where(models.Conversations.project_name == project_name)
+            .order_by(models.Conversations.updated_at.desc())
+            .limit(500)
+            .offset(curr_count)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def getPreAssignedAPIKeys(self, email: str):
+        query = (
+            select(models.PreAuthAPIKeys)
+            .where(models.PreAuthAPIKeys.emails.contains([email]))
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def getConversationsCreatedAtByCourse(
+            self, course_name: str, from_date: str = "", to_date: str = ""
+    ):
+        try:
+            query = (
+                select(models.LlmConvoMonitor.created_at)
+                .where(models.LlmConvoMonitor.course_name == course_name)
+            )
+
+            from_date = to_utc_datetime(from_date)
+            to_date = to_utc_datetime(to_date, end_of_day=True)
+
+            if from_date:
+                query = query.where(models.LlmConvoMonitor.created_at >= from_date)
+
+            if to_date:
+                query = query.where(models.LlmConvoMonitor.created_at <= to_date)
+
+            with self.get_session() as session:
+                results = session.execute(query).scalars().all()
+                response = DatabaseResponse(data=results, count=len(results)).to_dict()
+
+            if response["count"] <= 0:
+                print(f"No conversations found for course: {course_name} for duration {from_date} to {to_date}")
+                return [], 0
+
+            return response["data"], response["count"]
+
+        except Exception as e:
+            print(f"Error in getConversationsCreatedAtByCourse for {course_name}: {e}")
+            return [], 0
+
+
+    def getProjectStats(self, project_name: str) -> ProjectStats:
+        try:
+            query = (
+                select(models.ProjectStats.total_messages, models.ProjectStats.total_conversations,
+                       models.ProjectStats.unique_users)
+                .where(models.ProjectStats.project_name == project_name)
+            )
+            with self.get_session() as session:
+                result = session.execute(query).mappings().all()
+                response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+            stats = {
+                "total_messages": 0,
+                "total_conversations": 0,
+                "unique_users": 0,
+                "avg_conversations_per_user": 0.0,
+                "avg_messages_per_user": 0.0,
+                "avg_messages_per_conversation": 0.0
+            }
+
+            if response and "data" in response and response["data"]:
+                base_stats = response["data"][0]
+                stats.update(base_stats)
+
+                if stats["unique_users"] > 0:
+                    stats["avg_conversations_per_user"] = float(
+                        round(stats["total_conversations"] / stats["unique_users"], 2))
+                    stats["avg_messages_per_user"] = float(round(stats["total_messages"] / stats["unique_users"], 2))
+
+                if stats["total_conversations"] > 0:
+                    stats["avg_messages_per_conversation"] = float(
+                        round(stats["total_messages"] / stats["total_conversations"], 2))
+
+            stats_typed = {
+                "total_messages": int(stats["total_messages"]),
+                "total_conversations": int(stats["total_conversations"]),
+                "unique_users": int(stats["unique_users"]),
+                "avg_conversations_per_user": float(stats["avg_conversations_per_user"]),
+                "avg_messages_per_user": float(stats["avg_messages_per_user"]),
+                "avg_messages_per_conversation": float(stats["avg_messages_per_conversation"])
+            }
+            return ProjectStats(**stats_typed)
+
+        except Exception as e:
+            print(f"Error fetching project stats for {project_name}: {str(e)}")
+            return ProjectStats(total_messages=0,
+                                total_conversations=0,
+                                unique_users=0,
+                                avg_conversations_per_user=0.0,
+                                avg_messages_per_user=0.0,
+                                avg_messages_per_conversation=0.0)
+
+
+    def getWeeklyTrends(self, project_name: str) -> List[WeeklyMetric]:
+        with self.get_session() as session:
+            response = session.query(func.calculate_weekly_trends(project_name)).all()
+            if response and hasattr(response, 'data'):
+                return [
+                    WeeklyMetric(current_week_value=item['current_week_value'],
+                                 metric_name=item['metric_name'],
+                                 percentage_change=item['percentage_change'],
+                                 previous_week_value=item['previous_week_value']) for item in response.data
+                ]
+
+        return []
+
+
+    def getModelUsageCounts(self, project_name: str) -> List[ModelUsage]:
+        with self.get_session() as session:
+            response = session.query(func.count_models_by_project(project_name)).all()
+            if response and hasattr(response, 'data'):
+                total_count = sum(item['count'] for item in response.data if item.get('model'))
+
+                model_counts = []
+                for item in response.data:
+                    if item.get('model'):
+                        percentage = round((item['count'] / total_count * 100), 2) if total_count > 0 else 0
+                        model_counts.append(
+                            ModelUsage(model_name=item['model'], count=item['count'], percentage=percentage))
+
+                return model_counts
+
+        return []
+
+
+    def getAllProjects(self):
+        query = (
+            select(models.Project.course_name,
+                   models.Project.doc_map_id,
+                   models.Project.convo_map_id,
+                   models.Project.last_uploaded_doc_id,
+                   models.Project.last_uploaded_convo_id
+                   )
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def getConvoMapDetails(self):
+        with self.get_session() as session:
+            return session.query(func.get_convo_maps()).all()
+
+
+    def getDocMapDetails(self):
+        with self.get_session() as session:
+            return session.query(func.get_doc_map_details()).all()
+
+
+    def getProjectsWithConvoMaps(self):
+        query = (
+            select(models.Project.course_name,
+                   models.Project.convo_map_id,
+                   models.Project.last_uploaded_doc_id,
+                   models.Project.last_uploaded_convo_id)
+            .where(models.Project.convo_map_id is not None)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def getProjectsWithDocMaps(self):
+        query = (
+            select(models.Project.course_name,
+                   models.Project.doc_map_id,
+                   models.Project.last_uploaded_doc_id,
+                   models.Project.document_map_index
+                   )
+            .where(models.Project.doc_map_id is not None)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def getProjectMapName(self, course_name, field_name):
+        query = text(f"""
+                        SELECT {field_name} FROM projects 
+                        WHERE projects.course_name = {course_name}
+                      """)
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def getMessagesFromConvoID(self, convo_id):
+        query = (
+            select(models.Messages)
+            .where(models.Messages.conversation_id == convo_id)
+            .limit(500)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
+
+
+    def updateMessageFromLlmMonitor(self, message_id, llm_monitor_tags):
+        query = (
+            select(models.Message)
+            .where(models.Message.id == message_id)
+            .update({"llm_monitor_tags": llm_monitor_tags})
+        )
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        return response
