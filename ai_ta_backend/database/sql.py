@@ -83,6 +83,7 @@ class SQLDatabase:
         # Create engine and session
         print("About to connect to DB from IngestSQL.py, with URI:", db_uri)
         self.engine = create_engine(db_uri, poolclass=NullPool)
+        self.Session = sessionmaker(bind=self.engine)
 
     @contextmanager
     def get_session(self):
