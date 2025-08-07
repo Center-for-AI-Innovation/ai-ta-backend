@@ -1,6 +1,7 @@
 import os
 import logging
-from urllib.parse import quote_plus
+from contextlib import contextmanager
+
 from dotenv import load_dotenv
 from typing import List, TypeVar, Generic, TypedDict
 load_dotenv()
@@ -11,11 +12,9 @@ from sqlalchemy import insert
 from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
-from sqlalchemy import select, desc
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
 from sqlalchemy import select, desc
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+
 
 try:
     import ai_ta_backend.rabbitmq.models as models
@@ -87,56 +86,72 @@ class SQLAlchemyIngestDB:
             db_uri = f"postgresql://{os.getenv('POSTGRES_USERNAME')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_ENDPOINT')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DATABASE')}"
 
         # Create engine and session
-        logging.info("About to connect to DB from IngestSQL.py, with URI:", db_uri)
-        engine = create_engine(db_uri, poolclass=NullPool)
-        Session = sessionmaker(bind=engine)
-        # TODO: Move to self.connect() & handle if the session is broken before executing statements
-        self.session = Session()
+        logging.info("About to connect to DB from IngestSQL.py.")
+        self.engine = create_engine(db_uri, poolclass=NullPool)
+        self.Session = sessionmaker(bind=self.engine)
         logging.info("Successfully connected to DB from IngestSQL.py")
+
+
+    @contextmanager
+    def get_session(self):
+        session = self.Session()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     # INGEST FLOW
 
     def insert_document_in_progress(self, doc_progress: models.DocumentsInProgress):
-        self.session.add(doc_progress)
-        self.session.commit()
-        self.session.refresh(doc_progress)
-        return doc_progress
+        with self.get_session() as session:
+            session.add(doc_progress)
+            session.commit()
+            session.refresh(doc_progress)
+
+            return doc_progress
 
     def insert_failed_document(self, failed_doc_payload: dict):
-        try:
-            insert_stmt = insert(models.DocumentsFailed).values(failed_doc_payload)
-            self.session.execute(insert_stmt)
-            self.session.commit()
-            return True
-        except SQLAlchemyError as e:
-            self.session.rollback()
-            print(f"Insertion failed: {e}")
-            return False
+        with self.get_session() as session:
+            try:
+                insert_stmt = insert(models.DocumentsFailed).values(failed_doc_payload)
+                session.execute(insert_stmt)
+                session.commit()
+                return True
+            except SQLAlchemyError as e:
+                session.rollback()
+                print(f"Insertion failed: {e}")
+                return False
 
     def delete_document_in_progress(self, beam_task_id: str):
-        try:
-            logging.info("Deleting task id "+beam_task_id)
-            delete_stmt = (
-                delete(models.DocumentsInProgress)
-                .where(models.DocumentsInProgress.beam_task_id == beam_task_id))
-            self.session.execute(delete_stmt)
-            self.session.commit()
-            return True
-        except SQLAlchemyError as e:
-            self.session.rollback()
-            logging.error(f"Deletion failed: {e}")
-            return False
+        with self.get_session() as session:
+            try:
+                logging.info("Deleting task id "+beam_task_id)
+                delete_stmt = (
+                    delete(models.DocumentsInProgress)
+                    .where(models.DocumentsInProgress.beam_task_id == beam_task_id))
+                session.execute(delete_stmt)
+                session.commit()
+                return True
+            except SQLAlchemyError as e:
+                session.rollback()
+                logging.error(f"Deletion failed: {e}")
+                return False
 
     def insert_document(self, doc_payload: dict) -> bool:
-        try:
-            insert_stmt = insert(models.Document).values(doc_payload)
-            self.session.execute(insert_stmt)
-            self.session.commit()
-            return True  # Insertion successful
-        except SQLAlchemyError as e:
-            self.session.rollback()  # Rollback in case of error
-            logging.error(f"Insertion failed: {e}")
-            return False  # Insertion failed
+        with self.get_session() as session:
+            try:
+                insert_stmt = insert(models.Document).values(doc_payload)
+                session.execute(insert_stmt)
+                session.commit()
+                return True  # Insertion successful
+            except SQLAlchemyError as e:
+                session.rollback()  # Rollback in case of error
+                logging.error(f"Insertion failed: {e}")
+                return False  # Insertion failed
 
     def add_document_to_group_url(self, contexts, groups):
         params = {
@@ -147,17 +162,18 @@ class SQLAlchemyIngestDB:
             "p_doc_groups": groups,
         }
 
-        try:
-            result = self.session.execute(text(
-                "SELECT * FROM add_document_to_group_url(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
-                                          params)
-            self.session.commit()
-            count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
-            return count
-        except Exception as e:
-            print(f"Stored procedure execution failed: {e}")
-            self.session.rollback()
-            return None, 0
+        with self.get_session() as session:
+            try:
+                result = session.execute(text(
+                    "SELECT * FROM add_document_to_group_url(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
+                                              params)
+                session.commit()
+                count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
+                return count
+            except Exception as e:
+                print(f"Stored procedure execution failed: {e}")
+                session.rollback()
+                return None, 0
 
     def add_document_to_group(self, contexts, groups):
         params = {
@@ -167,19 +183,19 @@ class SQLAlchemyIngestDB:
             "p_readable_filename": contexts[0].metadata.get('readable_filename'),
             "p_doc_groups": groups,
         }
+        with self.get_session() as session:
+            try:
+                result = session.execute(text(
+                    "SELECT * FROM add_document_to_group(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
+                                              params)
+                session.commit()
 
-        try:
-            result = self.session.execute(text(
-                "SELECT * FROM add_document_to_group(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
-                                          params)
-            self.session.commit()
-
-            count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
-            return count
-        except Exception as e:
-            print(f"Stored procedure execution failed: {e}")
-            self.session.rollback()
-            return None, 0
+                count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
+                return count
+            except Exception as e:
+                print(f"Stored procedure execution failed: {e}")
+                session.rollback()
+                return None, 0
 
     def get_like_docs_by_s3_path(self, course_name, original_filename):
         logging.info(f"In get_like_docs_by_s3_path")
@@ -189,9 +205,12 @@ class SQLAlchemyIngestDB:
             .where(models.Document.s3_path.like(f"%{original_filename}%"))
             .order_by(desc(models.Document.id))
         )
-        result = self.session.execute(query).mappings().all()
-        logging.info(f"In get_like_docs_by_s3_path, result: {result}")
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            logging.info(f"In get_like_docs_by_s3_path, result: {result}")
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+
         return response
 
     def get_like_docs_by_url(self, course_name, url):
@@ -201,8 +220,9 @@ class SQLAlchemyIngestDB:
             .where(models.Document.url.like(f"%{url}%"))
             .order_by(desc(models.Document.id))
         )
-        result = self.session.execute(query).mappings().all()
-        response = DatabaseResponse(data=result, count=len(result)).to_dict()
+        with self.get_session() as session:
+            result = session.execute(query).mappings().all()
+            response = DatabaseResponse(data=result, count=len(result)).to_dict()
         return response
 
     def delete_document_by_s3_path(self, course_name: str, s3_path: str):
@@ -212,8 +232,10 @@ class SQLAlchemyIngestDB:
             .where(models.Document.course_name == course_name)
         )
 
-        result = self.session.execute(delete_stmt)
-        self.session.commit()
+        with self.get_session() as session:
+            result = session.execute(delete_stmt)
+            session.commit()
+
         return result.rowcount  # Number of rows deleted
 
     def delete_document_by_url(self, course_name: str, url: str):
@@ -222,7 +244,8 @@ class SQLAlchemyIngestDB:
             .where(models.Document.url == url)
             .where(models.Document.course_name == course_name)
         )
+        with self.get_session() as session:
+            result = session.execute(delete_stmt)
+            session.commit()
 
-        result = self.session.execute(delete_stmt)
-        self.session.commit()
         return result.rowcount  # Number of rows deleted

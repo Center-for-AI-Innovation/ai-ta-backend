@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import contextmanager
 from typing import Dict, List, TypedDict, Union, TypeVar, Generic
@@ -81,9 +82,10 @@ class SQLDatabase:
             db_uri = f"postgresql://{os.getenv('POSTGRES_USERNAME')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_ENDPOINT')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DATABASE')}"
 
         # Create engine and session
-        print("About to connect to DB from IngestSQL.py, with URI:", db_uri)
+        logging.info("About to connect to DB from IngestSQL.py.")
         self.engine = create_engine(db_uri, poolclass=NullPool)
         self.Session = sessionmaker(bind=self.engine)
+        logging.info("Successfully connected to DB from IngestSQL.py")
 
     @contextmanager
     def get_session(self):
