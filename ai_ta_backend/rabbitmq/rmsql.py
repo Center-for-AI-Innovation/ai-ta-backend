@@ -109,21 +109,18 @@ class SQLAlchemyIngestDB:
     def insert_document_in_progress(self, doc_progress: models.DocumentsInProgress):
         with self.get_session() as session:
             session.add(doc_progress)
-            session.commit()
             session.refresh(doc_progress)
 
-            return doc_progress
+            return doc_progress.to_dict()
 
     def insert_failed_document(self, failed_doc_payload: dict):
         with self.get_session() as session:
             try:
                 insert_stmt = insert(models.DocumentsFailed).values(failed_doc_payload)
                 session.execute(insert_stmt)
-                session.commit()
                 return True
             except SQLAlchemyError as e:
-                session.rollback()
-                print(f"Insertion failed: {e}")
+                logging.error(f"Insertion failed: {e}")
                 return False
 
     def delete_document_in_progress(self, beam_task_id: str):
@@ -134,10 +131,8 @@ class SQLAlchemyIngestDB:
                     delete(models.DocumentsInProgress)
                     .where(models.DocumentsInProgress.beam_task_id == beam_task_id))
                 session.execute(delete_stmt)
-                session.commit()
                 return True
             except SQLAlchemyError as e:
-                session.rollback()
                 logging.error(f"Deletion failed: {e}")
                 return False
 
@@ -146,10 +141,8 @@ class SQLAlchemyIngestDB:
             try:
                 insert_stmt = insert(models.Document).values(doc_payload)
                 session.execute(insert_stmt)
-                session.commit()
                 return True  # Insertion successful
             except SQLAlchemyError as e:
-                session.rollback()  # Rollback in case of error
                 logging.error(f"Insertion failed: {e}")
                 return False  # Insertion failed
 
@@ -167,12 +160,10 @@ class SQLAlchemyIngestDB:
                 result = session.execute(text(
                     "SELECT * FROM add_document_to_group_url(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
                                               params)
-                session.commit()
                 count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
                 return count
             except Exception as e:
-                print(f"Stored procedure execution failed: {e}")
-                session.rollback()
+                logging.error(f"Stored procedure execution failed: {e}")
                 return None, 0
 
     def add_document_to_group(self, contexts, groups):
@@ -188,13 +179,11 @@ class SQLAlchemyIngestDB:
                 result = session.execute(text(
                     "SELECT * FROM add_document_to_group(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
                                               params)
-                session.commit()
 
                 count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
                 return count
             except Exception as e:
-                print(f"Stored procedure execution failed: {e}")
-                session.rollback()
+                logging.error(f"Stored procedure execution failed: {e}")
                 return None, 0
 
     def get_like_docs_by_s3_path(self, course_name, original_filename):
@@ -234,7 +223,6 @@ class SQLAlchemyIngestDB:
 
         with self.get_session() as session:
             result = session.execute(delete_stmt)
-            session.commit()
 
         return result.rowcount  # Number of rows deleted
 
@@ -246,6 +234,5 @@ class SQLAlchemyIngestDB:
         )
         with self.get_session() as session:
             result = session.execute(delete_stmt)
-            session.commit()
 
         return result.rowcount  # Number of rows deleted

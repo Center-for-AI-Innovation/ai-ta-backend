@@ -66,8 +66,8 @@ class Queue:
             course_name=inputs['course_name']
         )
         new_doc = sql_session.insert_document_in_progress(doc_progress_payload)
-        logging.info("Inserted new in-progress job ID: " + new_doc.beam_task_id)
-        new_job_id = new_doc.beam_task_id
+        logging.info("Inserted new in-progress job ID: " + new_doc.get("beam_task_id"))
+        new_job_id = new_doc.get("beam_task_id")
 
         # RMQ message second
         message = {

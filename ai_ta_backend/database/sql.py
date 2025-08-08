@@ -162,7 +162,6 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(delete_stmt)
-            session.commit()
 
         return result.rowcount  # Number of rows deleted
 
@@ -175,7 +174,6 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(delete_stmt)
-            session.commit()
 
         return result.rowcount  # Number of rows deleted
 
@@ -301,11 +299,9 @@ class SQLDatabase:
             try:
                 insert_stmt = insert(models.Project).values(project_info)
                 session.execute(insert_stmt)
-                session.commit()
                 return True  # Insertion successful
             except SQLAlchemyError as e:
-                session.rollback()  # Rollback in case of error
-                print(f"Insertion failed: {e}")
+                logging.error(f"Insertion failed: {e}")
                 return False  # Insertion failed
 
     def getLLMConvo(self):
@@ -422,11 +418,9 @@ class SQLDatabase:
             try:
                 insert_stmt = insert(models.N8nWorkflows).values({"latest_workflow_id": id, "is_locked": True})
                 session.execute(insert_stmt)
-                session.commit()
                 return True  # Insertion successful
             except SQLAlchemyError as e:
-                session.rollback()  # Rollback in case of error
-                print(f"Insertion failed: {e}")
+                logging.error(f"Insertion failed: {e}")
                 return False  # Insertion failed
 
 
@@ -549,13 +543,13 @@ class SQLDatabase:
                 response = DatabaseResponse(data=results, count=len(results)).to_dict()
 
             if response["count"] <= 0:
-                print(f"No conversations found for course: {course_name} for duration {from_date} to {to_date}")
+                logging.error(f"No conversations found for course: {course_name} for duration {from_date} to {to_date}")
                 return [], 0
 
             return response["data"], response["count"]
 
         except Exception as e:
-            print(f"Error in getConversationsCreatedAtByCourse for {course_name}: {e}")
+            logging.error(f"Error in getConversationsCreatedAtByCourse for {course_name}: {e}")
             return [], 0
 
 
@@ -603,7 +597,7 @@ class SQLDatabase:
             return ProjectStats(**stats_typed)
 
         except Exception as e:
-            print(f"Error fetching project stats for {project_name}: {str(e)}")
+            logging.error(f"Error fetching project stats for {project_name}: {str(e)}")
             return ProjectStats(total_messages=0,
                                 total_conversations=0,
                                 unique_users=0,
