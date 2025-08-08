@@ -109,8 +109,12 @@ class SQLAlchemyIngestDB:
     def insert_document_in_progress(self, doc_progress: models.DocumentsInProgress):
         with self.get_session() as session:
             session.add(doc_progress)
-            session.refresh(doc_progress)
 
+            # Unlike session.commit(), session.flush() sends SQL to the database within the current transaction
+            # but doesn’t make changes permanent or visible to others.
+            session.flush()
+
+            session.refresh(doc_progress)
             return doc_progress.to_dict()
 
     def insert_failed_document(self, failed_doc_payload: dict):
