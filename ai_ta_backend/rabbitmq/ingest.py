@@ -64,7 +64,7 @@ class Ingest:
 
     def __init__(self):
         self.openai_api_key = os.getenv('OPENAI_API_KEY')
-        self.openai_api_base = os.getenv('EMBEDDING_API_BASE')
+        self.openai_api_base = os.getenv('EMBEDDING_API_BASE') + "/embeddings" if os.getenv('EMBEDDING_API_BASE') else None
         self.embedding_model = os.environ['EMBEDDING_MODEL']
         self.qdrant_url = os.getenv('QDRANT_URL')
         self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
