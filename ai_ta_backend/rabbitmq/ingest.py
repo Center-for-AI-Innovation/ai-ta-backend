@@ -89,7 +89,7 @@ class Ingest:
                 logging.info(f"Creating collection {self.qdrant_collection_name}")
                 self.qdrant_client.create_collection(
                     collection_name=self.qdrant_collection_name,
-                    vectors_config={"size": 768, "distance": "Cosine"}
+                    vectors_config={"size": 4096, "distance": "Cosine"}
                 )
             self.vectorstore = Qdrant(
                 client=self.qdrant_client,

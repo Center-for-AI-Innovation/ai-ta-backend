@@ -46,9 +46,10 @@ class RetrievalService:
     self.posthog = posthog
     self.thread_pool_executor = thread_pool_executor
     openai.api_key = os.environ["OPENAI_API_KEY"]
+    self.embedding_model = os.environ['EMBEDDING_MODEL']
 
     self.embeddings = OpenAIEmbeddings(
-        model='nomic-ai/nomic-embed-text-v2-moe',
+        model=self.embedding_model,
         openai_api_key=os.environ["OPENAI_API_KEY"],
         openai_api_base=os.environ["EMBEDDING_API_BASE"],
         # openai_api_key=os.environ["AZURE_OPENAI_KEY"],

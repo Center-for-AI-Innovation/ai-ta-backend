@@ -44,20 +44,27 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
+    - name: Set image tag (adaptive short commit hash)
+      id: set-tag
+      run: |
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        IMAGE_TAG="${SHORT_SHA}"
+        echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+        echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+        echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
     - name: Build, tag, and push image to Amazon ECR
       id: build-image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Build a docker container and push it to ECR
+        set -euo pipefail
+        echo "Building image with tag: $IMAGE_TAG"
         docker build -f Self-Hosted-Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        
-        # Also tag as latest
+        # Maintain latest tag
         docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-        
         echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
     - name: Download current task definition
@@ -65,7 +72,6 @@ jobs:
         aws ecs describe-task-definition \
           --task-definition ${{ env.ECS_TASK_DEFINITION }} \
           --query taskDefinition > task-definition-raw.json
-        
         # Remove unsupported fields that cause compatibility issues
         cat task-definition-raw.json | jq 'del(.registeredAt, .registeredBy, .taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .enableFaultInjection)' > task-definition.json
 
@@ -103,28 +109,34 @@ jobs:
       id: login-ecr-worker
       uses: aws-actions/amazon-ecr-login@v2
 
+    - name: Set worker image tag (adaptive short commit hash)
+      id: set-worker-tag
+      run: |
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        WORKER_IMAGE_TAG="${SHORT_SHA}"
+        echo "WORKER_IMAGE_TAG=${WORKER_IMAGE_TAG}" >> $GITHUB_ENV
+        echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+        echo "image_tag=${WORKER_IMAGE_TAG}" >> $GITHUB_OUTPUT
+
     - name: Build, tag, and push worker image to Amazon ECR
       id: build-worker-image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr-worker.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Build ingest worker container with rabbitmq directory as build context
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG ai_ta_backend/rabbitmq/
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG
-        
-        # Also tag as latest
-        docker tag $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest
+        set -euo pipefail
+        echo "Building worker image with tag: $WORKER_IMAGE_TAG"
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$WORKER_IMAGE_TAG ai_ta_backend/rabbitmq/
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$WORKER_IMAGE_TAG
+        # Maintain latest tag
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$WORKER_IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest
         docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest
-        
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$WORKER_IMAGE_TAG" >> $GITHUB_OUTPUT
 
     - name: Download current worker task definition
       run: |
         aws ecs describe-task-definition \
           --task-definition ${{ env.ECS_TASK_DEFINITION_WORKER }} \
           --query taskDefinition > worker-task-definition-raw.json
-        
         # Remove unsupported fields that cause compatibility issues
         cat worker-task-definition-raw.json | jq 'del(.registeredAt, .registeredBy, .taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .enableFaultInjection)' > worker-task-definition.json
 
