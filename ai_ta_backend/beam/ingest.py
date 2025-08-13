@@ -6,10 +6,13 @@ Use CAII gmail to auth.
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 import beam
-from beam import BotContext  # To obtain task_id
-from beam import QueueDepthAutoscaler  # RequestLatencyAutoscaler,
+try:
+  from beam import App, QueueDepthAutoscaler, Runtime  # RequestLatencyAutoscaler,
+except ImportError:
+  # Fallback for local development when beam isn't installed
+  App = QueueDepthAutoscaler = Runtime = None
 
-if beam.env.is_remote():
+try:
   # Only import these in the Cloud container, not when building the container.
   import asyncio
   import inspect
@@ -67,6 +70,9 @@ if beam.env.is_remote():
       # We recommend adjusting this value in production.
       profiles_sample_rate=1.0,
       enable_tracing=True)
+except ImportError:
+  # Running locally without dependencies
+  pass
 
 requirements = [
     "openai<1.0",
@@ -95,14 +101,20 @@ requirements = [
     "pdfplumber==0.11.0",  # PDF OCR, better performance than Fitz/PyMuPDF in my Gies PDF testing.
 ]
 
-image = (beam.Image(
-    python_version="python3.10",
-    commands=(["apt-get update && apt-get install -y ffmpeg tesseract-ocr"]),
-    python_packages=requirements,
-))
+if hasattr(beam, 'Image'):
+  image = beam.Image(
+      python_version="python3.10",
+      commands=["apt-get update && apt-get install -y ffmpeg tesseract-ocr"],
+      python_packages=requirements,
+  )
+else:
+  image = None
 
 # autoscaler = RequestLatencyAutoscaler(desired_latency=30, max_replicas=2)
-autoscaler = QueueDepthAutoscaler(tasks_per_container=300, max_containers=3)
+if QueueDepthAutoscaler:
+  autoscaler = QueueDepthAutoscaler(tasks_per_container=300, max_containers=3)
+else:
+  autoscaler = None
 
 ourSecrets = [
     "SUPABASE_URL",
@@ -117,8 +129,9 @@ ourSecrets = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "POSTHOG_API_KEY",
-    "CROPWIZARD_QDRANT_URL",
-    "CROPWIZARD_QDRANT_API_KEY",
+    "NEW_CROPWIZARD_QDRANT_URL",
+    "NEW_CROPWIZARD_QDRANT_KEY",
+    "NEW_CROPWIZARD_QDRANT_COLLECTION",
     "CROPWIZARD_OPENAI_KEY",
     "CROPWIZARD_SUPABASE_URL",
     "CROPWIZARD_SUPABASE_SECRET",
@@ -142,10 +155,10 @@ def loader():
   )
 
   cropwizard_qdrant_client = QdrantClient(
-      url=os.getenv('CROPWIZARD_QDRANT_URL'),
+      url=os.getenv('NEW_CROPWIZARD_QDRANT_URL'),
       port=443,
       https=True,
-      api_key=os.getenv('QDRANT_API_KEY'),
+      api_key=os.getenv('NEW_CROPWIZARD_QDRANT_KEY'),
   )
 
   vectorstore = Qdrant(
@@ -153,7 +166,7 @@ def loader():
       collection_name=os.environ['QDRANT_COLLECTION_NAME'],
       embeddings=OpenAIEmbeddings(
           openai_api_type=os.environ['OPENAI_API_TYPE'],  # "openai" or "azure"
-          api_key=os.getenv('VLADS_OPENAI_KEY')))
+          openai_api_key=os.getenv('VLADS_OPENAI_KEY')))
 
   # S3
   s3_client = boto3.client(
@@ -186,30 +199,47 @@ def loader():
   return qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog
 
 
+# Create the Beam app
+if App and Runtime:
+  app = App(
+      "ingest",
+      runtime=Runtime(
+          cpu=1,
+          memory="3Gi",
+          image=image,
+          secrets=ourSecrets,
+      ),
+  )
+else:
+  app = None
+
 # Triggers determine how your app is deployed
-# @app.rest_api(
-@beam.task_queue(
-    name='ingest_task_queue',
-    workers=4,
-    cpu=1,
-    memory=3_072,
-    max_pending_tasks=15_000,
-    # DEPRICATED, not needed -- callback_url='https://uiuc.chat/api/UIUC-api/ingestTaskCallback',
-    timeout=60 * 25,
-    retries=1,
-    secrets=ourSecrets,
-    on_start=loader,
-    image=image,
-    autoscaler=autoscaler)
-def ingest(context, **inputs: Dict[str | List[str], Any]):
-  qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog = context.on_start_value
-  course_name: List[str] | str = inputs.get('course_name', '')
-  s3_paths: List[str] | str = inputs.get('s3_paths', '')
-  url: List[str] | str | None = inputs.get('url', None)
-  base_url: List[str] | str | None = inputs.get('base_url', None)
-  readable_filename: List[str] | str = inputs.get('readable_filename', '')
-  content: str | List[str] | None = inputs.get('content', None)
-  doc_groups: List[str] | str = inputs.get('groups', [])
+def _ingest_decorator(func):
+    if app and hasattr(app, 'task_queue'):
+        return app.task_queue(
+            max_pending_tasks=15_000,
+            # DEPRICATED, not needed -- callback_url='https://uiuc.chat/api/UIUC-api/ingestTaskCallback',
+            timeout=60 * 25,
+            max_retries=1,
+            loader=loader,
+            autoscaler=autoscaler)(func)
+    else:
+        return func
+
+@_ingest_decorator
+def ingest(context=None, **inputs: Dict[str, Any]):
+  if context and hasattr(context, 'on_start_value'):
+    qdrant_client, cropwizard_qdrant_client, vectorstore, s3_client, supabase_client, cropwizard_supabase_client, posthog = context.on_start_value
+  else:
+    # For local development, would need to initialize these manually
+    return {"failure_ingest": "Running in local mode - dependencies not initialized"}
+  course_name = inputs.get('course_name', '')
+  s3_paths = inputs.get('s3_paths', '')
+  url = inputs.get('url', None)
+  base_url = inputs.get('base_url', None)
+  readable_filename = inputs.get('readable_filename', '')
+  content = inputs.get('content', None)
+  doc_groups = inputs.get('groups', [])
 
   print(
       f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
@@ -256,7 +286,7 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
 
   # Cleanup: Remove from docs_in_progress table
   try:
-    client = get_client_for_course(course_name, supabase_client, cropwizard_supabase_client)
+    client = get_client_for_course(str(course_name), supabase_client, cropwizard_supabase_client)
     if base_url:
       print('Removing URL-based document from in_progress')
       client.table('documents_in_progress').delete()\
@@ -273,7 +303,7 @@ def ingest(context, **inputs: Dict[str | List[str], Any]):
     print(f"Error cleaning up documents_in_progress: {e}")
     sentry_sdk.capture_exception(e)
 
-  if success_fail_dict.get('success_ingest'):
+  if isinstance(success_fail_dict, dict) and success_fail_dict.get('success_ingest'):
     posthog.capture('distinct_id_of_the_user',
                     event='ingest_success',
                     properties={
@@ -500,7 +530,9 @@ class Ingest():
 
       return success_status
     except Exception as e:
-      err = f"❌❌ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in /ingest: `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )  # type: ignore
       sentry_sdk.capture_exception(e)
 
@@ -556,7 +588,9 @@ class Ingest():
       success_or_failure['success_ingest'] = url
       return success_or_failure
     except Exception as e:
-      err = f"❌❌ Error in (web text ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (web text ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )  # type: ignore
       print(err)
       sentry_sdk.capture_exception(e)
@@ -594,7 +628,9 @@ class Ingest():
       return success_or_failure
 
     except Exception as e:
-      err = f"❌❌ Error in (Python ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (Python ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -626,7 +662,9 @@ class Ingest():
         success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return success_or_failure
     except Exception as e:
-      err = f"❌❌ Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (VTT ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -767,7 +805,9 @@ class Ingest():
       self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (VIDEO ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -796,7 +836,9 @@ class Ingest():
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (DOCX ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -804,7 +846,10 @@ class Ingest():
 
   def _ingest_single_srt(self, s3_path: str, course_name: str, **kwargs) -> str:
     try:
-      import pysrt
+      try:
+        import pysrt
+      except ImportError:
+        return "Error: pysrt library not available"
 
       # NOTE: slightly different method for .txt files, no need for download. It's part of the 'body'
       response = self.s3_client.get_object(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path)
@@ -832,7 +877,9 @@ class Ingest():
       self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
       return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (SRT ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -863,7 +910,9 @@ class Ingest():
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (Excel/xlsx ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -900,7 +949,9 @@ class Ingest():
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (png/jpg ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -930,7 +981,9 @@ class Ingest():
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (CSV ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -969,7 +1022,7 @@ class Ingest():
               pix = page.get_pixmap(matrix=mat)
               pix.save(first_page_png)  # store image as a PNG
 
-              s3_upload_path = str(Path(s3_path)).rsplit('.pdf')[0] + "-pg1-thumb.png"
+              s3_upload_path = s3_path.rsplit('.pdf')[0] + "-pg1-thumb.png"
               first_page_png.seek(0)  # Seek the file pointer back to the beginning
               with open(first_page_png.name, 'rb') as f:
                 print("Uploading image png to S3")
@@ -1002,7 +1055,9 @@ class Ingest():
 
         return success_or_failure
     except Exception as e:
-      err = f"❌❌ Error in PDF ingest (no OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in PDF ingest (no OCR): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )  # type: ignore
       print(err)
       sentry_sdk.capture_exception(e)
@@ -1058,7 +1113,9 @@ class Ingest():
       success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, **kwargs)
       return success_or_failure
     except Exception as e:
-      err = f"❌❌ Error in PDF ingest (with OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in PDF ingest (with OCR): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -1096,7 +1153,9 @@ class Ingest():
       success_or_failure = self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       return success_or_failure
     except Exception as e:
-      err = f"❌❌ Error in (TXT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (TXT ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -1130,7 +1189,9 @@ class Ingest():
         self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
         return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (PPTX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (PPTX ingest): `{function_name}`: {e}\nTraceback:\n", traceback.format_exc(
       )
       print(err)
       sentry_sdk.capture_exception(e)
@@ -1172,7 +1233,9 @@ class Ingest():
         self.split_and_upload(texts=[texts], metadatas=[metadatas])
       return "Success"
     except Exception as e:
-      err = f"❌❌ Error in (GITHUB ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n{traceback.format_exc()}"
+      frame = inspect.currentframe()
+      function_name = frame.f_code.co_name if frame else "unknown_function"
+      err = f"❌❌ Error in (GITHUB ingest): `{function_name}`: {e}\nTraceback:\n{traceback.format_exc()}"
       print(err)
       sentry_sdk.capture_exception(e)
       return err
@@ -1282,7 +1345,7 @@ class Ingest():
         if metadatas[0].get('course_name') == 'cropwizard-1.5':
           print("Uploading to cropwizard collection...")
           self.cropwizard_qdrant_client.upsert(
-              collection_name='cropwizard',
+              collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
               points=vectors,
           )
         else:
@@ -1323,7 +1386,8 @@ class Ingest():
       document_size_mb = len(json.dumps(document).encode('utf-8')) / (1024 * 1024)
       print(f"Document size: {document_size_mb:.2f} MB")
 
-      self.set_client_for_course(metadatas[0].get('course_name'))
+      course_name = metadatas[0].get('course_name') or ''
+      self.set_client_for_course(course_name)
       response = self.current_client.table(
           os.getenv('REFACTORED_MATERIALS_SUPABASE_TABLE')).insert(document).execute()  # type: ignore
 
@@ -1505,7 +1569,7 @@ class Ingest():
           if course_name == 'cropwizard-1.5':
             print("Deleting from cropwizard collection...")
             self.cropwizard_qdrant_client.delete(
-                collection_name='cropwizard',
+                collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
                 points_selector=models.Filter(must=[
                     models.FieldCondition(
                         key="s3_path",

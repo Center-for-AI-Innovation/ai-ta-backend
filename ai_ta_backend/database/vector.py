@@ -24,7 +24,7 @@ class VectorDatabase():
     self.qdrant_client = QdrantClient(
         url=os.environ['QDRANT_URL'],
         api_key=os.environ['QDRANT_API_KEY'],
-        port=os.getenv('QDRANT_PORT') if os.getenv('QDRANT_PORT') else None,
+        port=int(port_str) if (port_str := os.getenv('QDRANT_PORT')) else None,
         timeout=20,  # default is 5 seconds. Getting timeout errors w/ document groups.
     )
 
@@ -35,10 +35,10 @@ class VectorDatabase():
 
     try:
       # No major uptime guarantees
-      self.cropwizard_qdrant_client = QdrantClient(url="https://cropwizard-qdrant.ncsa.ai",
+      self.cropwizard_qdrant_client = QdrantClient(url=os.environ['NEW_CROPWIZARD_QDRANT_URL'],
                                                    port=443,
                                                    https=True,
-                                                   api_key=os.environ['QDRANT_API_KEY'])
+                                                   api_key=os.environ['NEW_CROPWIZARD_QDRANT_KEY'])
     except Exception as e:
       print(f"Error in cropwizard_qdrant_client: {e}")
       self.cropwizard_qdrant_client = None
@@ -69,10 +69,13 @@ class VectorDatabase():
     """
     Search the vector database for a given query.
     """
+    if not self.cropwizard_qdrant_client:
+      return []
+    
     top_n = 120
 
     search_results = self.cropwizard_qdrant_client.search(
-        collection_name='cropwizard',
+        collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
         query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
         with_vectors=False,
         query_vector=user_query_embedding,
@@ -99,12 +102,13 @@ class VectorDatabase():
     try:
       updated_results = []
       for result in search_results:
-        result.payload['page_content'] = result.payload['text']
-        result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
-        result.payload['course_name'] = course_name
-        result.payload['url'] = result.payload['uspto_url']
-        result.payload['s3_path'] = result.payload['s3_path']
-        updated_results.append(result)
+        if result.payload:
+          result.payload['page_content'] = result.payload['text']
+          result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
+          result.payload['course_name'] = course_name
+          result.payload['url'] = result.payload['uspto_url']
+          result.payload['s3_path'] = result.payload['s3_path']
+          updated_results.append(result)
       return updated_results
 
     except Exception as e:
@@ -128,12 +132,13 @@ class VectorDatabase():
     try:
       updated_results = []
       for result in search_results:
-        result.payload['page_content'] = result.payload['page_content']
-        result.payload['readable_filename'] = result.payload['readable_filename']
-        result.payload['s3_path'] = result.payload['s3_path']
-        result.payload['pagenumber'] = result.payload['pagenumber']
-        result.payload['course_name'] = course_name
-        updated_results.append(result)
+        if result.payload:
+          result.payload['page_content'] = result.payload['page_content']
+          result.payload['readable_filename'] = result.payload['readable_filename']
+          result.payload['s3_path'] = result.payload['s3_path']
+          result.payload['pagenumber'] = result.payload['pagenumber']
+          result.payload['course_name'] = course_name
+          updated_results.append(result)
       return updated_results
 
     except Exception as e:
@@ -406,7 +411,8 @@ class VectorDatabase():
 
     # If specific doc_groups are specified
     if doc_groups and 'All Documents' not in doc_groups:
-      own_course_condition.must.append(FieldCondition(key='doc_groups', match=MatchAny(any=doc_groups)))
+      if own_course_condition.must:
+        own_course_condition.must.append(FieldCondition(key='doc_groups', match=MatchAny(any=doc_groups)))
 
     # Add the own_course_condition to should_conditions
     should_conditions.append(own_course_condition)
@@ -436,8 +442,11 @@ class VectorDatabase():
     """
     Delete data from the vector database.
     """
+    if not self.cropwizard_qdrant_client:
+      return None
+    
     return self.cropwizard_qdrant_client.delete(
-        collection_name='cropwizard',
+        collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
         wait=True,
         points_selector=models.Filter(must=[
             models.FieldCondition(
