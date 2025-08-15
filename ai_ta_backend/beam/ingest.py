@@ -42,8 +42,6 @@ if beam.env.is_remote():
       GitLoader,
       PythonLoader,
       TextLoader,
-  )
-  from langchain_community.document_loaders import (
       UnstructuredExcelLoader,
       UnstructuredPowerPointLoader,
   )
@@ -90,9 +88,8 @@ requirements = [
     "openpyxl==3.1.2",  # excel
     "networkx==3.2.1",  # unused part of excel partitioning :(
     "python-pptx==0.6.23",
-    "unstructured==0.18.9",
-    "langchain-community",
-    "msoffcrypto-tool",
+    "unstructured==0.18.11",
+    "msoffcrypto-tool>=5.1.1",
     "GitPython==3.1.40",
     "beautifulsoup4==4.12.2",
     "sentry-sdk==1.39.1",
@@ -421,6 +418,7 @@ class Ingest():
         file_extension = Path(s3_path).suffix
         with NamedTemporaryFile(suffix=file_extension) as tmpfile:
           self.s3_client.download_fileobj(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path, Fileobj=tmpfile)
+          tmpfile.flush(); tmpfile.seek(0)
           mime_type = str(mimetypes.guess_type(tmpfile.name, strict=False)[0])
           mime_category = mime_type.split('/')[0] if '/' in mime_type else mime_type
 
@@ -574,6 +572,7 @@ class Ingest():
       with NamedTemporaryFile() as tmpfile:
         # download from S3 into vtt_tmpfile
         self.s3_client.download_fileobj(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path, Fileobj=tmpfile)
+        tmpfile.flush(); tmpfile.seek(0)
         loader = TextLoader(tmpfile.name)
         documents = loader.load()
         texts = [doc.page_content for doc in documents]
@@ -650,6 +649,7 @@ class Ingest():
       with NamedTemporaryFile(suffix=file_ext) as video_tmpfile:
         # download from S3 into an video tmpfile
         self.s3_client.download_fileobj(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path, Fileobj=video_tmpfile)
+        video_tmpfile.flush(); video_tmpfile.seek(0)
 
         # try with original file first
         try:
@@ -743,6 +743,7 @@ class Ingest():
     try:
       with NamedTemporaryFile() as tmpfile:
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=tmpfile)
+        tmpfile.flush(); tmpfile.seek(0)
 
         loader = Docx2txtLoader(tmpfile.name)
         documents = loader.load()
@@ -809,6 +810,7 @@ class Ingest():
       with NamedTemporaryFile() as tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=tmpfile)
+        tmpfile.flush(); tmpfile.seek(0)
 
         loader = UnstructuredExcelLoader(tmpfile.name, mode="elements")
         # loader = SRTLoader(tmpfile.name)
@@ -840,6 +842,7 @@ class Ingest():
       with NamedTemporaryFile() as tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=tmpfile)
+        tmpfile.flush(); tmpfile.seek(0)
         """
         # Unstructured image loader makes the install too large (700MB --> 6GB. 3min -> 12 min build times). AND nobody uses it.
         # The "hi_res" strategy will identify the layout of the document using detectron2. "ocr_only" uses pdfminer.six. https://unstructured-io.github.io/unstructured/core/partition.html#partition-image
@@ -877,6 +880,7 @@ class Ingest():
       with NamedTemporaryFile() as tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=tmpfile)
+        tmpfile.flush(); tmpfile.seek(0)
 
         loader = CSVLoader(file_path=tmpfile.name)
         documents = loader.load()
@@ -914,6 +918,7 @@ class Ingest():
       with NamedTemporaryFile() as pdf_tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=pdf_tmpfile)
+        pdf_tmpfile.flush(); pdf_tmpfile.seek(0)
         ### READ OCR of PDF
         try:
           doc = fitz.open(pdf_tmpfile.name)  # type: ignore
@@ -988,6 +993,7 @@ class Ingest():
       with NamedTemporaryFile() as pdf_tmpfile:
         # download from S3 into pdf_tmpfile
         self.s3_client.download_fileobj(Bucket=os.getenv('S3_BUCKET_NAME'), Key=s3_path, Fileobj=pdf_tmpfile)
+        pdf_tmpfile.flush(); pdf_tmpfile.seek(0)
 
         with pdfplumber.open(pdf_tmpfile.name) as pdf:
           # for page in :
@@ -1077,8 +1083,7 @@ class Ingest():
         # download from S3 into pdf_tmpfile
         #print("in ingest PPTX")
         self.s3_client.download_fileobj(Bucket=os.environ['S3_BUCKET_NAME'], Key=s3_path, Fileobj=tmpfile)
-        tmpfile.flush()  # Ensure all data is written to disk
-        tmpfile.seek(0)  # Reset file pointer to beginning
+        tmpfile.flush(); tmpfile.seek(0)
 
         loader = UnstructuredPowerPointLoader(tmpfile.name)
         documents = loader.load()
