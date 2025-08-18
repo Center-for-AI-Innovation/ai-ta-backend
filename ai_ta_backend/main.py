@@ -588,65 +588,6 @@ def get_conversation_stats(service: RetrievalService) -> Response:
   return response
 
 
-@app.route('/unlock_workflow', methods=['POST'])
-def unlock_workflow(service: WorkflowService) -> Response:
-  """
-  Emergency endpoint to manually unlock stuck workflows.
-  """
-  import logging
-  unlock_logger = logging.getLogger('unlock_workflow')
-  
-  try:
-    request_data = request.get_json() or {}
-    api_key = request_data.get('api_key', '')
-    workflow_id = request_data.get('workflow_id', '')
-    
-    unlock_logger.info(f"[UNLOCK] 🔓 Manual unlock request for workflow ID: {workflow_id}")
-    
-    if not api_key:
-      unlock_logger.error("[UNLOCK] ❌ Missing API key")
-      abort(400, description="Missing N8N API_KEY")
-    
-    if not workflow_id:
-      unlock_logger.error("[UNLOCK] ❌ Missing workflow_id") 
-      abort(400, description="Missing workflow_id parameter")
-    
-    # Try to unlock the workflow
-    service.sqlDb.unlockWorkflow(int(workflow_id))
-    unlock_logger.info(f"[UNLOCK] ✅ Successfully unlocked workflow ID: {workflow_id}")
-    
-    # Check current executions to verify
-    try:
-      executions = service.get_executions(5, api_key=api_key, pagination=False)
-      if executions:
-        unlock_logger.info(f"[UNLOCK] 📋 Current executions after unlock:")
-        for i, exec_item in enumerate(executions[:3]):
-          exec_id = exec_item.get('id', 'unknown')
-          exec_status = exec_item.get('status', 'unknown')
-          unlock_logger.info(f"[UNLOCK]   #{i+1}: ID={exec_id}, Status={exec_status}")
-    except Exception as e:
-      unlock_logger.warning(f"[UNLOCK] ⚠️ Could not check executions after unlock: {e}")
-    
-    response_data = jsonify({
-      "success": True,
-      "message": f"Workflow {workflow_id} unlocked successfully",
-      "workflow_id": workflow_id
-    })
-    response_data.headers.add('Access-Control-Allow-Origin', '*')
-    return response_data
-    
-  except Exception as e:
-    unlock_logger.error(f"[UNLOCK] 💥 Failed to unlock workflow: {str(e)}")
-    response = jsonify({
-      "success": False,
-      "error": str(e),
-      "message": f"Failed to unlock workflow: {e}"
-    })
-    response.status_code = 500
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    return response
-
-
 @app.route('/run_flow', methods=['POST'])
 def run_flow(service: WorkflowService) -> Response:
   """

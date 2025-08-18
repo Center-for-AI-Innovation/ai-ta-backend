@@ -439,7 +439,6 @@ class WorkflowService:
       id = self.latest_execution(api_key)
       execution_id = id
       workflow_logger.info(f"[WORKFLOW] 🆔 Generated execution ID: {id}")
-      workflow_logger.info(f"[WORKFLOW] 🏷️ Workflow name: '{name}'")
 
       # Lock the workflow with enhanced logging
       workflow_logger.info(f"[WORKFLOW-LOCK] 🔒 Attempting to lock workflow ID: {id}")
@@ -464,18 +463,8 @@ class WorkflowService:
           # Check for circuit breaker - prevent infinite loops
           if retry_count > 20:  # Circuit breaker at 20 attempts
             workflow_logger.error(f"[WORKFLOW-LOCK] 🚨 Circuit breaker triggered after {retry_count} attempts")
-            workflow_logger.error(f"[WORKFLOW-LOCK] 🔍 Attempting to force-unlock stale lock for ID: {id}")
-            
-            # Try to force-unlock the current ID
-            try:
-              self.sqlDb.unlockWorkflow(id)
-              workflow_logger.info(f"[WORKFLOW-LOCK] 🔓 Force-unlocked workflow ID: {id}")
-              time.sleep(2)  # Brief pause after force unlock
-            except Exception as unlock_error:
-              workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Failed to force-unlock ID {id}: {unlock_error}")
-            
+            workflow_logger.error(f"[WORKFLOW-LOCK] 🔍 Generating new execution ID to break deadlock")
             # Generate a completely new ID to break potential deadlock
-            workflow_logger.error(f"[WORKFLOW-LOCK] 🔄 Generating new execution ID to break deadlock")
             id = self.latest_execution(api_key)
             workflow_logger.info(f"[WORKFLOW-LOCK] 🆔 New execution ID for retry: {id}")
           else:
@@ -498,21 +487,6 @@ class WorkflowService:
           # Log progress every 10 attempts
           if retry_count % 10 == 0:
             workflow_logger.warning(f"[WORKFLOW-LOCK] ⏰ Still retrying after {retry_count} attempts ({elapsed_time:.1f}s elapsed)")
-            
-            # Try to get information about what's causing the lock
-            try:
-              recent_executions = self.get_executions(5, api_key=api_key, pagination=False)
-              if recent_executions:
-                workflow_logger.info(f"[WORKFLOW-LOCK] 🔍 Recent executions for debugging:")
-                for i, exec_item in enumerate(recent_executions[:3]):
-                  exec_id = exec_item.get('id', 'unknown')
-                  exec_status = exec_item.get('status', 'unknown')
-                  exec_workflow = exec_item.get('workflowData', {}).get('name', 'unknown')
-                  workflow_logger.info(f"[WORKFLOW-LOCK]   #{i+1}: ID={exec_id}, Status={exec_status}, Workflow={exec_workflow}")
-                  if str(exec_id) == str(id):
-                    workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ FOUND MATCH: Our target ID {id} already exists with status {exec_status}!")
-            except Exception as debug_error:
-              workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Debug query failed: {debug_error}")
             
         workflow_logger.info(f"[WORKFLOW-LOCK] 🔒 Final lock status - ID: {id}, Name: '{name}'")
 
