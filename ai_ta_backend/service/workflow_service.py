@@ -447,125 +447,74 @@ class WorkflowService:
       
       locked = self.sqlDb.check_and_lock_flow(id)
       workflow_logger.info(f"[WORKFLOW-LOCK] 📊 Initial lock response: '{locked.data}'")
-      
-      # TEMPORARY BYPASS: Skip locking if it's consistently failing
-      # This addresses the issue where the database lock is preventing all executions
-      bypass_locking = os.getenv('BYPASS_WORKFLOW_LOCKING', 'false').lower() == 'true'
-      
-      if bypass_locking:
-        workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ BYPASSING LOCK MECHANISM - Environment variable BYPASS_WORKFLOW_LOCKING=true")
-        workflow_logger.info(f"[WORKFLOW-LOCK] 🚀 Proceeding without database lock for ID: {id}")
-        # Skip to execution - flow continues below
-        pass
-      elif locked.data == 'Workflow updated':
+
+      if locked.data == 'Workflow updated':
         workflow_logger.info(f"[WORKFLOW-LOCK] ✅ Successfully locked workflow - ID: {id}, Name: '{name}'")
-        # Flow continues to execution
-        pass
       else:
         workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ Workflow already locked, entering retry loop - Name: '{name}'")
+        start_time = time.time()
+        timeout = 600  # Increased timeout for long-running workflows
+        retry_count = 0
         
-        # Before retrying, try to unlock any completed/stale executions
-        workflow_logger.info(f"[WORKFLOW-LOCK] 🧹 Attempting to clean up stale locks before retrying")
-        try:
-          recent_executions = self.get_executions(10, api_key=api_key, pagination=False)
-          if recent_executions:
-            unlocked_count = 0
-            for exec_item in recent_executions:
-              exec_id = exec_item.get('id', '')
-              exec_status = exec_item.get('status', '').lower()
-              exec_stopped = exec_item.get('stoppedAt', '')
-              
-              # Unlock executions that are completed/failed/unknown with stopped time
-              if exec_stopped and exec_status in ['unknown', 'success', 'error', 'failed', 'completed']:
-                try:
-                  self.sqlDb.unlockWorkflow(int(exec_id))
-                  unlocked_count += 1
-                  workflow_logger.info(f"[WORKFLOW-LOCK] 🔓 Unlocked stale execution: ID={exec_id}, Status={exec_status}")
-                except Exception as unlock_err:
-                  workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ Failed to unlock {exec_id}: {unlock_err}")
-            
-            workflow_logger.info(f"[WORKFLOW-LOCK] 🧹 Cleanup complete: unlocked {unlocked_count} stale executions")
-            
-            if unlocked_count > 0:
-              # Try locking again after cleanup
-              time.sleep(1)
-              locked = self.sqlDb.check_and_lock_flow(id)
-              workflow_logger.info(f"[WORKFLOW-LOCK] 🔄 Post-cleanup lock attempt: '{locked.data}'")
-              
-              if locked.data == 'Workflow updated':
-                workflow_logger.info(f"[WORKFLOW-LOCK] ✅ Lock acquired after cleanup!")
-                # Continue to execution - break out of this else block
-              else:
-                workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ Still locked after cleanup, proceeding to retry loop")
-                # Continue to retry logic below
-        except Exception as cleanup_error:
-          workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Cleanup failed: {cleanup_error}")
-        
-        # Only enter retry loop if we don't have a lock after cleanup
-        if locked.data != 'Workflow updated':
-          start_time = time.time()
-          timeout = 600  # Increased timeout for long-running workflows
-          retry_count = 0
+        while locked.data == 'Workflow is locked' or locked.data == 'id already exists':
+          retry_count += 1
+          workflow_logger.info(f"[WORKFLOW-LOCK] 🔄 Retry attempt #{retry_count} - waiting for workflow unlock")
+          workflow_logger.info(f"[WORKFLOW-LOCK] 📊 Current lock status: '{locked.data}'")
           
-          while locked.data == 'Workflow is locked' or locked.data == 'id already exists':
-            retry_count += 1
-            workflow_logger.info(f"[WORKFLOW-LOCK] 🔄 Retry attempt #{retry_count} - waiting for workflow unlock")
-            workflow_logger.info(f"[WORKFLOW-LOCK] 📊 Current lock status: '{locked.data}'")
+          # Check for circuit breaker - prevent infinite loops
+          if retry_count > 20:  # Circuit breaker at 20 attempts
+            workflow_logger.error(f"[WORKFLOW-LOCK] 🚨 Circuit breaker triggered after {retry_count} attempts")
+            workflow_logger.error(f"[WORKFLOW-LOCK] 🔍 Attempting to force-unlock stale lock for ID: {id}")
             
-            # Check for circuit breaker - prevent infinite loops
-            if retry_count > 20:  # Circuit breaker at 20 attempts
-              workflow_logger.error(f"[WORKFLOW-LOCK] 🚨 Circuit breaker triggered after {retry_count} attempts")
-              workflow_logger.error(f"[WORKFLOW-LOCK] 🔍 Attempting to force-unlock stale lock for ID: {id}")
-              
-              # Try to force-unlock the current ID
-              try:
-                self.sqlDb.unlockWorkflow(id)
-                workflow_logger.info(f"[WORKFLOW-LOCK] 🔓 Force-unlocked workflow ID: {id}")
-                time.sleep(2)  # Brief pause after force unlock
-              except Exception as unlock_error:
-                workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Failed to force-unlock ID {id}: {unlock_error}")
-              
-              # Generate a completely new ID to break potential deadlock
-              workflow_logger.error(f"[WORKFLOW-LOCK] 🔄 Generating new execution ID to break deadlock")
-              id = self.latest_execution(api_key)
-              workflow_logger.info(f"[WORKFLOW-LOCK] 🆔 New execution ID for retry: {id}")
-            else:
-              # For first 20 attempts, just wait and retry with same ID
-              time.sleep(min(2 + (retry_count * 0.5), 10))  # Exponential backoff, max 10s
+            # Try to force-unlock the current ID
+            try:
+              self.sqlDb.unlockWorkflow(id)
+              workflow_logger.info(f"[WORKFLOW-LOCK] 🔓 Force-unlocked workflow ID: {id}")
+              time.sleep(2)  # Brief pause after force unlock
+            except Exception as unlock_error:
+              workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Failed to force-unlock ID {id}: {unlock_error}")
             
-            locked = self.sqlDb.check_and_lock_flow(id)
+            # Generate a completely new ID to break potential deadlock
+            workflow_logger.error(f"[WORKFLOW-LOCK] 🔄 Generating new execution ID to break deadlock")
+            id = self.latest_execution(api_key)
+            workflow_logger.info(f"[WORKFLOW-LOCK] 🆔 New execution ID for retry: {id}")
+          else:
+            # For first 20 attempts, just wait and retry with same ID
+            time.sleep(min(2 + (retry_count * 0.5), 10))  # Exponential backoff, max 10s
           
-            if locked.data == 'Workflow updated':
-              workflow_logger.info(f"[WORKFLOW-LOCK] ✅ Lock acquired after {retry_count} retries")
-              break
-              
-            # Check timeout
-            elapsed_time = time.time() - start_time
-            if elapsed_time > timeout:
-              workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Lock timeout reached after {timeout}s and {retry_count} retries")
-              workflow_logger.error(f"[WORKFLOW-LOCK] 💀 Final lock status: '{locked.data}'")
-              return None
+          locked = self.sqlDb.check_and_lock_flow(id)
           
-            # Log progress every 10 attempts
-            if retry_count % 10 == 0:
-              workflow_logger.warning(f"[WORKFLOW-LOCK] ⏰ Still retrying after {retry_count} attempts ({elapsed_time:.1f}s elapsed)")
-              
-              # Try to get information about what's causing the lock
-              try:
-                recent_executions = self.get_executions(5, api_key=api_key, pagination=False)
-                if recent_executions:
-                  workflow_logger.info(f"[WORKFLOW-LOCK] 🔍 Recent executions for debugging:")
-                  for i, exec_item in enumerate(recent_executions[:3]):
-                    exec_id = exec_item.get('id', 'unknown')
-                    exec_status = exec_item.get('status', 'unknown')
-                    exec_workflow = exec_item.get('workflowData', {}).get('name', 'unknown')
-                    workflow_logger.info(f"[WORKFLOW-LOCK]   #{i+1}: ID={exec_id}, Status={exec_status}, Workflow={exec_workflow}")
-                    if str(exec_id) == str(id):
-                      workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ FOUND MATCH: Our target ID {id} already exists with status {exec_status}!")
-              except Exception as debug_error:
-                workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Debug query failed: {debug_error}")
-              
-      workflow_logger.info(f"[WORKFLOW-LOCK] 🔒 Final lock status - ID: {id}, Name: '{name}'")
+          if locked.data == 'Workflow updated':
+            workflow_logger.info(f"[WORKFLOW-LOCK] ✅ Lock acquired after {retry_count} retries")
+            break
+            
+          # Check timeout
+          elapsed_time = time.time() - start_time
+          if elapsed_time > timeout:
+            workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Lock timeout reached after {timeout}s and {retry_count} retries")
+            workflow_logger.error(f"[WORKFLOW-LOCK] 💀 Final lock status: '{locked.data}'")
+            return None
+          
+          # Log progress every 10 attempts
+          if retry_count % 10 == 0:
+            workflow_logger.warning(f"[WORKFLOW-LOCK] ⏰ Still retrying after {retry_count} attempts ({elapsed_time:.1f}s elapsed)")
+            
+            # Try to get information about what's causing the lock
+            try:
+              recent_executions = self.get_executions(5, api_key=api_key, pagination=False)
+              if recent_executions:
+                workflow_logger.info(f"[WORKFLOW-LOCK] 🔍 Recent executions for debugging:")
+                for i, exec_item in enumerate(recent_executions[:3]):
+                  exec_id = exec_item.get('id', 'unknown')
+                  exec_status = exec_item.get('status', 'unknown')
+                  exec_workflow = exec_item.get('workflowData', {}).get('name', 'unknown')
+                  workflow_logger.info(f"[WORKFLOW-LOCK]   #{i+1}: ID={exec_id}, Status={exec_status}, Workflow={exec_workflow}")
+                  if str(exec_id) == str(id):
+                    workflow_logger.warning(f"[WORKFLOW-LOCK] ⚠️ FOUND MATCH: Our target ID {id} already exists with status {exec_status}!")
+            except Exception as debug_error:
+              workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Debug query failed: {debug_error}")
+            
+        workflow_logger.info(f"[WORKFLOW-LOCK] 🔒 Final lock status - ID: {id}, Name: '{name}'")
 
       # Format data and get hook
       workflow_logger.info(f"[WORKFLOW-DATA] 📝 Formatting data for workflow '{name}'")
