@@ -375,13 +375,50 @@ class WorkflowService:
     return result
 
   def latest_execution(self, api_key: str = ""):
-    execution = self.get_executions(limit=1, api_key=api_key, pagination=False)
-    if execution:
-      n8n_id = int(execution[0]['id']) + 1
-    else:
-      raise Exception('No executions found')
-
-    return n8n_id
+    """
+    Generate a unique execution ID by finding the highest existing ID and adding a buffer.
+    Enhanced to avoid ID collisions that cause locking issues.
+    """
+    import random
+    import time
+    
+    workflow_logger.info("[EXECUTION-ID] 🔢 Generating unique execution ID")
+    
+    # Get multiple recent executions to find the highest ID
+    executions = self.get_executions(limit=10, api_key=api_key, pagination=False)
+    
+    if not executions:
+      workflow_logger.warning("[EXECUTION-ID] ⚠️ No executions found, starting with ID 1")
+      return 1
+    
+    # Extract all execution IDs and find the maximum
+    execution_ids = []
+    for exec_item in executions:
+      try:
+        exec_id = int(exec_item.get('id', 0))
+        execution_ids.append(exec_id)
+        workflow_logger.info(f"[EXECUTION-ID] 📋 Found execution ID: {exec_id}, Status: {exec_item.get('status', 'unknown')}")
+      except (ValueError, TypeError):
+        workflow_logger.warning(f"[EXECUTION-ID] ⚠️ Invalid execution ID: {exec_item.get('id', 'None')}")
+        continue
+    
+    if not execution_ids:
+      workflow_logger.error("[EXECUTION-ID] ❌ No valid execution IDs found")
+      raise Exception('No valid executions found')
+    
+    max_id = max(execution_ids)
+    
+    # Add a buffer to avoid collisions with concurrent requests
+    # Use timestamp-based offset to make it more unique
+    timestamp_offset = int(time.time() % 1000)  # Last 3 digits of timestamp
+    random_offset = random.randint(10, 99)      # Random 2-digit number
+    
+    # Generate new ID with sufficient buffer
+    new_id = max_id + timestamp_offset + random_offset + 100  # Minimum 100 buffer
+    
+    workflow_logger.info(f"[EXECUTION-ID] ✅ Generated unique execution ID: {new_id} (max_existing: {max_id})")
+    
+    return new_id
 
   def main_flow(self, name: str, api_key: str = "", data: str = ""):
     """
@@ -405,7 +442,10 @@ class WorkflowService:
 
       # Lock the workflow with enhanced logging
       workflow_logger.info(f"[WORKFLOW-LOCK] 🔒 Attempting to lock workflow ID: {id}")
+      workflow_logger.info(f"[WORKFLOW-LOCK] 🏷️ Workflow name: '{name}'")
+      
       locked = self.sqlDb.check_and_lock_flow(id)
+      workflow_logger.info(f"[WORKFLOW-LOCK] 📊 Initial lock response: '{locked.data}'")
 
       if locked.data == 'Workflow updated':
         workflow_logger.info(f"[WORKFLOW-LOCK] ✅ Successfully locked workflow - ID: {id}, Name: '{name}'")
@@ -415,21 +455,38 @@ class WorkflowService:
         timeout = 600  # Increased timeout for long-running workflows
         retry_count = 0
         
-        while locked.data == 'Workflow is locked' or 'id already exists':
+        while locked.data == 'Workflow is locked' or locked.data == 'id already exists':
           retry_count += 1
           workflow_logger.info(f"[WORKFLOW-LOCK] 🔄 Retry attempt #{retry_count} - waiting for workflow unlock")
+          workflow_logger.info(f"[WORKFLOW-LOCK] 📊 Current lock status: '{locked.data}'")
           
-          time.sleep(2)  # Brief pause between retries
-          id = self.latest_execution(api_key)
+          # Check for circuit breaker - prevent infinite loops
+          if retry_count > 20:  # Circuit breaker at 20 attempts
+            workflow_logger.error(f"[WORKFLOW-LOCK] 🚨 Circuit breaker triggered after {retry_count} attempts")
+            workflow_logger.error(f"[WORKFLOW-LOCK] 🔍 Generating new execution ID to break deadlock")
+            # Generate a completely new ID to break potential deadlock
+            id = self.latest_execution(api_key)
+            workflow_logger.info(f"[WORKFLOW-LOCK] 🆔 New execution ID for retry: {id}")
+          else:
+            # For first 20 attempts, just wait and retry with same ID
+            time.sleep(min(2 + (retry_count * 0.5), 10))  # Exponential backoff, max 10s
+          
           locked = self.sqlDb.check_and_lock_flow(id)
           
           if locked.data == 'Workflow updated':
             workflow_logger.info(f"[WORKFLOW-LOCK] ✅ Lock acquired after {retry_count} retries")
             break
             
-          if time.time() - start_time > timeout:
+          # Check timeout
+          elapsed_time = time.time() - start_time
+          if elapsed_time > timeout:
             workflow_logger.error(f"[WORKFLOW-LOCK] ❌ Lock timeout reached after {timeout}s and {retry_count} retries")
+            workflow_logger.error(f"[WORKFLOW-LOCK] 💀 Final lock status: '{locked.data}'")
             return None
+          
+          # Log progress every 10 attempts
+          if retry_count % 10 == 0:
+            workflow_logger.warning(f"[WORKFLOW-LOCK] ⏰ Still retrying after {retry_count} attempts ({elapsed_time:.1f}s elapsed)")
             
         workflow_logger.info(f"[WORKFLOW-LOCK] 🔒 Final lock status - ID: {id}, Name: '{name}'")
 
