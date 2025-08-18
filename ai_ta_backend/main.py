@@ -592,30 +592,73 @@ def get_conversation_stats(service: RetrievalService) -> Response:
 def run_flow(service: WorkflowService) -> Response:
   """
   Run flow for a user and return results.
+  Enhanced with comprehensive logging for debugging long-running tool executions.
   """
-
-  api_key = request.json.get('api_key', '')
-  name = request.json.get('name', '')
-  data = request.json.get('data', '')
-
-  print("Got /run_flow request:", request.json)
-
-  if api_key == '':
-    # proper web error "400 Bad request"
-    abort(400, description=f"Missing N8N API_KEY: 'api_key' must be provided. Search query: `{api_key}`")
-
+  import logging
+  from datetime import datetime
+  
+  # Create logger for this endpoint
+  endpoint_logger = logging.getLogger('run_flow_endpoint')
+  endpoint_start_time = datetime.now()
+  
   try:
+    request_data = request.get_json() or {}
+    api_key = request_data.get('api_key', '')
+    name = request_data.get('name', '')
+    data = request_data.get('data', '')
+    
+    endpoint_logger.info(f"[RUN-FLOW] 🚀 Received workflow request at {endpoint_start_time}")
+    endpoint_logger.info(f"[RUN-FLOW] 📝 Workflow name: '{name}'")
+    endpoint_logger.info(f"[RUN-FLOW] 🔑 API key length: {len(api_key) if api_key else 0} chars")
+    endpoint_logger.info(f"[RUN-FLOW] 📊 Data payload size: {len(str(data)) if data else 0} chars")
+    endpoint_logger.info(f"[RUN-FLOW] 🌐 Request origin: {request.headers.get('Origin', 'unknown')}")
+    endpoint_logger.info(f"[RUN-FLOW] 📡 User agent: {request.headers.get('User-Agent', 'unknown')[:100]}...")
+
+    if api_key == '':
+      endpoint_logger.error("[RUN-FLOW] ❌ Missing API key in request")
+      abort(400, description=f"Missing N8N API_KEY: 'api_key' must be provided. Search query: `{api_key}`")
+
+    endpoint_logger.info(f"[RUN-FLOW] ▶️ Starting workflow execution via WorkflowService")
+    workflow_start = time.monotonic()
+    
     response = service.main_flow(name, api_key, data)
-    response = jsonify(response)
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    return response
+    
+    workflow_time = time.monotonic() - workflow_start
+    endpoint_logger.info(f"[RUN-FLOW] ✅ Workflow completed in {workflow_time:.2f}s")
+    
+    if response is None:
+      endpoint_logger.error("[RUN-FLOW] ❌ Workflow returned None - likely timeout or execution failure")
+      response_data = jsonify({"error": "Workflow execution failed or timed out", "workflow_name": name})
+      response_data.status_code = 500
+    else:
+      endpoint_logger.info(f"[RUN-FLOW] 📋 Response type: {type(response)}")
+      if isinstance(response, dict):
+        response_status = response.get('status', 'unknown')
+        endpoint_logger.info(f"[RUN-FLOW] 📊 Workflow status: {response_status}")
+      
+      response_data = jsonify(response)
+    
+    response_data.headers.add('Access-Control-Allow-Origin', '*')
+    
+    total_time = time.monotonic() - endpoint_start_time.timestamp()
+    endpoint_logger.info(f"[RUN-FLOW] 🎉 Request completed in {total_time:.2f}s")
+    
+    return response_data
+    
   except Exception as e:
-    if e == "Unauthorized":
+    total_time = time.monotonic() - endpoint_start_time.timestamp()
+    endpoint_logger.error(f"[RUN-FLOW] 💥 Request failed after {total_time:.2f}s")
+    endpoint_logger.error(f"[RUN-FLOW] 🔥 Error: {str(e)}")
+    endpoint_logger.error(f"[RUN-FLOW] 📍 Error type: {type(e).__name__}")
+    
+    if str(e) == "Unauthorized":
+      endpoint_logger.error("[RUN-FLOW] 🔐 Unauthorized access attempt")
       response = jsonify(error=str(e), message=f"Unauthorized: 'api_key' is invalid. Search query: `{api_key}`")
       response.status_code = 401
       response.headers.add('Access-Control-Allow-Origin', '*')
       return response
     else:
+      endpoint_logger.error(f"[RUN-FLOW] 💀 Internal server error: {str(e)}")
       response = jsonify(error=str(e), message=f"Internal Server Error {e}")
       response.status_code = 500
       response.headers.add('Access-Control-Allow-Origin', '*')
