@@ -1067,17 +1067,12 @@ class RetrievalService:
         
         chunks = text_splitter.split_text(text_content)
         
-        # Use the existing embedding setup from your system
-        from langchain.embeddings.openai import OpenAIEmbeddings
-        
-        # Use the same OpenAI setup as the rest of your system
-        embeddings_client = OpenAIEmbeddings(openai_api_key=os.environ.get('VLADS_OPENAI_KEY'))
-        
+        # Use the enhanced embedding system with Qwen instruction support
         documents = []
         for i, chunk in enumerate(chunks):
             try:
-                # Generate embedding using your existing setup
-                embedding = embeddings_client.embed_query(chunk)
+                # Generate embedding using the enhanced system that supports Qwen instructions
+                embedding = self._embed_query_and_measure_latency(chunk, self.embeddings, self.qwen_query_instruction)
                 
                 # Create document with conversation metadata using UUID for ID
                 import uuid
