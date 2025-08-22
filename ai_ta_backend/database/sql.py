@@ -484,6 +484,7 @@ class SQLDatabase:
             select(models.DocGroup.name, models.DocGroup.course_name, models.DocGroup.enabled,
                    models.DocGroup.private, models.DocGroup.doc_count)
             .where(models.DocGroup.course_name == course_name)
+            .where(models.DocGroup.private == False)
         )
         with Session(self.engine) as session:
             result = session.execute(query).mappings().all()
