@@ -55,6 +55,16 @@ executor = Executor(app)
 # load API keys from globally-availabe .env file
 load_dotenv()
 
+# Add thread tracking middleware
+from ai_ta_backend.middleware.thread_tracking import track_thread_usage
+before_request_func, after_request_func = track_thread_usage()
+app.before_request(before_request_func)
+app.after_request(after_request_func)
+
+# Start background thread monitor (optional - comment out if not needed)
+# from ai_ta_backend.utils.background_monitor import start_background_monitor
+# start_background_monitor(interval_seconds=60)
+
 
 @app.route('/')
 def index() -> Response:
@@ -344,6 +354,48 @@ def export_convo_history(service: ExportService):
 def test_process(service: ExportService):
   service.test_process()
   return jsonify({"response": "success"})
+
+
+@app.route('/thread-monitor', methods=['GET'])
+def thread_monitor():
+  """Debug endpoint to monitor thread usage."""
+  from ai_ta_backend.utils.thread_monitor import get_thread_info
+  
+  info = get_thread_info()
+  
+  # Add injected executor info
+  try:
+    from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapter
+    from ai_ta_backend.executors.process_pool_executor import ProcessPoolExecutorAdapter
+    
+    # Check if executors are bound in the injector
+    injector = app.injector
+    
+    # Get the singleton thread pool executor
+    thread_executor = injector.get(ThreadPoolExecutorAdapter)
+    if thread_executor and hasattr(thread_executor, 'executor'):
+      pool = thread_executor.executor
+      info['executor_states']['thread_pool_adapter'] = {
+        'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
+        'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
+        'threads': len(pool._threads) if hasattr(pool, '_threads') else 'unknown',
+      }
+    
+    # Get the singleton process pool executor  
+    process_executor = injector.get(ProcessPoolExecutorAdapter)
+    if process_executor and hasattr(process_executor, 'executor'):
+      pool = process_executor.executor
+      info['executor_states']['process_pool_adapter'] = {
+        'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
+        'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
+        'processes': len(pool._processes) if hasattr(pool, '_processes') else 'unknown',
+      }
+  except Exception as e:
+    info['executor_states']['error'] = str(e)
+  
+  response = jsonify(info)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route('/export-convo-history', methods=['GET'])
