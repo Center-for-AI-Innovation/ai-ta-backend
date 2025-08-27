@@ -357,7 +357,7 @@ def test_process(service: ExportService):
 
 
 @app.route('/thread-monitor', methods=['GET'])
-def thread_monitor():
+def thread_monitor(thread_executor: ThreadPoolExecutorInterface, process_executor: ProcessPoolExecutorInterface):
   """Debug endpoint to monitor thread usage."""
   from ai_ta_backend.utils.thread_monitor import get_thread_info
   
@@ -365,14 +365,7 @@ def thread_monitor():
   
   # Add injected executor info
   try:
-    from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapter
-    from ai_ta_backend.executors.process_pool_executor import ProcessPoolExecutorAdapter
-    
-    # Check if executors are bound in the injector
-    injector = app.injector
-    
-    # Get the singleton thread pool executor
-    thread_executor = injector.get(ThreadPoolExecutorAdapter)
+    # Check the thread pool executor
     if thread_executor and hasattr(thread_executor, 'executor'):
       pool = thread_executor.executor
       info['executor_states']['thread_pool_adapter'] = {
@@ -381,14 +374,22 @@ def thread_monitor():
         'threads': len(pool._threads) if hasattr(pool, '_threads') else 'unknown',
       }
     
-    # Get the singleton process pool executor  
-    process_executor = injector.get(ProcessPoolExecutorAdapter)
+    # Check the process pool executor  
     if process_executor and hasattr(process_executor, 'executor'):
       pool = process_executor.executor
       info['executor_states']['process_pool_adapter'] = {
         'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
         'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
         'processes': len(pool._processes) if hasattr(pool, '_processes') else 'unknown',
+      }
+      
+    # Check Flask-Executor
+    if executor and hasattr(executor, '_executor'):
+      pool = executor._executor
+      info['executor_states']['flask_executor'] = {
+        'class': pool.__class__.__name__,
+        'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
+        'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
       }
   except Exception as e:
     info['executor_states']['error'] = str(e)
