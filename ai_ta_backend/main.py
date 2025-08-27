@@ -357,33 +357,32 @@ def test_process(service: ExportService):
 
 
 @app.route('/thread-monitor', methods=['GET'])
-def thread_monitor(thread_executor: ThreadPoolExecutorInterface, process_executor: ProcessPoolExecutorInterface):
+def thread_monitor():
   """Debug endpoint to monitor thread usage."""
   from ai_ta_backend.utils.thread_monitor import get_thread_info
   
   info = get_thread_info()
   
-  # Add injected executor info
+  # Add executor info by checking the global executor and looking at thread counts
   try:
-    # Check the thread pool executor
-    if thread_executor and hasattr(thread_executor, 'executor'):
-      pool = thread_executor.executor
-      info['executor_states']['thread_pool_adapter'] = {
-        'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
-        'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
-        'threads': len(pool._threads) if hasattr(pool, '_threads') else 'unknown',
-      }
+    import threading
     
-    # Check the process pool executor  
-    if process_executor and hasattr(process_executor, 'executor'):
-      pool = process_executor.executor
-      info['executor_states']['process_pool_adapter'] = {
-        'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
-        'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
-        'processes': len(pool._processes) if hasattr(pool, '_processes') else 'unknown',
-      }
-      
-    # Check Flask-Executor
+    # Get all thread names to identify executor threads
+    all_threads = threading.enumerate()
+    thread_names = [t.name for t in all_threads]
+    
+    # Count executor-related threads
+    executor_threads = [name for name in thread_names if 'ThreadPoolExecutor' in name or 'Executor' in name]
+    worker_threads = [name for name in thread_names if 'worker' in name.lower()]
+    
+    info['executor_states'] = {
+      'total_threads': len(all_threads),
+      'executor_thread_count': len(executor_threads),
+      'worker_thread_count': len(worker_threads),
+      'thread_names': thread_names[:20],  # First 20 thread names for debugging
+    }
+    
+    # Check Flask-Executor if available
     if executor and hasattr(executor, '_executor'):
       pool = executor._executor
       info['executor_states']['flask_executor'] = {
@@ -392,7 +391,7 @@ def thread_monitor(thread_executor: ThreadPoolExecutorInterface, process_executo
         'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
       }
   except Exception as e:
-    info['executor_states']['error'] = str(e)
+    info['executor_states'] = {'error': str(e)}
   
   response = jsonify(info)
   response.headers.add('Access-Control-Allow-Origin', '*')
