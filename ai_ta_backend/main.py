@@ -65,8 +65,6 @@ app.after_request(after_request_func)
 # Start background thread monitor (optional - comment out if not needed)
 from ai_ta_backend.utils.background_monitor import start_background_monitor
 
-start_background_monitor(interval_seconds=60)
-
 
 @app.route('/')
 def index() -> Response:
@@ -849,7 +847,18 @@ def configure(binder: Binder) -> None:
   binder.bind(GraphDatabase, to=GraphDatabase, scope=SingletonScope)
 
 
-FlaskInjector(app=app, modules=[configure])
+flask_injector = FlaskInjector(app=app, modules=[configure])
+
+# Start background thread monitor after DI, using PosthogService from injector
+try:
+  if os.getenv('POSTHOG_API_KEY'):
+    ph_service_for_monitor = flask_injector.injector.get(PosthogService)
+    start_background_monitor(interval_seconds=60, capture_callback=ph_service_for_monitor.capture)
+  else:
+    start_background_monitor(interval_seconds=60)
+except Exception as e:
+  # Fail open: monitor is optional
+  print(f"Failed to start background monitor with PostHog via DI: {e}")
 
 if __name__ == '__main__':
   app.run(debug=True, port=int(os.getenv("PORT", default=8000)))  # nosec -- reasonable bandit error suppression
