@@ -34,6 +34,7 @@ volume_path = "./pubmed_ingest"
 
 ourSecrets = [
     "S3_BUCKET_NAME",
+    "CROPWIZARD_S3_BUCKET_NAME",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "BEAM_API_KEY",

@@ -44,6 +44,7 @@ ourSecrets = [
     "AWS_SECRET_ACCESS_KEY",
     "POSTHOG_API_KEY",
     "S3_BUCKET_NAME",
+    "CROPWIZARD_S3_BUCKET_NAME",
     "BEAM_API_KEY",
 ]
 

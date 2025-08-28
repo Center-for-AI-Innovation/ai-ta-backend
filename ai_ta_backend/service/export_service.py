@@ -42,6 +42,17 @@ class ExportService:
     self.sentry = sentry
     self.executor = executor
 
+  def get_s3_bucket_for_course(self, course_name: str) -> str:
+    """
+    Get the appropriate S3 bucket based on course name.
+    If course_name starts with 'cropwizard', use CropWizard S3 bucket.
+    Otherwise, use the regular S3 bucket.
+    """
+    if course_name and course_name.startswith('cropwizard'):
+      return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+    else:
+      return os.environ['S3_BUCKET_NAME']
+
   def test_process(self):
     """
         This function is used to test the process.
@@ -420,9 +431,17 @@ def export_convo_history_user_bg(conversations, count, user_email, s3_path, proj
       conversations (list): The list of conversations to be uploaded.
       user_email (str): The email of the user.
       s3_path (str): The S3 path where the file will be uploaded.
+      project_name (str): The name of the project.
   """
   s3 = AWSStorage()
   sql = SQLDatabase()
+  
+  # Get the appropriate S3 bucket for the project
+  def get_s3_bucket_for_course(course_name: str) -> str:
+    if course_name and course_name.startswith('cropwizard'):
+      return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+    else:
+      return os.environ['S3_BUCKET_NAME']
 
   # create a temporary directory
   with tempfile.TemporaryDirectory() as temp_dir:
@@ -456,8 +475,9 @@ def export_convo_history_user_bg(conversations, count, user_email, s3_path, proj
 
       # upload to S3
       s3_file = f"conversations/{os.path.basename('user_convo_export.zip')}"
-      s3.upload_file(zip_file_path, os.environ['S3_BUCKET_NAME'], s3_file)
-      s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_file, 172800)
+      bucket_name = get_s3_bucket_for_course(project_name)
+      s3.upload_file(zip_file_path, bucket_name, s3_file)
+      s3_url = s3.generatePresignedUrl('get_object', bucket_name, s3_file, 172800)
 
       # send email
       subject = f"UIUC.chat Conversation History Export Complete for {user_email}"
@@ -484,6 +504,13 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path):
   print(f"Starting export in background for course: {course_name}, download_type: {download_type}, s3_path: {s3_path}")
   s3 = AWSStorage()
   sql = SQLDatabase()
+  
+  # Get the appropriate S3 bucket for the course
+  def get_s3_bucket_for_course(course_name: str) -> str:
+    if course_name and course_name.startswith('cropwizard'):
+      return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+    else:
+      return os.environ['S3_BUCKET_NAME']
 
   total_doc_count = response.count
   first_id = response.data[0]['id']
@@ -526,9 +553,10 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path):
     print(f"Cleaned up temporary files.")
 
     # Upload the zip file to S3
-    s3.upload_file(zip_file_path, os.environ['S3_BUCKET_NAME'], s3_path)
+    bucket_name = get_s3_bucket_for_course(course_name)
+    s3.upload_file(zip_file_path, bucket_name, s3_path)
     os.remove(zip_file_path)
-    s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
+    s3_url = s3.generatePresignedUrl('get_object', bucket_name, s3_path, 172800)
 
     # Fetch course metadata to get admin emails
     headers = {"Authorization": f"Bearer {os.environ['VERCEL_READ_ONLY_API_KEY']}", "Content-Type": "application/json"}
@@ -580,6 +608,13 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
 	"""
   s3 = AWSStorage()
   sql = SQLDatabase()
+  
+  # Get the appropriate S3 bucket for the course
+  def get_s3_bucket_for_course(course_name: str) -> str:
+    if course_name and course_name.startswith('cropwizard'):
+      return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+    else:
+      return os.environ['S3_BUCKET_NAME']
 
   total_doc_count = response.count
   first_id = response.data[0]['id']
@@ -620,7 +655,8 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
 
     #s3_file = f"courses/{course_name}/exports/{os.path.basename(zip_file_path)}"
     s3_file = f"courses/{course_name}/{os.path.basename(s3_path)}"
-    s3.upload_file(zip_file_path, os.environ['S3_BUCKET_NAME'], s3_file)
+    bucket_name = get_s3_bucket_for_course(course_name)
+    s3.upload_file(zip_file_path, bucket_name, s3_file)
 
     # remove local files
     os.remove(file_path)
@@ -629,7 +665,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
     print("file uploaded to s3: ", s3_file)
 
     # generate presigned URL
-    s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
+    s3_url = s3.generatePresignedUrl('get_object', bucket_name, s3_path, 172800)
 
     # get admin email IDs
     headers = {"Authorization": f"Bearer {os.environ['VERCEL_READ_ONLY_API_KEY']}", "Content-Type": "application/json"}
@@ -689,6 +725,13 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
 	"""
   s3 = AWSStorage()
   sql = SQLDatabase()
+  
+  # Get the appropriate S3 bucket for the course
+  def get_s3_bucket_for_course(course_name: str) -> str:
+    if course_name and course_name.startswith('cropwizard'):
+      return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+    else:
+      return os.environ['S3_BUCKET_NAME']
 
   total_doc_count = response.count
   first_id = response.data[0]['id']
@@ -729,7 +772,8 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
 
     #s3_file = f"courses/{course_name}/exports/{os.path.basename(zip_file_path)}"
     s3_file = f"courses/{course_name}/{os.path.basename(s3_path)}"
-    s3.upload_file(zip_file_path, os.environ['S3_BUCKET_NAME'], s3_file)
+    bucket_name = get_s3_bucket_for_course(course_name)
+    s3.upload_file(zip_file_path, bucket_name, s3_file)
 
     # remove local files
     os.remove(file_path)
@@ -738,7 +782,7 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
     print("file uploaded to s3: ", s3_file)
 
     # generate presigned URL
-    s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
+    s3_url = s3.generatePresignedUrl('get_object', bucket_name, s3_path, 172800)
 
     admin_emails = emails
     bcc_emails = []

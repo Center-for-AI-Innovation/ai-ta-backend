@@ -306,10 +306,14 @@ class RetrievalService:
     print(f"Deleting data for course {course_name}")
     # add delete from doc map logic here
     try:
-      # Delete file from S3
-      bucket_name = os.environ['S3_BUCKET_NAME']
+      # Delete file from S3 - use appropriate bucket for course
+      if course_name and course_name.startswith('cropwizard'):
+        bucket_name = os.environ['CROPWIZARD_S3_BUCKET_NAME']
+      else:
+        bucket_name = os.environ['S3_BUCKET_NAME']
+      
       if bucket_name is None:
-        raise ValueError("S3_BUCKET_NAME environment variable is not set")
+        raise ValueError("S3 bucket environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
       print(f"Deleting {identifier_value} from S3, Qdrant, and Supabase using {identifier_key}")
@@ -331,6 +335,17 @@ class RetrievalService:
       print(err)
       self.sentry.capture_exception(e)
       return err
+
+  def get_s3_bucket_for_course(self, course_name: str) -> str:
+    """
+    Get the appropriate S3 bucket based on course name.
+    If course_name starts with 'cropwizard', use CropWizard S3 bucket.
+    Otherwise, use the regular S3 bucket.
+    """
+    if course_name and course_name.startswith('cropwizard'):
+      return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+    else:
+      return os.environ['S3_BUCKET_NAME']
 
   def delete_from_s3(self, bucket_name: str, s3_path: str):
     try:

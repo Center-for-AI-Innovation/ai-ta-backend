@@ -6,6 +6,13 @@ from urllib.parse import urlparse
 import xlsxwriter
 
 
+def get_s3_bucket_for_course(course_name: str) -> str:
+  if course_name and course_name.startswith('cropwizard'):
+    return os.environ['CROPWIZARD_S3_BUCKET_NAME']
+  else:
+    return os.environ['S3_BUCKET_NAME']
+
+
 def _initialize_base_name(course_name):
   return course_name[0:15] + '-conversation-export'
 
@@ -136,7 +143,7 @@ def _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir,
         # content = _process_message_content(s3, message['content'], convo_id, media_dir, error_log)
         content = _process_message_content_for_user_convo_export(s3, message['content_text'],
                                                                  message['content_image_url'], convo_id, media_dir,
-                                                                 error_log)
+                                                                 error_log, project_name)
         md_file.write(f"### {role}:\n")
         md_file.write(f"{content}\n\n")
         if img_desc:
@@ -150,7 +157,7 @@ def _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir,
     error_log.append(f"Error creating markdown for conversation ID {convo_id}: {str(e)}")
 
 
-def _process_message_content(s3, content, convo_id, media_dir, error_log):
+def _process_message_content(s3, content, convo_id, media_dir, error_log, course_name=None):
   try:
     if isinstance(content, list):
       flattened_content = []
@@ -163,7 +170,8 @@ def _process_message_content(s3, content, convo_id, media_dir, error_log):
           image_file_path = os.path.join(media_dir, image_filename)
           image_s3_path = _extract_path_from_url(item['image_url']['url'])
           # Save the image to the media directory
-          s3.download_file(image_s3_path, os.environ['S3_BUCKET_NAME'], image_file_path)
+          bucket_name = get_s3_bucket_for_course(course_name) if course_name else os.environ['S3_BUCKET_NAME']
+          s3.download_file(image_s3_path, bucket_name, image_file_path)
           # Adjust the path to be relative from the markdown file's perspective
           relative_image_path = os.path.join('..', media_dir.split('/')[-1], image_filename)
           flattened_content.append(f"![Image]({relative_image_path})")
@@ -178,14 +186,15 @@ def _process_message_content(s3, content, convo_id, media_dir, error_log):
 
 
 def _process_message_content_for_user_convo_export(s3, content_text: str, content_image_url: list, convo_id: str,
-                                                   media_dir: str, error_log: list) -> str:
+                                                   media_dir: str, error_log: list, project_name: str) -> str:
   try:
     content = content_text
     for url in content_image_url:
       image_filename = f"{url.split('/')[-1].split('?')[0]}"
       image_file_path = os.path.join(media_dir, image_filename)
       image_s3_path = _extract_path_from_url(url)
-      s3.download_file(image_s3_path, os.environ['S3_BUCKET_NAME'], image_file_path)
+      bucket_name = get_s3_bucket_for_course(project_name)
+      s3.download_file(image_s3_path, bucket_name, image_file_path)
       relative_image_path = os.path.join('..', media_dir.split('/')[-1], image_filename)
       content += f"\n![Image]({relative_image_path})"
     return content
