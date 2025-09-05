@@ -42,6 +42,9 @@ ourSecrets = [
     "CANVAS_ACCESS_TOKEN",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
+    "CROPWIZARD_AWS_REGION",
+    "CROPWIZARD_AWS_KEY",
+    "CROPWIZARD_AWS_SECRET",
     "POSTHOG_API_KEY",
     "S3_BUCKET_NAME",
     "CROPWIZARD_S3_BUCKET_NAME",
@@ -50,11 +53,21 @@ ourSecrets = [
 
 
 def loader():
+  # Regular S3 client
   s3_client = boto3.client(
       's3',
       aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
       aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
   )
+  
+  # CropWizard-specific S3 client
+  cropwizard_s3_client = boto3.client(
+      's3',
+      region_name=os.getenv('CROPWIZARD_AWS_REGION'),
+      aws_access_key_id=os.getenv('CROPWIZARD_AWS_KEY'),
+      aws_secret_access_key=os.getenv('CROPWIZARD_AWS_SECRET'),
+  )
+  
   canvas_client = Canvas("https://canvas.illinois.edu", os.getenv('CANVAS_ACCESS_TOKEN'))
   posthog = Posthog(sync_mode=True, project_api_key=os.environ['POSTHOG_API_KEY'], host='https://app.posthog.com')
 
@@ -63,7 +76,7 @@ def loader():
       enable_tracing=True,
   )
 
-  return s3_client, canvas_client, posthog
+  return s3_client, cropwizard_s3_client, canvas_client, posthog
 
 
 @beam.endpoint(
@@ -86,7 +99,7 @@ def canvas_ingest(context, **inputs: Dict[str, Any]):
     course_name: str
     canvas_url: str
   """
-  s3_client, canvas_client, posthog = context.on_start_value  # grab from loader function
+  s3_client, cropwizard_s3_client, canvas_client, posthog = context.on_start_value  # grab from loader function
 
   course_name: List[str] | str = inputs.get('course_name', '')
   canvas_url: List[str] | str | None = inputs.get('canvas_url', None)
@@ -115,7 +128,7 @@ def canvas_ingest(context, **inputs: Dict[str, Any]):
     match = re.search(r'canvas\.illinois\.edu/courses/([^/]+)', canvas_url)
     canvas_course_id = match.group(1) if match else None
 
-    ingester = CanvasIngest(s3_client, canvas_client, posthog)
+    ingester = CanvasIngest(s3_client, cropwizard_s3_client, canvas_client, posthog)
     
     # Auto-accept invitation for this specific course
     if canvas_course_id is None:
@@ -137,9 +150,10 @@ def canvas_ingest(context, **inputs: Dict[str, Any]):
 
 class CanvasIngest():
 
-  def __init__(self, s3_client, canvas_client, posthog):
+  def __init__(self, s3_client, cropwizard_s3_client, canvas_client, posthog):
     self.posthog = posthog
     self.s3_client = s3_client
+    self.cropwizard_s3_client = cropwizard_s3_client
     self.canvas_client = canvas_client
     self.headers = {"Authorization": "Bearer " + os.getenv('CANVAS_ACCESS_TOKEN')}
 
@@ -217,8 +231,12 @@ class CanvasIngest():
         sentry_sdk.capture_exception(e)
         return f"Failed! Error: {str(e)}"
 
-  def upload_file(self, file_path: str, bucket_name: str, object_name: str):
-    self.s3_client.upload_file(file_path, bucket_name, object_name)
+  def upload_file(self, file_path: str, bucket_name: str, object_name: str, course_name: str = None):
+    # Select appropriate S3 client based on course name
+    if course_name and 'cropwizard' in course_name.lower():
+      self.cropwizard_s3_client.upload_file(file_path, bucket_name, object_name)
+    else:
+      self.s3_client.upload_file(file_path, bucket_name, object_name)
 
   def add_users(self, canvas_course_id: str, course_name: str):
     """
@@ -368,7 +386,13 @@ class CanvasIngest():
         all_s3_paths.append(s3_path)
         all_readable_filenames.append(readable_filename)
         print(f"Uploading file: {readable_filename}")
-        self.upload_file(file_path, os.environ['S3_BUCKET_NAME'], s3_path)
+        # Select appropriate bucket based on course name
+        if course_name and 'cropwizard' in course_name.lower():
+          bucket_name = os.environ['CROPWIZARD_S3_BUCKET_NAME']
+        else:
+          bucket_name = os.environ['S3_BUCKET_NAME']
+        
+        self.upload_file(file_path, bucket_name, s3_path, course_name)
 
       # Delete files from local directory
       shutil.rmtree(folder_path)

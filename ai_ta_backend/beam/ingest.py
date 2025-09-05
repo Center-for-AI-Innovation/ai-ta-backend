@@ -129,10 +129,13 @@ ourSecrets = [
     "OPENAI_API_TYPE",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
+    "CROPWIZARD_AWS_REGION",
+    "CROPWIZARD_AWS_KEY",
+    "CROPWIZARD_AWS_SECRET",
     "POSTHOG_API_KEY",
-    "NEW_CROPWIZARD_QDRANT_URL",
-    "NEW_CROPWIZARD_QDRANT_KEY",
-    "NEW_CROPWIZARD_QDRANT_COLLECTION",
+    "CROPWIZARD_QDRANT_URL",
+    "CROPWIZARD_QDRANT_KEY",
+    "CROPWIZARD_QDRANT_COLLECTION_NAME",
     "CROPWIZARD_OPENAI_KEY",
     "CROPWIZARD_SUPABASE_URL",
     "CROPWIZARD_SUPABASE_SECRET",
@@ -156,10 +159,10 @@ def loader():
   )
 
   cropwizard_qdrant_client = QdrantClient(
-      url=os.getenv('NEW_CROPWIZARD_QDRANT_URL'),
+      url=os.getenv('CROPWIZARD_QDRANT_URL'),
       port=443,
       https=True,
-      api_key=os.getenv('NEW_CROPWIZARD_QDRANT_KEY'),
+      api_key=os.getenv('CROPWIZARD_QDRANT_KEY'),
   )
 
   vectorstore = Qdrant(
@@ -1384,7 +1387,7 @@ class Ingest():
         if metadatas[0].get('course_name') == 'cropwizard-1.5':
           print("Uploading to cropwizard collection...")
           self.cropwizard_qdrant_client.upsert(
-              collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
+              collection_name=os.environ['CROPWIZARD_QDRANT_COLLECTION_NAME'],
               points=vectors,
           )
         else:
@@ -1608,7 +1611,7 @@ class Ingest():
           if course_name == 'cropwizard-1.5':
             print("Deleting from cropwizard collection...")
             self.cropwizard_qdrant_client.delete(
-                collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
+                collection_name=os.environ['CROPWIZARD_QDRANT_COLLECTION_NAME'],
                 points_selector=models.Filter(must=[
                     models.FieldCondition(
                         key="s3_path",

@@ -35,10 +35,10 @@ class VectorDatabase():
 
     try:
       # No major uptime guarantees
-      self.cropwizard_qdrant_client = QdrantClient(url=os.environ['NEW_CROPWIZARD_QDRANT_URL'],
+      self.cropwizard_qdrant_client = QdrantClient(url=os.environ['CROPWIZARD_QDRANT_URL'],
                                                    port=443,
                                                    https=True,
-                                                   api_key=os.environ['NEW_CROPWIZARD_QDRANT_KEY'])
+                                                   api_key=os.environ['CROPWIZARD_QDRANT_KEY'])
     except Exception as e:
       print(f"Error in cropwizard_qdrant_client: {e}")
       self.cropwizard_qdrant_client = None
@@ -75,7 +75,7 @@ class VectorDatabase():
     top_n = 120
 
     search_results = self.cropwizard_qdrant_client.search(
-        collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
+        collection_name=os.environ['CROPWIZARD_QDRANT_COLLECTION_NAME'],
         query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
         with_vectors=False,
         query_vector=user_query_embedding,
@@ -446,7 +446,7 @@ class VectorDatabase():
       return None
     
     return self.cropwizard_qdrant_client.delete(
-        collection_name=os.environ['NEW_CROPWIZARD_QDRANT_COLLECTION'],
+        collection_name=os.environ['CROPWIZARD_QDRANT_COLLECTION_NAME'],
         wait=True,
         points_selector=models.Filter(must=[
             models.FieldCondition(
