@@ -138,7 +138,7 @@ ourSecrets = [
     "CROPWIZARD_QDRANT_COLLECTION_NAME",
     "CROPWIZARD_OPENAI_KEY",
     "CROPWIZARD_SUPABASE_URL",
-    "CROPWIZARD_SUPABASE_SECRET",
+    "CROPWIZARD_SUPABASE_KEY",
     # "AZURE_OPENAI_KEY",
     # "AZURE_OPENAI_ENGINE",
     # "AZURE_OPENAI_KEY",
@@ -187,7 +187,7 @@ def loader():
   
   cropwizard_supabase_client = supabase.create_client(  # type: ignore
       supabase_url=os.environ['CROPWIZARD_SUPABASE_URL'],
-      supabase_key=os.environ['CROPWIZARD_SUPABASE_SECRET'],
+      supabase_key=os.environ['CROPWIZARD_SUPABASE_KEY'],
       options=ClientOptions(postgrest_client_timeout=60,))
 
   # llm = AzureChatOpenAI(

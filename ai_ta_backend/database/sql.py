@@ -38,7 +38,7 @@ class SQLDatabase:
         supabase_url=os.environ['SUPABASE_URL'], supabase_key=os.environ['SUPABASE_API_KEY'])
     
     self.cropwizard_supabase_client = supabase.create_client(  # type: ignore
-        supabase_url=os.environ['CROPWIZARD_SUPABASE_URL'], supabase_key=os.environ['CROPWIZARD_SUPABASE_SECRET'])
+        supabase_url=os.environ['CROPWIZARD_SUPABASE_URL'], supabase_key=os.environ['CROPWIZARD_SUPABASE_KEY'])
 
     # Default to regular client
     self.current_client = self.supabase_client
@@ -200,8 +200,8 @@ class SQLDatabase:
   def getPublicDocGroups(self, course_name: str):
     self.set_client_for_course(course_name)
     return self.current_client.from_("doc_groups_sharing") \
-        .select("doc_group_name, shared_with") \
-        .eq("course_name", course_name) \
+        .select("doc_group_name") \
+        .eq("destination_project_name", course_name) \
         .execute()
 
   def getAllConversationsForUserAndProject(self, user_email: str, project_name: str, curr_count: int = 0):
