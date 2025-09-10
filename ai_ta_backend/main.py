@@ -8,13 +8,13 @@ from typing import List
 
 from dotenv import load_dotenv
 from flask import (
-    Flask,
-    Response,
-    abort,
-    jsonify,
-    make_response,
-    request,
-    send_from_directory,
+  Flask,
+  Response,
+  abort,
+  jsonify,
+  make_response,
+  request,
+  send_from_directory, send_file,
 )
 from flask_cors import CORS
 from flask_executor import Executor
@@ -387,10 +387,12 @@ def export_convo_history_v2(service: ExportService):
 
   else:
     response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+      send_file(export_status['response'], as_attachment=True)
+    )
+    filename = os.path.basename(export_status['response'])
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    os.remove(export_status['response'])
 
   return response
 

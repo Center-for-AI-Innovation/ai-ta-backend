@@ -352,7 +352,7 @@ class ExportService:
         print(f"Error finalizing export: {str(e)}")
         return {"response": "Error finalizing export!"}
 
-      return {"response": (zip_file_path, file_paths['zip'], os.getcwd())}
+      return {"response": zip_file_path}
     else:
       print("No data found between the given dates.")
       return {"response": "No data found between the given dates."}
