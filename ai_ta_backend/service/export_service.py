@@ -4,11 +4,9 @@ import os
 import tempfile
 import uuid
 import zipfile
-from urllib.parse import urlparse
 
 import pandas as pd
 import requests
-import xlsxwriter
 from injector import inject
 
 from ai_ta_backend.database.aws import AWSStorage
@@ -61,7 +59,7 @@ class ExportService:
 				to_date (str, optional): The end date for the data export. Defaults to ''.
 		"""
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'documents')
+    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
 
     count = response.get("count", 0)
     # add a condition to route to direct download or s3 download
@@ -137,7 +135,7 @@ class ExportService:
 		"""
     print("Exporting conversation history to json file...")
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'llm-convo-monitor')
+    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
 
     count = response.get("count", 0)
     if count > 500:
@@ -205,7 +203,7 @@ class ExportService:
     """
     print("Exporting conversation history to json file...")
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'llm-convo-monitor')
+    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
 
     count = response.get("count", 0)
     if count > 500:
@@ -281,7 +279,7 @@ class ExportService:
     error_log = []
 
     try:
-      response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'llm-convo-monitor')
+      response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
 
       response_count = response.get("count", 0)
       print(f"Received request to export: {response_count} conversations")

@@ -32,14 +32,6 @@ def orm_to_dict(obj):
         return {col.name: getattr(obj, col.name) for col in obj.__table__.columns}
     return obj
 
-def flatten_row(row: dict):
-    """Flatten a single mapping row (e.g. {'Conversations': <Convo>, 'Messages': <Msg>})."""
-    return {key: orm_to_dict(value) for key, value in row.items()}
-
-def flatten_rows(rows: list[dict]):
-    """Flatten a list of mapping rows into JSON-serializable dicts."""
-    return [flatten_row(r) for r in rows]
-
 
 class DatabaseResponse(Generic[T]):
     def __init__(self, data: List[T], count: int):
@@ -48,9 +40,10 @@ class DatabaseResponse(Generic[T]):
 
     def to_dict(self):
         return {
-            "data": flatten_rows(self.data),
+            "data": self.data,
             "count": self.count
         }
+
 
 class ProjectStats(TypedDict):
     total_messages: int
@@ -129,7 +122,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -141,7 +135,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -154,7 +149,8 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -167,7 +163,8 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -202,13 +199,14 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
     def getDocumentsBetweenDates(self, course_name: str, from_date: str, to_date: str):
         query = (
-            select(models.Document.id)
+            select(models.Document)
             .where(models.Document.course_name == course_name)
         )
         from_date = to_utc_datetime(from_date)
@@ -223,7 +221,8 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -243,7 +242,8 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -266,20 +266,21 @@ class SQLDatabase:
             )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
     def getAllConversationsBetweenIds(self, course_name: str, first_id: int, last_id: int, limit: int = 50):
-        query = (
-            select(models.LlmConvoMonitor)
-            .where(models.LlmConvoMonitor.course_name == course_name)
-            .where(models.LlmConvoMonitor.id > first_id)
-            .where(models.LlmConvoMonitor.id < last_id)
-
+        query = select(models.LlmConvoMonitor).where(
+            models.LlmConvoMonitor.course_name == course_name
         )
+
         if last_id == 0:
-            query = query.where(models.LlmConvoMonitor.id < last_id)
+            query = query.where(models.LlmConvoMonitor.id > first_id)
+        else:
+            query = query.where(models.LlmConvoMonitor.id >= first_id).where(models.LlmConvoMonitor.id <= last_id)
+
         query = (
             query
             .order_by(models.LlmConvoMonitor.id.asc())
@@ -288,7 +289,8 @@ class SQLDatabase:
 
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(r) for r in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -308,7 +310,8 @@ class SQLDatabase:
                      )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(r) for r in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -328,7 +331,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(r) for r in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -340,7 +344,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(r) for r in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -360,7 +365,8 @@ class SQLDatabase:
             )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(r) for r in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
         return response
 
     def getCountFromDocuments(self, course_name: str, last_id: int):
@@ -379,7 +385,8 @@ class SQLDatabase:
             )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(r) for r in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -426,7 +433,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -449,7 +457,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -479,7 +488,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -492,7 +502,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
@@ -573,7 +584,8 @@ class SQLDatabase:
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [orm_to_dict(doc) for doc in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
 
         return response
 
