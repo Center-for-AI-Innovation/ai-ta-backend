@@ -206,7 +206,7 @@ class SQLDatabase:
 
     def getDocumentsBetweenDates(self, course_name: str, from_date: str, to_date: str):
         query = (
-            select(models.Document)
+            select(models.Document.id)
             .where(models.Document.course_name == course_name)
         )
         from_date = to_utc_datetime(from_date)
@@ -226,7 +226,7 @@ class SQLDatabase:
 
         return response
 
-    def getDocumentsBetweenDatesLLM(self, course_name: str, from_date: str, to_date: str):
+    def getConversationsBetweenDates(self, course_name: str, from_date: str, to_date: str):
         query = (
             select(models.LlmConvoMonitor.id)
             .where(models.LlmConvoMonitor.course_name == course_name)

@@ -135,7 +135,7 @@ class ExportService:
 		"""
     print("Exporting conversation history to json file...")
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
+    response = self.sql.getConversationsBetweenDates(course_name, from_date, to_date)
 
     count = response.get("count", 0)
     if count > 500:
@@ -203,7 +203,7 @@ class ExportService:
     """
     print("Exporting conversation history to json file...")
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
+    response = self.sql.getConversationsBetweenDates(course_name, from_date, to_date)
 
     count = response.get("count", 0)
     if count > 500:
@@ -279,7 +279,7 @@ class ExportService:
     error_log = []
 
     try:
-      response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
+      response = self.sql.getConversationsBetweenDates(course_name, from_date, to_date)
 
       response_count = response.get("count", 0)
       print(f"Received request to export: {response_count} conversations")
