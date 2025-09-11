@@ -552,10 +552,10 @@ class VectorDatabase():
     if admin_disabled_doc_groups:
       must_not_conditions.append(FieldCondition(key='doc_groups', match=MatchAny(any=admin_disabled_doc_groups)))
 
-    # Exclude chunks with any conversation_id (they belong to chat conversations)
-    must_not_conditions.append(models.FieldCondition(
-        key='conversation_id', 
-        match=models.MatchExists(exists=True)  # Exclude chunks with any conversation_id
+    # For regular searches, only include chunks that have NO conversation_id field
+    # This ensures we only get regular course chunks and prevents cross-conversation leaks
+    must_conditions.append(models.IsEmptyCondition(
+        is_empty={"key": "conversation_id"}  # Only include chunks where conversation_id field is empty/missing
     ))
     
     # Handle public_doc_groups
