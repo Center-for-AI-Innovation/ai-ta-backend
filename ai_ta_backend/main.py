@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import re
 import time
@@ -12,9 +11,8 @@ from flask import (
   Response,
   abort,
   jsonify,
-  make_response,
   request,
-  send_from_directory, send_file, after_this_request,
+  send_file,
 )
 from flask_cors import CORS
 from flask_executor import Executor
@@ -41,7 +39,6 @@ from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
-from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
@@ -350,11 +347,17 @@ def export_convo_history(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
@@ -468,11 +471,17 @@ def export_conversations_custom(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
@@ -499,11 +508,17 @@ def exportDocuments(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
