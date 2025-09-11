@@ -32,7 +32,7 @@ from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapt
 # from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.sentry_service import SentryService
-
+from qdrant_client.http import models
 
 # Qwen query instruction for Illinois Chat retrieval.
 # Docs are embedded without instruction during ingest; only queries get this prefix.
@@ -546,10 +546,19 @@ class RetrievalService:
     else:
       # Handle conversation filtering for normal courses
       if conversation_id:
-          conversation_filter = self._create_conversation_filter(conversation_id)
-          combined_filter = self._combine_filters(
-              self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
-              conversation_filter
+          # For chat conversations: get BOTH regular course documents AND conversation-specific documents
+          
+          # Get regular course documents (course_name + no conversation_id)
+          regular_filter = self.vdb._create_search_filter(
+              course_name, doc_groups, disabled_doc_groups, public_doc_groups
+          )
+          
+          # Get conversation-specific documents (this conversation_id)
+          chat_filter = self.vdb._create_conversation_search_filter(conversation_id)
+          
+          # Combine both filters with OR logic to get both types of documents
+          combined_filter = models.Filter(
+              should=[regular_filter, chat_filter]
           )
           
           search_results = self.vdb.vector_search_with_filter(
@@ -824,41 +833,7 @@ class RetrievalService:
         ]
     )
 
-  def _combine_filters(self, filter1, filter2):
-    """Combine two Qdrant filters with AND logic."""
-    from qdrant_client.http import models
-    combined_conditions = []
-    
-    # Add conditions from first filter
-    if filter1.must:
-        combined_conditions.extend(filter1.must)
-    
-    # Add conditions from second filter  
-    if filter2.must:
-        combined_conditions.extend(filter2.must)
-    
-    return models.Filter(must=combined_conditions)
-
-  def _create_search_filter(self, course_name, doc_groups, disabled_doc_groups, public_doc_groups):
-    """
-    Create a Qdrant filter for course, doc groups, and public/disabled doc groups.
-    """
-    from qdrant_client.http import models
-    
-    must_conditions = []
-    if course_name:
-        must_conditions.append(models.FieldCondition(
-            key="course_name",
-            match=models.MatchValue(value=course_name)
-        ))
-    if doc_groups and 'All Documents' not in doc_groups:
-        must_conditions.append(models.FieldCondition(
-            key="doc_groups",
-            match=models.MatchAny(any=doc_groups)  # Fixed: use 'any' parameter instead of 'value'
-        ))
-    # Optionally, you can add filters for disabled/public doc groups if needed
-    # (depends on your schema and use case)
-    return models.Filter(must=must_conditions)
+# Removed duplicate methods - now using consolidated methods from VectorDatabase
 
   # Add all these methods at the end of the RetrievalService class
 
