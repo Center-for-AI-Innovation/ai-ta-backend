@@ -534,7 +534,14 @@ class VectorDatabase():
   def _create_search_filter(self, course_name: str, doc_groups: List[str], admin_disabled_doc_groups: List[str],
                             public_doc_groups: List[dict]) -> models.Filter:
     """
-    Create search conditions for the vector search.
+    Create search conditions for regular searches (no conversation filtering).
+    Excludes chunks with any conversation_id.
+    
+    Args:
+        course_name: The course/project name to filter by
+        doc_groups: List of document groups to include
+        admin_disabled_doc_groups: List of document groups to exclude
+        public_doc_groups: List of public document groups that can be accessed
     """
 
     must_conditions = []
@@ -545,6 +552,12 @@ class VectorDatabase():
     if admin_disabled_doc_groups:
       must_not_conditions.append(FieldCondition(key='doc_groups', match=MatchAny(any=admin_disabled_doc_groups)))
 
+    # Exclude chunks with any conversation_id (they belong to chat conversations)
+    must_not_conditions.append(models.FieldCondition(
+        key='conversation_id', 
+        match=models.MatchExists(exists=True)  # Exclude chunks with any conversation_id
+    ))
+    
     # Handle public_doc_groups
     if public_doc_groups:
       for public_doc_group in public_doc_groups:
@@ -642,3 +655,64 @@ class VectorDatabase():
             ),
         ]),
     )
+  def _create_conversation_filter(self, conversation_id: str) -> models.Filter:
+    """
+    Create a filter for conversation-specific documents.
+    """
+    return models.Filter(
+        must=[
+            FieldCondition(
+                key='conversation_id',
+                match=MatchValue(value=conversation_id)
+            )
+        ]
+    )
+
+  def _combine_filters(self, search_filter: models.Filter, conversation_filter: models.Filter = None) -> models.Filter:
+    """
+    Combine search filter with conversation filter using AND logic.
+    
+    Args:
+        search_filter: The main search filter (course_name, doc_groups, etc.)
+        conversation_filter: The conversation-specific filter (optional)
+    
+    Returns:
+        Combined filter using AND logic for security
+    """
+    combined_conditions = []
+    
+    # Add conditions from search filter
+    if search_filter.must:
+        combined_conditions.extend(search_filter.must)
+    
+    # Add conditions from conversation filter if provided
+    if conversation_filter and conversation_filter.must:
+        combined_conditions.extend(conversation_filter.must)
+    
+    # Combine must_not conditions
+    combined_must_not = []
+    if search_filter.must_not:
+        combined_must_not.extend(search_filter.must_not)
+    if conversation_filter and conversation_filter.must_not:
+        combined_must_not.extend(conversation_filter.must_not)
+    
+    return models.Filter(must=combined_conditions, must_not=combined_must_not)
+
+  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str], 
+                                 user_query_embedding, top_n, disabled_doc_groups: List[str], 
+                                 public_doc_groups: List[dict], custom_filter: models.Filter):
+    """
+    Search the vector database with a custom filter.
+    Used for conversation-specific document filtering.
+    """
+    search_results = self.qdrant_client.search(
+        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+        query_filter=custom_filter,
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,
+        search_params=models.SearchParams(
+            quantization=models.QuantizationSearchParams(rescore=False)
+        )
+    )
+    return search_results
