@@ -88,8 +88,11 @@ class ExportService:
         print("last_id: ", last_id)
 
         curr_doc_count = 0
+        # create a temporary directory
+        temp_dir = tempfile.mkdtemp(prefix="export_")
+
         filename = course_name + '_' + str(uuid.uuid4()) + '_documents.jsonl'
-        file_path = os.path.join(os.getcwd(), filename)
+        file_path = os.path.join(temp_dir, filename)
 
         while curr_doc_count < total_doc_count:
           print("Fetching data from id: ", first_id)
@@ -111,13 +114,13 @@ class ExportService:
         try:
           # zip file
           zip_filename = filename.split('.')[0] + '.zip'
-          zip_file_path = os.path.join(os.getcwd(), zip_filename)
+          zip_file_path = os.path.join(temp_dir, zip_filename)
 
           with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(file_path, filename)
 
           os.remove(file_path)
-          return {"response": (zip_file_path, zip_filename, os.getcwd())}
+          return {"response": zip_file_path}
         except Exception as e:
           print(e)
           self.sentry.capture_exception(e)
@@ -157,8 +160,11 @@ class ExportService:
       last_id = response["data"][-1]['id']
       total_count = count
 
+      temp_dir = tempfile.mkdtemp(prefix="export_")
+
       filename = course_name[0:10] + '-convos.jsonl'
-      file_path = os.path.join(os.getcwd(), filename)
+      file_path = os.path.join(temp_dir, filename)
+
       curr_count = 0
       # Fetch data in batches of 25 from first_id to last_id
       while curr_count < total_count:
@@ -183,13 +189,13 @@ class ExportService:
       try:
         # zip file
         zip_filename = filename.split('.')[0] + '.zip'
-        zip_file_path = os.path.join(os.getcwd(), zip_filename)
+        zip_file_path = os.path.join(temp_dir, zip_filename)
 
         with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
           zipf.write(file_path, filename)
         os.remove(file_path)
 
-        return {"response": (zip_file_path, zip_filename, os.getcwd())}
+        return {"response": zip_file_path}
       except Exception as e:
         print(e)
         self.sentry.capture_exception(e)
@@ -225,8 +231,10 @@ class ExportService:
       last_id = response["data"][-1]['id']
       total_count = count
 
+      temp_dir = tempfile.mkdtemp(prefix="export_")
+
       filename = course_name[0:10] + '-convos.jsonl'
-      file_path = os.path.join(os.getcwd(), filename)
+      file_path = os.path.join(temp_dir, filename)
       curr_count = 0
       # Fetch data in batches of 25 from first_id to last_id
       while curr_count < total_count:
@@ -251,13 +259,13 @@ class ExportService:
       try:
         # zip file
         zip_filename = filename.split('.')[0] + '.zip'
-        zip_file_path = os.path.join(os.getcwd(), zip_filename)
+        zip_file_path = os.path.join(temp_dir, zip_filename)
 
         with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
           zipf.write(file_path, filename)
         os.remove(file_path)
 
-        return {"response": (zip_file_path, zip_filename, os.getcwd())}
+        return {"response": zip_file_path}
       except Exception as e:
         print(e)
         self.sentry.capture_exception(e)
@@ -587,8 +595,10 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
   print("pre-defined s3_path: ", s3_path)
 
   curr_doc_count = 0
+  temp_dir = tempfile.mkdtemp(prefix="export_")
+
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
-  file_path = os.path.join(os.getcwd(), filename)
+  file_path = os.path.join(temp_dir, filename)
 
   # download data in batches of 100
   while curr_doc_count < total_doc_count:
@@ -608,7 +618,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
 
   # zip file
   zip_filename = filename.split('.')[0] + '.zip'
-  zip_file_path = os.path.join(os.getcwd(), zip_filename)
+  zip_file_path = os.path.join(temp_dir, zip_filename)
 
   with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
     zipf.write(file_path, filename)
@@ -696,8 +706,11 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
   print("pre-defined s3_path: ", s3_path)
 
   curr_doc_count = 0
+
+  temp_dir = tempfile.mkdtemp(prefix="export_")
+
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
-  file_path = os.path.join(os.getcwd(), filename)
+  file_path = os.path.join(temp_dir, filename)
 
   # download data in batches of 100
   while curr_doc_count < total_doc_count:
@@ -717,7 +730,7 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
 
   # zip file
   zip_filename = filename.split('.')[0] + '.zip'
-  zip_file_path = os.path.join(os.getcwd(), zip_filename)
+  zip_file_path = os.path.join(temp_dir, zip_filename)
 
   with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
     zipf.write(file_path, filename)
