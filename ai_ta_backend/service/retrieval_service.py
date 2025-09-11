@@ -1094,6 +1094,7 @@ class RetrievalService:
                 documents.append(doc)
                 
             except Exception as e:
+                print("Error in _store_conversation_content: ", e)
                 pass
                 continue
         
