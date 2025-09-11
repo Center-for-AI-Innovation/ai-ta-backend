@@ -14,7 +14,7 @@ from flask import (
   jsonify,
   make_response,
   request,
-  send_from_directory, send_file,
+  send_from_directory, send_file, after_this_request,
 )
 from flask_cors import CORS
 from flask_executor import Executor
@@ -386,15 +386,19 @@ def export_convo_history_v2(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-      send_file(export_status['response'], as_attachment=True)
-    )
-    filename = os.path.basename(export_status['response'])
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
-    os.remove(export_status['response'])
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
 
-  return response
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    os.remove(file_path)
+
+    return response
 
 
 @app.route('/export-convo-history-user', methods=['GET'])

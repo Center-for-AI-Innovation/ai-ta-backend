@@ -280,6 +280,8 @@ def _create_zip(file_paths, error_log):
     zipf.write(file_paths['jsonl'], os.path.basename(file_paths['jsonl']))
     zipf.write(error_log_path, 'error.log')
   print(f"Created zip file at path: {zip_file_path}")
+  os.remove(error_log_path)
+
   return zip_file_path
 
 
