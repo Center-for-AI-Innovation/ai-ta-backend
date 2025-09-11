@@ -407,7 +407,7 @@ class ExportService:
           # Create zip file
           zip_file_path = _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log)
 
-          return {"response": (zip_file_path, 'user_convo_export.zip', os.getcwd())}
+          return {"response": zip_file_path}
       except Exception as e:
         error_log.append(f"Error creating markdown directory: {str(e)}")
         print(f"Error creating markdown directory: {str(e)}")

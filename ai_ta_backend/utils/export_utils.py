@@ -304,6 +304,7 @@ def _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log):
                    os.path.join(media_dir.split('/')[-1], os.path.relpath(os.path.join(root, file), media_dir)))
     zipf.write(error_log_path, 'error.log')
   print(f"Created zip file at path: {zip_file_path}")
+  os.remove(error_log_path)
   return zip_file_path
 
 

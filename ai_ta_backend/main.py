@@ -398,7 +398,7 @@ def export_convo_history_v2(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
     os.remove(file_path)
 
-    return response
+  return response
 
 
 @app.route('/export-convo-history-user', methods=['GET'])
@@ -430,13 +430,17 @@ def export_convo_history_user(service: ExportService):
     response.status_code = 500
     response.headers.add('Access-Control-Allow-Origin', '*')
   else:
-    print("export_status['response'][2]: ", export_status['response'][2])
-    print("export_status['response'][1]: ", export_status['response'][1])
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
