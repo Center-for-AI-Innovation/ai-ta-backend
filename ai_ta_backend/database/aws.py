@@ -8,11 +8,13 @@ class AWSStorage:
 
   @inject
   def __init__(self):
-    # S3
-    self.s3_client = boto3.client(
-        's3',
-        # endpoint_url=os.environ.get('MINIO_API_URL'),  # for Self hosted MinIO bucket
-    )
+    s3_config = {}
+
+    # If running against local MinIO
+    if os.environ.get("LOCAL_MINIO") == "true" and os.environ.get("MINIO_ENDPOINT"):
+        s3_config["endpoint_url"] = os.environ["MINIO_ENDPOINT"]
+
+    self.s3_client = boto3.client("s3", **s3_config)
 
   def upload_file(self, file_path: str, bucket_name: str, object_name: str):
     self.s3_client.upload_file(file_path, bucket_name, object_name)
