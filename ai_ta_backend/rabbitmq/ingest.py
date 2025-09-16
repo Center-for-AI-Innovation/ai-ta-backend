@@ -327,13 +327,9 @@ class Ingest:
             contexts: List[Document] = text_splitter.create_documents(texts=texts, metadatas=metadatas)
             input_texts = [{'input': context.page_content, 'model': self.embedding_model} for context in contexts]
 
-            # Check for duplicates
+            # Check for duplicates (will also delete data if duplicate is found)
             is_duplicate = self.check_for_duplicates(input_texts, metadatas, force_embeddings)
-            if is_duplicate:
-                if force_embeddings:
-                    # We will recalculate vectors, so clean up existing records first
-                    logging.info("Force re-embedding enabled -- deleting existing records first")
-                else:
+            if is_duplicate and not force_embeddings:
                     if self.posthog:
                         self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_succeeded',
                                              properties={
