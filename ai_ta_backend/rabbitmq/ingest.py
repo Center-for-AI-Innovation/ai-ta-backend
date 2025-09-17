@@ -502,8 +502,8 @@ class Ingest:
 
         db_whole_text = ""
         exact_doc_exists = False
-        if len(contents) > 0:  # a doc with same filename exists in Supabase
-            logging.info(f"Checking for Supabase contents: {contents}")
+        if len(contents) > 0:  # a doc with same filename exists in SQL
+            logging.info(f"Checking for contents: {contents}")
             for record in contents:
                 logging.info(f"Record: {record}")
                 if incoming_s3_path:
@@ -526,7 +526,7 @@ class Ingest:
                     contexts = record
 
                     exact_doc_exists = True
-                    print("Exact doc exists in Supabase:", sql_filename)
+                    print("Exact doc exists in DB:", sql_filename)
                     break
 
             if exact_doc_exists:
@@ -538,6 +538,8 @@ class Ingest:
 
                 if db_whole_text == current_whole_text:
                     logging.info(f"Duplicate detected: {original_filename}.")
+                    if force_embeddings:
+                        self.delete_vectors(course_name, older_s3_path, url)
                     return True
                 else:
                     print(f"Updated file detected: {original_filename}")
