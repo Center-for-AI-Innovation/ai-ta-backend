@@ -8,6 +8,7 @@ from typing import Dict, List
 from dotenv import load_dotenv
 
 import boto3
+from botocore.config import Config
 import sentry_sdk
 from canvasapi import Canvas
 
@@ -30,6 +31,7 @@ class IngestCanvas:
         self.canvas_access_token = os.getenv('CANVAS_ACCESS_TOKEN')
         self.headers = {"Authorization": f"Bearer {self.canvas_access_token}"}
         self.volume_path = "./canvas_ingest"
+        self.minio_url = os.getenv('MINIO_URL')
         self.aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
         self.aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 
@@ -37,10 +39,23 @@ class IngestCanvas:
         self.canvas_client = None
 
     def initialize_resources(self):
-        self.s3_client = boto3.client('s3',
-              aws_access_key_id=self.aws_access_key_id,
-              aws_secret_access_key=self.aws_secret_access_key
-        )
+        # Connect to AWS S3 file store
+        if self.aws_access_key_id and self.aws_secret_access_key:
+            self.s3_client = boto3.client(
+                's3',
+                endpoint_url=self.minio_url,
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                config=Config(s3={'addressing_style': 'path'}),
+            )
+        else:
+            logging.info("AWS ACCESS KEY ID OR SECRET ACCESS KEY NOT FOUND, TRYING WITHOUT CREDENTIALS")
+            self.s3_client = boto3.client(
+                's3',
+                endpoint_url=self.minio_url,
+                config=Config(s3={'addressing_style': 'path'})
+            )
+
         self.canvas_client = Canvas(self.canvas_url, self.canvas_access_token)
 
         # TODO: Is this sentry stuff necessary?
@@ -48,6 +63,80 @@ class IngestCanvas:
               dsn="https://examplePublicKey@o0.ingest.sentry.io/0",
               enable_tracing=True,
         )
+
+    def auto_accept_enrollments(self, target_course_id):
+        try:
+            # Validate target_course_id
+            if target_course_id is None:
+                error_msg = "target_course_id cannot be None"
+                return f"Failed: {error_msg}"
+            user_response = requests.get(
+                f"{self.canvas_url}/api/v1/users/self",
+                headers=self.headers
+            )
+            user_response.raise_for_status()
+            user_data = user_response.json()
+            user_id = user_data.get('id')
+
+            if not user_id:
+                return "Failed to get user ID"
+
+            # First, check if user is already enrolled in the target course
+            current_enrollments_url = f"{self.canvas_url}/api/v1/users/{user_id}/enrollments?state[]=active"
+            current_enrollment_response = requests.get(current_enrollments_url, headers=self.headers)
+            current_enrollment_response.raise_for_status()
+            current_enrollments = current_enrollment_response.json()
+
+            # Check if already enrolled in target course
+            for enrollment in current_enrollments:
+                course_id = enrollment.get('course_id')
+                if str(course_id) == str(target_course_id):
+                    return f"User is already enrolled in course ID {target_course_id}"
+
+            # If not already enrolled, check for pending invitations
+            enrollments_url = f"{self.canvas_url}/api/v1/users/{user_id}/enrollments?state[]=invited"
+            enrollment_response = requests.get(enrollments_url, headers=self.headers)
+            enrollment_response.raise_for_status()
+            pending_enrollments = enrollment_response.json()
+
+            # Find the enrollment for the target course
+            target_enrollment = None
+            for enrollment in pending_enrollments:
+                course_id = enrollment.get('course_id')
+                if str(course_id) == str(target_course_id):
+                    target_enrollment = enrollment
+                    break
+
+            # If no enrollment found for the target course, throw error
+            if not target_enrollment:
+                error_msg = f"User is not enrolled and no pending invitation found for course ID {target_course_id}"
+                raise Exception(error_msg)
+
+            # Accept the enrollment for the target course
+            course_id = target_enrollment.get('course_id')
+            enrollment_id = target_enrollment.get('id')
+
+            if not course_id or not enrollment_id:
+                error_msg = f"Missing course_id or enrollment_id in enrollment data: {target_enrollment}"
+                raise Exception(error_msg)
+
+            accept_url = f"{self.canvas_url}/api/v1/courses/{course_id}/enrollments/{enrollment_id}/accept"
+            accept_response = requests.post(accept_url, headers=self.headers)
+
+            if accept_response.status_code == 200:
+                result = accept_response.json()
+                if result.get('success'):
+                    return f"Successfully accepted enrollment for course ID {course_id}"
+                else:
+                    error_msg = f"Failed to accept enrollment: {result}"
+                    raise Exception(error_msg)
+            else:
+                error_msg = f"Failed to accept enrollment. Status code: {accept_response.status_code}"
+                raise Exception(error_msg)
+
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+            return f"Failed! Error: {str(e)}"
 
     def upload_file(self, file_path: str, bucket_name: str, object_name: str):
         self.s3_client.upload_file(file_path, bucket_name, object_name)
@@ -73,113 +162,106 @@ class IngestCanvas:
 
     def download_course_content(self, canvas_course_id: int, dest_folder: str, content_ingest_dict: dict) -> str:
         """Downloads all Canvas course materials through the course ID and stores in local directory."""
-        try:
-            api_path = f"{self.canvas_url}/api/v1/courses/{canvas_course_id}"
+        self.initialize_resources()
+        api_path = f"{self.canvas_url}/api/v1/courses/{canvas_course_id}"
 
-            # Iterate over the content_ingest_dict
-            for key, value in content_ingest_dict.items():
-                if value is True:
-                    if key == 'files':
-                        self.download_files(dest_folder, api_path)
-                    elif key == 'pages':
-                        self.download_pages(dest_folder, api_path)
-                    elif key == 'modules':
-                        self.download_modules(dest_folder, api_path)
-                    elif key == 'syllabus':
-                        self.download_syllabus(dest_folder, api_path)
-                    elif key == 'assignments':
-                        self.download_assignments(dest_folder, api_path)
-                    elif key == 'discussions':
-                        self.download_discussions(dest_folder, api_path)
+        # Iterate over the content_ingest_dict
+        for key, value in content_ingest_dict.items():
+            if value is True:
+                if key == 'files':
+                    self.download_files(dest_folder, api_path)
+                elif key == 'pages':
+                    self.download_pages(dest_folder, api_path)
+                elif key == 'modules':
+                    self.download_modules(dest_folder, api_path)
+                elif key == 'syllabus':
+                    self.download_syllabus(dest_folder, api_path)
+                elif key == 'assignments':
+                    self.download_assignments(dest_folder, api_path)
+                elif key == 'discussions':
+                    self.download_discussions(dest_folder, api_path)
 
-            extracted_urls_from_html = self.extract_urls_from_html(dest_folder)
+        extracted_urls_from_html = self.extract_urls_from_html(dest_folder)
 
-            # links - canvas files, external urls, embedded videos
-            file_links = extracted_urls_from_html.get('file_links', [])
-            if file_links:
-                file_download_status = self.download_files_from_urls(file_links, canvas_course_id, dest_folder)
-                print("File download status: ", file_download_status)
+        # links - canvas files, external urls, embedded videos
+        file_links = extracted_urls_from_html.get('file_links', [])
+        if file_links:
+            file_download_status = self.download_files_from_urls(file_links, canvas_course_id, dest_folder)
+            print("File download status: ", file_download_status)
 
-            video_links = extracted_urls_from_html.get('video_links', [])
-            if video_links:
-                video_download_status = self.download_videos_from_urls(video_links, canvas_course_id, dest_folder)
-                print("Video download status: ", video_download_status)
+        video_links = extracted_urls_from_html.get('video_links', [])
+        if video_links:
+            video_download_status = self.download_videos_from_urls(video_links, canvas_course_id, dest_folder)
+            print("Video download status: ", video_download_status)
 
-            data_api_endpoints = extracted_urls_from_html.get('data_api_endpoints', [])
-            if data_api_endpoints:
-                data_api_endpoints_status = self.download_content_from_api_endpoints(data_api_endpoints,
-                                                                                     canvas_course_id,
-                                                                                     dest_folder)
-                print("Data API Endpoints download status: ", data_api_endpoints_status)
-            return "Success"
-        except Exception as e:
-            sentry_sdk.capture_exception(e)
-            return "Failed! Error: " + str(e)
+        data_api_endpoints = extracted_urls_from_html.get('data_api_endpoints', [])
+        if data_api_endpoints:
+            data_api_endpoints_status = self.download_content_from_api_endpoints(data_api_endpoints,
+                                                                                 canvas_course_id,
+                                                                                 dest_folder)
+            print("Data API Endpoints download status: ", data_api_endpoints_status)
 
     def ingest_course_content(self,
                               canvas_course_id: int,
                               course_name: str,
-                              content_ingest_dict: Dict[str, bool] = None) -> str:
+                              content_ingest_dict: Dict[str, bool] = None) -> List[str]:
         """
         Ingests all Canvas course materials through the course ID.
         """
-        try:
-            if content_ingest_dict is None:
-                content_ingest_dict = {
-                    'files': True,
-                    'pages': True,
-                    'modules': True,
-                    'syllabus': True,
-                    'assignments': True,
-                    'discussions': True
-                }
+        if content_ingest_dict is None:
+            content_ingest_dict = {
+                'files': True,
+                'pages': True,
+                'modules': True,
+                'syllabus': True,
+                'assignments': True,
+                'discussions': True
+            }
 
-            # Create a canvas directory with a course folder inside it.
-            canvas_dir = os.path.join(self.volume_path, "canvas_materials")
-            folder_name = f"canvas_course_{canvas_course_id}_ingest"
-            folder_path = os.path.join(canvas_dir, folder_name)
-            os.mkdirs(folder_path, exist_ok=True)
+        # Create a canvas directory with a course folder inside it.
+        canvas_dir = os.path.join(self.volume_path, "canvas_materials")
+        folder_name = f"canvas_course_{canvas_course_id}_ingest"
+        folder_path = os.path.join(canvas_dir, folder_name)
+        os.makedirs(folder_path, exist_ok=True)
 
-            self.download_course_content(canvas_course_id, folder_path, content_ingest_dict)
+        self.download_course_content(canvas_course_id, folder_path, content_ingest_dict)
 
-            # Upload files to S3
-            all_file_paths = [os.path.join(dp, f) for dp, dn, filenames in os.walk(folder_path) for f in filenames]
-            all_s3_paths = []
-            all_readable_filenames = []
-            for file_path in all_file_paths:
-                file_name = os.path.basename(file_path)
-                extension = os.path.splitext(file_name)[1]
-                name_without_extension = re.sub(r'[^a-zA-Z0-9]', '-', os.path.splitext(file_name)[0])
-                readable_filename = f"{name_without_extension}{extension}"
-                uid = uuid.uuid4()
+        # Upload files to S3
+        all_file_paths = [os.path.join(dp, f) for dp, dn, filenames in os.walk(folder_path) for f in filenames]
+        all_s3_paths = []
+        all_readable_filenames = []
+        for file_path in all_file_paths:
+            file_name = os.path.basename(file_path)
+            extension = os.path.splitext(file_name)[1]
+            name_without_extension = re.sub(r'[^a-zA-Z0-9]', '-', os.path.splitext(file_name)[0])
+            readable_filename = f"{name_without_extension}{extension}"
+            uid = uuid.uuid4()
 
-                unique_filename = f"{uid}-{readable_filename}"
-                s3_path = f"courses/{course_name}/{unique_filename}"
-                all_s3_paths.append(s3_path)
-                all_readable_filenames.append(readable_filename)
-                print(f"Uploading file: {readable_filename}")
-                self.upload_file(file_path, os.environ['S3_BUCKET_NAME'], s3_path)
+            unique_filename = f"{uid}-{readable_filename}"
+            s3_path = f"courses/{course_name}/{unique_filename}"
+            all_s3_paths.append(s3_path)
+            all_readable_filenames.append(readable_filename)
+            print(f"Uploading file: {readable_filename}")
+            self.upload_file(file_path, os.environ['S3_BUCKET_NAME'], s3_path)
 
-            shutil.rmtree(folder_path)
+        shutil.rmtree(folder_path)
 
-            # Ingest files
-            active_queue = Queue()  # TODO: Should we post back to /ingest endpoint here?
-            for s3_path, readable_filename in zip(all_s3_paths, all_readable_filenames):
-                data = {
-                    'course_name': course_name,
-                    'readable_filename': readable_filename,
-                    's3_paths': s3_path,
-                    'base_url': f"{self.canvas_url}/courses/{canvas_course_id}",
-                }
-                print(f"Posting readable_filename: '{readable_filename}' with S3 path: '{s3_path}'")
-                result = active_queue.addJobToIngestQueue(data)
-                print("RabbitMQ Ingest Task Queue response: ", result)
+        # Ingest files
+        job_ids = []
+        active_queue = Queue()  # TODO: Should we post back to /ingest endpoint here?
+        for s3_path, readable_filename in zip(all_s3_paths, all_readable_filenames):
+            data = {
+                'course_name': course_name,
+                'readable_filename': readable_filename,
+                's3_paths': s3_path,
+                'base_url': f"{self.canvas_url}/courses/{canvas_course_id}",
+            }
+            print(f"Posting readable_filename: '{readable_filename}' with S3 path: '{s3_path}'")
+            job_id = active_queue.addJobToIngestQueue(data)
+            print("RabbitMQ Ingest Task Queue response: ", job_id)
+            job_ids.append(job_id)
 
-            return "success"
-        except Exception as e:
-            print(e)
-            sentry_sdk.capture_exception(e)
-            return "Failed"
+        return job_ids
 
     def download_files(self, dest_folder: str, api_path: str) -> str:
         """
@@ -188,7 +270,6 @@ class IngestCanvas:
         try:
             files_request = requests.get(f"{api_path}/files", headers=self.headers)
             files = files_request.json()
-
             if 'status' in files and files['status'] == 'unauthorized':
                 logging.error(f"Unauthorized to access files: {files['status']}")
                 # Student user probably blocked for Files access

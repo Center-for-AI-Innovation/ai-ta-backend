@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Dict, List, Union
 import tempfile
 import mimetypes
+import logging
 from pathlib import Path
 
 import openai
@@ -141,7 +142,7 @@ class RetrievalService:
 
       disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
 
-      disabled_doc_groups = [doc_group['name'] for doc_group in disabled_doc_groups_response["data"]]
+      disabled_doc_groups = [doc_group for doc_group in disabled_doc_groups_response["data"]]
       public_doc_groups = public_doc_groups_response["data"]
 
       time_for_parallel_operations = time.monotonic() - start_time_overall
@@ -335,18 +336,13 @@ class RetrievalService:
         raise ValueError("S3_BUCKET_NAME environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
-      print(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
+      logging.info(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
 
       # Delete from S3
       if identifier_key == "s3_path":
         self.delete_from_s3(bucket_name, s3_path)
-
-      # Delete from Qdrant
       self.delete_from_qdrant(identifier_key, identifier_value, course_name)
-
-      # Delete from Nomic and Database
       self.delete_from_nomic_and_database(course_name, identifier_key, identifier_value)
-
       return "Success"
 
     except Exception as e:

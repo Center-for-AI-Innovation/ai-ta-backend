@@ -13,6 +13,11 @@ class AWSStorage:
     # If running against local MinIO
     if os.environ.get("LOCAL_MINIO") == "true" and os.environ.get("MINIO_ENDPOINT"):
         s3_config["endpoint_url"] = os.environ["MINIO_ENDPOINT"]
+    
+    # AWS credentials
+    if os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"):
+        s3_config["aws_access_key_id"] = os.environ["AWS_ACCESS_KEY_ID"]
+        s3_config["aws_secret_access_key"] = os.environ["AWS_SECRET_ACCESS_KEY"]
 
     self.s3_client = boto3.client("s3", **s3_config)
 
