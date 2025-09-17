@@ -191,7 +191,6 @@ class SQLAlchemyIngestDB:
                 return None, 0
 
     def get_like_docs_by_s3_path(self, course_name, original_filename):
-        logging.info(f"In get_like_docs_by_s3_path")
         query = (
             select(models.Document.id, models.Document.contexts, models.Document.s3_path)
             .where(models.Document.course_name == course_name)
@@ -201,7 +200,6 @@ class SQLAlchemyIngestDB:
 
         with self.get_session() as session:
             result = session.execute(query).mappings().all()
-            logging.info(f"In get_like_docs_by_s3_path, result: {result}")
             response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
         return response

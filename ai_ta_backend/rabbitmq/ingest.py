@@ -201,9 +201,9 @@ class Ingest:
         """Bulk ingest a list of s3 paths into the vectorstore, and also into the database."""
         print(f"Top of bulk_ingest: ", kwargs)
 
-        def _ingest_single(ingest_method: Callable, s3_path, *args, **kwargs):
+        def _ingest_single(ingest_method: Callable, s3_path: str, force_embeddings: bool, *args, **kwargs):
             """Handle running an arbitrary ingest function for an individual file."""
-            ret = ingest_method(s3_path, *args, **kwargs)
+            ret = ingest_method(s3_path, force_embeddings, *args, **kwargs)
             if ret == "Success":
                 success_status['success_ingest'] = str(s3_path)
             else:
@@ -259,10 +259,10 @@ class Ingest:
                 # Ingest with specialized functions when possible, fallback to mimetype.
                 if file_extension in file_ingest_methods:
                     ingest_method = file_ingest_methods[file_extension]
-                    _ingest_single(ingest_method, s3_path, course_name, **kwargs)
+                    _ingest_single(ingest_method, s3_path, course_name, force_embeddings, **kwargs)
                 elif mime_category in mimetype_ingest_methods:
                     ingest_method = mimetype_ingest_methods[mime_category]
-                    _ingest_single(ingest_method, s3_path, course_name, **kwargs)
+                    _ingest_single(ingest_method, s3_path, course_name, force_embeddings, **kwargs)
                 else:
                     # No supported ingest... Fallback to attempting utf-8 decoding, otherwise fail.
                     try:
@@ -503,9 +503,7 @@ class Ingest:
         db_whole_text = ""
         exact_doc_exists = False
         if len(contents) > 0:  # a doc with same filename exists in SQL
-            logging.info(f"Checking for contents: {contents}")
             for record in contents:
-                logging.info(f"Record: {record}")
                 if incoming_s3_path:
                     curr_filename = record['s3_path'].split('/')[-1]
                     older_s3_path = record['s3_path']
@@ -516,17 +514,14 @@ class Ingest:
                         # do not remove anything and proceed with duplicate checking
                         sql_filename = curr_filename
                 elif url:
-                    print("URL retrieved from SQL: ", record.keys())
                     sql_filename = record['url']
                 else:
                     continue
-                print("Original filename: ", original_filename, "Current SQL filename: ", sql_filename)
 
                 if original_filename == sql_filename:  # compare og s3_path/url with incoming s3_path/url
                     contexts = record
-
                     exact_doc_exists = True
-                    print("Exact doc exists in DB:", sql_filename)
+                    logging.info(f"Exact doc exists in DB: {sql_filename}")
                     break
 
             if exact_doc_exists:
@@ -565,7 +560,7 @@ class Ingest:
 
     def delete_data(self, course_name: str, s3_path: str, source_url: str):
         """Delete file from S3, Qdrant, and SQL."""
-        print(f"Deleting {s3_path} from S3, Qdrant, and SQL for course {course_name}")
+        logging.info(f"Deleting {s3_path} from S3, Qdrant, and SQL for course {course_name}")
         try:
             if s3_path:
                 try:
@@ -634,7 +629,7 @@ class Ingest:
 
     def delete_vectors(self, course_name: str, s3_path: str, source_url: str):
         """Delete vector data from Qdrant and SQL."""
-        print(f"Deleting {s3_path} vectors from Qdrant and SQL for course {course_name}")
+        logging.info(f"Deleting {s3_path} vectors from Qdrant and SQL for course {course_name}")
         try:
             if s3_path:
                 # Delete from Qdrant
