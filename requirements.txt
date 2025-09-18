@@ -88,7 +88,7 @@ docx2txt==0.8 # Alternative DOCX processing
 # GitPython
 # pysrt
 # docx2txt
-# pydub
+pydub==0.25.1
 # ffmpeg-python
 # ffprobe
 # ffmpeg
