@@ -579,8 +579,8 @@ class VectorDatabase():
     # Add the own_course_condition to should_conditions
     should_conditions.append(own_course_condition)
 
-    # Construct the final filter
-    vector_search_filter = models.Filter(should=should_conditions, must_not=must_not_conditions)
+    # Construct the final filter (apply must to enforce no conversation_id)
+    vector_search_filter = models.Filter(must=must_conditions, should=should_conditions, must_not=must_not_conditions)
 
     print(f"Vector search filter: {vector_search_filter}")
     return vector_search_filter
