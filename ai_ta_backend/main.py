@@ -48,12 +48,23 @@ from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
 
 app = Flask(__name__)
 CORS(app)
+# Limit Flask-Executor thread pool to avoid thread exhaustion
+app.config['EXECUTOR_MAX_WORKERS'] = 8
 executor = Executor(app)
-# app.config['EXECUTOR_MAX_WORKERS'] = 5 nothing == picks defaults for me
 #app.config['SERVER_TIMEOUT'] = 1000  # seconds
 
 # load API keys from globally-availabe .env file
 load_dotenv()
+
+# Add thread tracking middleware
+from ai_ta_backend.middleware.thread_tracking import track_thread_usage
+
+before_request_func, after_request_func = track_thread_usage()
+app.before_request(before_request_func)
+app.after_request(after_request_func)
+
+# Start background thread monitor (optional - comment out if not needed)
+from ai_ta_backend.utils.background_monitor import start_background_monitor
 
 
 @app.route('/')
@@ -344,6 +355,48 @@ def export_convo_history(service: ExportService):
 def test_process(service: ExportService):
   service.test_process()
   return jsonify({"response": "success"})
+
+
+@app.route('/thread-monitor', methods=['GET'])
+def thread_monitor():
+  """Debug endpoint to monitor thread usage."""
+  from ai_ta_backend.utils.thread_monitor import get_thread_info
+
+  info = get_thread_info()
+
+  # Add executor info by checking the global executor and looking at thread counts
+  try:
+    import threading
+
+    # Get all thread names to identify executor threads
+    all_threads = threading.enumerate()
+    thread_names = [t.name for t in all_threads]
+
+    # Count executor-related threads
+    executor_threads = [name for name in thread_names if 'ThreadPoolExecutor' in name or 'Executor' in name]
+    worker_threads = [name for name in thread_names if 'worker' in name.lower()]
+
+    info['executor_states'] = {
+        'total_threads': len(all_threads),
+        'executor_thread_count': len(executor_threads),
+        'worker_thread_count': len(worker_threads),
+        'thread_names': thread_names[:20],  # First 20 thread names for debugging
+    }
+
+    # Check Flask-Executor if available
+    if executor and hasattr(executor, '_executor'):
+      pool = executor._executor
+      info['executor_states']['flask_executor'] = {
+          'class': pool.__class__.__name__,
+          'shutdown': pool._shutdown if hasattr(pool, '_shutdown') else 'unknown',
+          'max_workers': pool._max_workers if hasattr(pool, '_max_workers') else 'unknown',
+      }
+  except Exception as e:
+    info['executor_states'] = {'error': str(e)}
+
+  response = jsonify(info)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route('/export-convo-history', methods=['GET'])
@@ -747,6 +800,7 @@ def updateProjectDocuments(flaskExecutor: ExecutorInterface) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+
 @app.route('/getClinicalKGContexts', methods=['GET'])
 def clinicalKGContexts(graph_db: GraphDatabase) -> Response:
   user_query = request.args.get('user_query', default='', type=str)
@@ -764,6 +818,7 @@ def clinicalKGContexts(graph_db: GraphDatabase) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+
 @app.route('/getPrimeKGContexts', methods=['GET'])
 def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
   user_query = request.args.get('user_query', default='', type=str)
@@ -775,6 +830,7 @@ def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
   response = jsonify(results)
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
+
 
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
@@ -792,7 +848,18 @@ def configure(binder: Binder) -> None:
   binder.bind(GraphDatabase, to=GraphDatabase, scope=SingletonScope)
 
 
-FlaskInjector(app=app, modules=[configure])
+flask_injector = FlaskInjector(app=app, modules=[configure])
+
+# Start background thread monitor after DI, using PosthogService from injector
+try:
+  if os.getenv('POSTHOG_API_KEY'):
+    ph_service_for_monitor = flask_injector.injector.get(PosthogService)
+    start_background_monitor(interval_seconds=60, capture_callback=ph_service_for_monitor.capture)
+  else:
+    start_background_monitor(interval_seconds=60)
+except Exception as e:
+  # Fail open: monitor is optional
+  print(f"Failed to start background monitor with PostHog via DI: {e}")
 
 if __name__ == '__main__':
   app.run(debug=True, port=int(os.getenv("PORT", default=8000)))  # nosec -- reasonable bandit error suppression

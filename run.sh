@@ -6,4 +6,4 @@
 # ray start --head --num-cpus 6 --object-store-memory 300000000
 
 export PYTHONPATH=${PYTHONPATH}:$(pwd)/ai_ta_backend
-exec uv run gunicorn --workers=3 --threads=100 --worker-class=gthread ai_ta_backend.main:app --timeout 1800
+exec uv run gunicorn --workers=3 --threads=20 --worker-class=gthread ai_ta_backend.main:app --timeout 1800
