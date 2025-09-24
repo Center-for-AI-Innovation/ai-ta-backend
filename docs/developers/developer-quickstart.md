@@ -7,7 +7,7 @@ description: Thanks for contributing to UIUC.chat ❤️
 ## Start here
 
 * [ ] Send me (rohan13@illinois.edu) an email and request to be added to:
-  * [GitHub Organization](https://github.com/UIUC-Chatbot) & [Frontend repo](https://github.com/Center-for-AI-Innovation/uiuc-chat-frontend), <mark style="color:yellow;">include your GitHub username</mark>.
+  * [GitHub Organization](https://github.com/Center-for-AI-Innovation) & [Frontend repo](https://github.com/Center-for-AI-Innovation/uiuc-chat-frontend), <mark style="color:yellow;">include your GitHub username</mark>.
   * [Secrets manager](https://env.uiuc.chat/), <mark style="color:yellow;">include your preferred email address</mark>.
   * Supabase dashboard, <mark style="color:yellow;">include your GitHub's email address</mark>.
 
@@ -18,7 +18,7 @@ description: Thanks for contributing to UIUC.chat ❤️
 * Google: `caiincsa@gmail.com`
 * Managed services: Vercel, Railway, Beam, Supabase, S3, Posthog, Sentry.
 * Self-hosted: Qdrant, Ollama.
-* Task management via [our Github Projects board](https://github.com/orgs/UIUC-Chatbot/projects/2).
+* Task management via [our Github Projects board](https://github.com/orgs/Center-for-AI-Innovation/projects?query=is:open).
 
 </details>
 
