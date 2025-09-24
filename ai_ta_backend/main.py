@@ -59,7 +59,7 @@ load_dotenv()
 
 @app.route('/')
 def index() -> Response:
-    """_summary_
+  """_summary_
 
   Args:
       test (int, optional): _description_. Defaults to 1.
@@ -67,26 +67,26 @@ def index() -> Response:
   Returns:
       JSON: _description_
   """
-    response = jsonify(
-      {"hi there, this is a 404": "Welcome to UIUC.chat backend 🚅 Read the docs here: https://docs.uiuc.chat/ "})
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    return response
+  response = jsonify(
+    {"hi there, this is a 404": "Welcome to UIUC.chat backend 🚅 Read the docs here: https://docs.uiuc.chat/ "})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
 
 
 @app.route("/evaluate", methods=["POST"])
 def evaluate(service: EvaluationService) -> Response:
-    """
-    Runs the evaluation service
-    """
+  """
+  Runs the evaluation service
+  """
 
-    data = request.get_json()
-    questions = data.get("questions", "")
-    judge = data.json.get("judge", ["gpt-4o-mini"])
+  data = request.get_json()
+  questions = data.get("questions", "")
+  judge = data.json.get("judge", ["gpt-4o-mini"])
 
-    result = service.evaluate(questions, judge)
-    response = jsonify(result)
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    return response
+  result = service.evaluate(questions, judge)
+  response = jsonify(result)
+  response.headers.add("Access-Control-Allow-Origin", "*")
+  return response
 
 
 @app.route('/getTopContexts', methods=['POST'])
