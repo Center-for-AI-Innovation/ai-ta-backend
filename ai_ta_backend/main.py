@@ -81,7 +81,7 @@ def evaluate(service: EvaluationService) -> Response:
 
   data = request.get_json()
   questions = data.get("questions", "")
-  judge = data.json.get("judge", ["gpt-4o-mini"])
+  judge = data.get("judge", ["gpt-4o-mini"])
 
   result = service.evaluate(questions, judge)
   response = jsonify(result)
