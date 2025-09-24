@@ -36,6 +36,7 @@ langchain_openai==0.3.5
 langchain_qdrant==0.2.0
 langchain_neo4j==0.4.0
 langchain_community==0.3.16
+langchain-ollama==0.3.8
 langgraph==0.2.69
 
 # Data
@@ -49,7 +50,9 @@ redis[hiredis]==5.2.1
 posthog==3.13.0
 sentry-sdk==2.21.0
 
-ollama==0.4.7
+ollama==0.5.3
+ragas==0.3.5
+
 # Not currently supporting coursera ingest
 # cs-dlp @ git+https://github.com/raffaem/cs-dlp.git@0.12.0b0 # previously called coursera-dl
 

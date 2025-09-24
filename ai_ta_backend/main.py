@@ -40,6 +40,7 @@ from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
+from ai_ta_backend.service.evaluation_service import EvaluationService
 from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
@@ -50,7 +51,7 @@ app = Flask(__name__)
 CORS(app)
 executor = Executor(app)
 # app.config['EXECUTOR_MAX_WORKERS'] = 5 nothing == picks defaults for me
-#app.config['SERVER_TIMEOUT'] = 1000  # seconds
+# app.config['SERVER_TIMEOUT'] = 1000  # seconds
 
 # load API keys from globally-availabe .env file
 load_dotenv()
@@ -58,7 +59,7 @@ load_dotenv()
 
 @app.route('/')
 def index() -> Response:
-  """_summary_
+    """_summary_
 
   Args:
       test (int, optional): _description_. Defaults to 1.
@@ -66,10 +67,26 @@ def index() -> Response:
   Returns:
       JSON: _description_
   """
-  response = jsonify(
+    response = jsonify(
       {"hi there, this is a 404": "Welcome to UIUC.chat backend 🚅 Read the docs here: https://docs.uiuc.chat/ "})
-  response.headers.add('Access-Control-Allow-Origin', '*')
-  return response
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
+
+
+@app.route("/evaluate", methods=["POST"])
+def evaluate(service: EvaluationService) -> Response:
+    """
+    Runs the evaluation service
+    """
+
+    data = request.get_json()
+    questions = data.get("questions", "")
+    judge = data.json.get("judge", ["gpt-4o-mini"])
+
+    result = service.evaluate(questions, judge)
+    response = jsonify(result)
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    return response
 
 
 @app.route('/getTopContexts', methods=['POST'])
@@ -782,6 +799,7 @@ def configure(binder: Binder) -> None:
   binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
   binder.bind(PosthogService, to=PosthogService, scope=SingletonScope)
   # binder.bind(SentryService, to=SentryService, scope=SingletonScope)
+  binder.bind(EvaluationService, to=EvaluationService, scope=SingletonScope)
   binder.bind(NomicService, to=NomicService, scope=SingletonScope)
   binder.bind(ExportService, to=ExportService, scope=SingletonScope)
   binder.bind(WorkflowService, to=WorkflowService, scope=SingletonScope)
