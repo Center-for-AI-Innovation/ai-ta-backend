@@ -170,6 +170,15 @@ class Ingest:
                     break
             if success_fail_dict['failure_ingest']:
                 logging.error(f"INGEST FAILURE -- About to send to database. success_fail_dict: {success_fail_dict}")
+                self.sql_session.insert_failed_document({
+                    "s3_path": str(s3_paths),
+                    "readable_filename": readable_filename,
+                    "course_name": course_name,
+                    "url": url,
+                    "base_url": base_url,
+                    "doc_groups": doc_groups,
+                    "error": str(success_fail_dict),
+                })
 
             # Remove from documents in progress
             self.sql_session.delete_document_in_progress(job_id)
