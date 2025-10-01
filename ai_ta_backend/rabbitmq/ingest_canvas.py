@@ -34,6 +34,7 @@ class IngestCanvas:
         self.minio_url = os.getenv('MINIO_URL')
         self.aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
         self.aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
 
         self.s3_client = None
         self.canvas_client = None
@@ -242,7 +243,7 @@ class IngestCanvas:
             all_s3_paths.append(s3_path)
             all_readable_filenames.append(readable_filename)
             print(f"Uploading file: {readable_filename}")
-            self.upload_file(file_path, os.environ['S3_BUCKET_NAME'], s3_path)
+            self.upload_file(file_path, self.s3_bucket_name, s3_path)
 
         shutil.rmtree(folder_path)
 
