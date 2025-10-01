@@ -63,10 +63,11 @@ class Ingest:
     """
 
     def __init__(self):
-        self.openai_api_key = os.getenv('OPENAI_API_KEY')
-        self.openai_api_base = os.environ['EMBEDDING_API_BASE'] + "/embeddings" if os.environ['EMBEDDING_API_BASE'] else None
-        self.ncsa_hosted_api_key = os.getenv('NCSA_HOSTED_API_KEY')
-        self.embedding_model = os.environ['EMBEDDING_MODEL']
+        self.illinois_chat_config = os.getenv('ILLINOIS_CHAT_CONFIG', 'false')
+        self.openai_api_key = self.illinois_chat_config == 'false' and os.getenv('OPENAI_API_KEY')
+        self.openai_api_base = os.environ['EMBEDDING_API_BASE'] + "/embeddings" if os.environ['EMBEDDING_API_BASE'] else 'https://api.openai.com/v1/embeddings'
+        self.ncsa_hosted_api_key = self.illinois_chat_config == 'false' and os.getenv('NCSA_HOSTED_API_KEY') or self.openai_api_key
+        self.embedding_model = os.environ['EMBEDDING_MODEL'] if os.environ['EMBEDDING_MODEL'] else 'text-embedding-ada-002'
         self.qdrant_url = os.getenv('QDRANT_URL')
         self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
         self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
@@ -99,12 +100,20 @@ class Ingest:
                     collection_name=self.qdrant_collection_name,
                     vectors_config={"size": 4096, "distance": "Cosine"}
                 )
-            self.vectorstore = Qdrant(
-                client=self.qdrant_client,
-                collection_name=self.qdrant_collection_name,
-                embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
-                                            openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
-            )
+            if self.illinois_chat_config == 'false':
+                self.vectorstore = Qdrant(
+                    client=self.qdrant_client,
+                    collection_name=self.qdrant_collection_name,
+                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
+                                                openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
+                )
+            else:
+                self.vectorstore = Qdrant(
+                    client=self.qdrant_client,
+                    collection_name=self.qdrant_collection_name,
+                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
+                                                openai_api_base=self.openai_api_base, model=self.embedding_model)
+                )
         else:
             logging.error("QDRANT API KEY OR URL NOT FOUND!")
 
@@ -317,7 +326,7 @@ class Ingest:
 
         try:
             # try to split on paragraphs... fallback to sentences, then chars, ensure we always fit in context window
-            text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
                 chunk_size=1000,
                 chunk_overlap=150,
                 separators=["\n\n", "\n", ". ", " ", ""]
