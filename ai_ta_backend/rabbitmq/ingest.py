@@ -326,7 +326,7 @@ class Ingest:
 
         try:
             # try to split on paragraphs... fallback to sentences, then chars, ensure we always fit in context window
-            text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+            text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
                 chunk_size=1000,
                 chunk_overlap=150,
                 separators=["\n\n", "\n", ". ", " ", ""]
