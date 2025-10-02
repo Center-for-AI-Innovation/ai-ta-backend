@@ -140,7 +140,8 @@ class IngestCanvas:
             return f"Failed! Error: {str(e)}"
 
     def upload_file(self, file_path: str, bucket_name: str, object_name: str):
-        self.s3_client.upload_file(file_path, bucket_name, object_name)
+        with open(file_path, 'rb') as f:
+            self.s3_client.upload_fileobj(f, bucket_name, object_name)
 
     def add_users(self, canvas_course_id: str, course_name: str):
         """
@@ -242,7 +243,7 @@ class IngestCanvas:
             s3_path = f"courses/{course_name}/{unique_filename}"
             all_s3_paths.append(s3_path)
             all_readable_filenames.append(readable_filename)
-            print(f"Uploading file: {readable_filename}")
+            logging.info(f"Uploading {file_path}")
             self.upload_file(file_path, self.s3_bucket_name, s3_path)
 
         shutil.rmtree(folder_path)
