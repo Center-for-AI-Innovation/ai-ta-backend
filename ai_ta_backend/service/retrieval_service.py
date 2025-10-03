@@ -59,7 +59,7 @@ class RetrievalService:
     self.thread_pool_executor = thread_pool_executor
     self.openai_api_key = os.getenv("OPENAI_API_KEY") if os.getenv("OPENAI_API_KEY") else os.getenv("NCSA_HOSTED_API_KEY")
     self.embedding_model = os.getenv('EMBEDDING_MODEL') if os.getenv('EMBEDDING_MODEL') else 'text-embedding-ada-002'
-    self.openai_api_base = os.getenv('EMBEDDING_API_BASE') + "/embeddings" if os.getenv('EMBEDDING_API_BASE') else 'https://api.openai.com/v1/embeddings'
+    self.openai_api_base = os.getenv('EMBEDDING_API_BASE') if os.getenv('EMBEDDING_API_BASE') else 'https://api.openai.com/v1'
 
     if self.embedding_model == 'text-embedding-ada-002':
         self.embeddings = OpenAIEmbeddings(
