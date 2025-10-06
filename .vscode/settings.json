@@ -27,12 +27,10 @@
     "QDRANT",
     "Spacy",
     "sqlalchemy",
-    "supabase",
-    "Supabase",
-    "SUPABASE",
     "tiktoken",
     "UIUC",
     "vectorstore",
     "vectorstores"
-  ]
+  ],
+  "workbench.view.alwaysShowHeaderActions": true
 }

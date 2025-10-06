@@ -106,6 +106,7 @@ def send_html_email(subject: str, html_text: str, sender: str, receipients: list
       file.write(r + "\n")
 
   # Get the list of unsubscribed emails
+  # TODO: Add EmailNewsletter model to sql and replace supabase
   unsubscribed = supabase_client.table(table_name='email-newsletter').select("email").eq(
       "unsubscribed-from-newsletter", "TRUE").execute()
   unsubscribe_list = [row['email'] for row in unsubscribed.data]

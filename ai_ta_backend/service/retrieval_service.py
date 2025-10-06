@@ -5,6 +5,10 @@ import time
 import traceback
 from collections import defaultdict
 from typing import Dict, List, Union
+import tempfile
+import mimetypes
+import logging
+from pathlib import Path
 
 import openai
 import pytz
@@ -29,7 +33,15 @@ from ai_ta_backend.executors.thread_pool_executor import ThreadPoolExecutorAdapt
 # from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.sentry_service import SentryService
+from qdrant_client.http import models
 
+# Qwen query instruction for Illinois Chat retrieval.
+# Docs are embedded without instruction during ingest; only queries get this prefix.
+DEFAULT_QWEN_QUERY_INSTRUCTION = (
+    "Given a user search query, retrieve the most relevant passages from the Illinois Chat knowledge "
+    "base stored in Qdrant to answer the query accurately. Prioritize authoritative course materials, "
+    "syllabi, FAQs, official documentation, web pages, and other relevant sources. Ignore boilerplate/navigation text."
+)
 
 class RetrievalService:
   """
@@ -45,18 +57,33 @@ class RetrievalService:
     self.sentry = sentry
     self.posthog = posthog
     self.thread_pool_executor = thread_pool_executor
-    openai.api_key = os.environ["VLADS_OPENAI_KEY"]
+    self.openai_api_key = os.getenv("OPENAI_API_KEY") if os.getenv("OPENAI_API_KEY") else os.getenv("NCSA_HOSTED_API_KEY")
+    self.embedding_model = os.getenv('EMBEDDING_MODEL') if os.getenv('EMBEDDING_MODEL') else 'text-embedding-ada-002'
+    self.openai_api_base = os.getenv('EMBEDDING_API_BASE') if os.getenv('EMBEDDING_API_BASE') else 'https://api.openai.com/v1'
 
-    self.embeddings = OpenAIEmbeddings(
-        model='text-embedding-ada-002',
-        openai_api_key=os.environ["VLADS_OPENAI_KEY"],
-        # openai_api_key=os.environ["AZURE_OPENAI_KEY"],
-        # openai_api_base=os.environ["AZURE_OPENAI_ENDPOINT"],
-        # openai_api_type=os.environ['OPENAI_API_TYPE'],
-        # openai_api_version=os.environ["OPENAI_API_VERSION"],
-    )
+    if self.embedding_model == 'text-embedding-ada-002':
+        self.embeddings = OpenAIEmbeddings(
+            model=self.embedding_model,
+            openai_api_key=self.openai_api_key,
+            openai_api_base=self.openai_api_base,
+        )
+    else:
+        self.embeddings = OpenAIEmbeddings(
+            model=self.embedding_model,
+            openai_api_key=self.openai_api_key,
+            openai_api_base=self.openai_api_base,
+            # tiktoken_model_name="cl100k_base",
+            tiktoken_enabled=False,
+            # openai_api_key=os.environ["AZURE_OPENAI_KEY"],
+            # openai_api_base=os.environ["AZURE_OPENAI_ENDPOINT"],
+            # openai_api_type=os.environ['OPENAI_API_TYPE'],
+            # openai_api_version=os.environ["OPENAI_API_VERSION"],
+        )
 
     self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')
+
+    # Allow override via env; fallback to sane default for Illinois Chat retrieval.
+    self.qwen_query_instruction = os.getenv('QWEN_QUERY_INSTRUCTION', DEFAULT_QWEN_QUERY_INSTRUCTION)
 
     # self.llm = AzureChatOpenAI(
     #     temperature=0,
@@ -71,7 +98,8 @@ class RetrievalService:
                            search_query: str,
                            course_name: str,
                            doc_groups: List[str] | None = None,
-                           top_n: int = 100) -> Union[List[Dict], str]:
+                           top_n: int = 100,
+                           conversation_id: str = '') -> Union[List[Dict], str]:
     """Here's a summary of the work.
 
         /GET arguments
@@ -117,25 +145,28 @@ class RetrievalService:
         tasks = [
             loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
             loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
-            loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client)
+            loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client, self.qwen_query_instruction)
         ]
 
       disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
 
-      disabled_doc_groups = [doc_group['name'] for doc_group in disabled_doc_groups_response.data]
-      public_doc_groups = [doc_group['doc_groups'] for doc_group in public_doc_groups_response.data]
+      disabled_doc_groups = [doc_group for doc_group in disabled_doc_groups_response["data"]]
+      public_doc_groups = public_doc_groups_response["data"]
 
       time_for_parallel_operations = time.monotonic() - start_time_overall
       start_time_vector_search = time.monotonic()
 
-      # Perform vector search
-      found_docs: list[Document] = self.vector_search(search_query=search_query,
-                                                      course_name=course_name,
-                                                      doc_groups=doc_groups,
-                                                      user_query_embedding=user_query_embedding,
-                                                      disabled_doc_groups=disabled_doc_groups,
-                                                      public_doc_groups=public_doc_groups,
-                                                      top_n=top_n)
+      # Perform vector search with conversation filter
+      found_docs: list[Document] = self.vector_search(
+          search_query=search_query,
+          course_name=course_name,
+          doc_groups=doc_groups,
+          user_query_embedding=user_query_embedding,
+          disabled_doc_groups=disabled_doc_groups,
+          public_doc_groups=public_doc_groups,
+          top_n=top_n,
+          conversation_id=conversation_id
+      )
 
       time_to_retrieve_docs = time.monotonic() - start_time_vector_search
 
@@ -178,14 +209,14 @@ class RetrievalService:
   ):
     """Get all course materials based on course name.
     Args:
-        course_name (as uploaded on supabase)
+        course_name (as uploaded on database)
     Returns:
         list of dictionaries with distinct s3 path, readable_filename and course_name, url, base_url.
     """
 
     response = self.sqlDb.getAllMaterialsForCourse(course_name)
 
-    data = response.data
+    data = response["data"]
     unique_combinations = set()
     distinct_dicts = []
 
@@ -207,9 +238,10 @@ class RetrievalService:
 
     from ai_ta_backend.utils.email.send_transactional_email import send_email
 
-    client = OllamaClient(os.environ['OLLAMA_SERVER_URL'])
+    client = OllamaClient(os.environ['OLLAMA_SERVER_URL'], api_key=os.environ['NCSA_HOSTED_API_KEY'])
 
-    messages = self.sqlDb.getMessagesFromConvoID(conversation_id).data
+    response = self.sqlDb.getMessagesFromConvoID(conversation_id)
+    messages = response["data"] if isinstance(response, dict) else response.data
 
     llm_monitor_model = 'llama-guard3:8b'
 
@@ -264,7 +296,7 @@ class RetrievalService:
       # Assign tags to unsafe messages and send email when necessary
       if 'unsafe' in response_content.lower() and alert_categories:
         llm_monitor_tags["status"] = "unsafe"
-        llm_monitor_tags["triggered_categories"] = triggered_categories
+        llm_monitor_tags["triggered_categories"] = ", ".join(triggered_categories)
 
         # Prepare alert email only if there are non-excluded categories
         if alert_categories:
@@ -312,18 +344,13 @@ class RetrievalService:
         raise ValueError("S3_BUCKET_NAME environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
-      print(f"Deleting {identifier_value} from S3, Qdrant, and Supabase using {identifier_key}")
+      logging.info(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
 
       # Delete from S3
       if identifier_key == "s3_path":
         self.delete_from_s3(bucket_name, s3_path)
-
-      # Delete from Qdrant
       self.delete_from_qdrant(identifier_key, identifier_value, course_name)
-
-      # Delete from Nomic and Supabase
-      self.delete_from_nomic_and_supabase(course_name, identifier_key, identifier_value)
-
+      self.delete_from_nomic_and_database(course_name, identifier_key, identifier_value)
       return "Success"
 
     except Exception as e:
@@ -452,30 +479,30 @@ class RetrievalService:
     #   sentry_sdk.capture_exception(e)
     #   return err
 
-  def delete_from_nomic_and_supabase(self, course_name: str, identifier_key: str, identifier_value: str):
+  def delete_from_nomic_and_database(self, course_name: str, identifier_key: str, identifier_value: str):
     # try:
     #   print(f"Nomic delete. Course: {course_name} using {identifier_key}: {identifier_value}")
     #   response = self.sqlDb.getMaterialsForCourseAndKeyAndValue(course_name, identifier_key, identifier_value)
-    #   if not response.data:
+    #   if not response["data"]:
     #     raise Exception(f"No materials found for {course_name} using {identifier_key}: {identifier_value}")
-    #   data = response.data[0]  # single record fetched
+    #   data = response["data"][0]  # single record fetched
     #   nomic_ids_to_delete = [str(data['id']) + "_" + str(i) for i in range(1, len(data['contexts']) + 1)]
 
     # delete from Nomic
     # response = self.sqlDb.getProjectsMapForCourse(course_name)
-    # if not response.data:
+    # if not response["data"]:
     #   raise Exception(f"No document map found for this course: {course_name}")
-    # project_id = response.data[0]['doc_map_id']
+    # project_id = response["data"][0]['doc_map_id']
     # self.nomicService.delete_from_document_map(project_id, nomic_ids_to_delete)
     # except Exception as e:
     #   print(f"Nomic Error in deleting. {identifier_key}: {identifier_value}", e)
     #   self.sentry.capture_exception(e)
 
     try:
-      print(f"Supabase Delete. course: {course_name} using {identifier_key}: {identifier_value}")
+      print(f"Database Delete. course: {course_name} using {identifier_key}: {identifier_value}")
       response = self.sqlDb.deleteMaterialsForCourseAndKeyAndValue(course_name, identifier_key, identifier_value)
     except Exception as e:
-      print(f"Supabase Error in delete. {identifier_key}: {identifier_value}", e)
+      print(f"Database Error in delete. {identifier_key}: {identifier_value}", e)
       self.sentry.capture_exception(e)
 
   def vector_search(self,
@@ -485,9 +512,11 @@ class RetrievalService:
                     user_query_embedding,
                     disabled_doc_groups,
                     public_doc_groups,
-                    top_n: int = 100):
+                    top_n: int = 100,
+                    conversation_id: str = ''):
     """
     Search the vector database for a given query, course name, and document groups.
+    Now includes optional conversation-specific filtering.
     """
     if doc_groups is None:
       doc_groups = []
@@ -520,8 +549,31 @@ class RetrievalService:
       search_results = self.vdb.patents_vector_search(search_query, course_name, doc_groups, user_query_embedding,
                                                       top_n, disabled_doc_groups, public_doc_groups)
     else:
-      search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                              disabled_doc_groups, public_doc_groups)
+      # Handle conversation filtering for normal courses
+      if conversation_id:
+          # For chat conversations: get BOTH regular course documents AND conversation-specific documents
+          
+          # Get regular course documents (course_name + no conversation_id)
+          regular_filter = self.vdb._create_search_filter(
+              course_name, doc_groups, disabled_doc_groups, public_doc_groups
+          )
+          
+          # Get conversation-specific documents (this conversation_id)
+          chat_filter = self.vdb._create_conversation_search_filter(conversation_id)
+          
+          # Combine both filters with OR logic to get both types of documents
+          combined_filter = models.Filter(
+              should=[regular_filter, chat_filter]
+          )
+          
+          search_results = self.vdb.vector_search_with_filter(
+              search_query, course_name, doc_groups, user_query_embedding, 
+              top_n, disabled_doc_groups, public_doc_groups, combined_filter
+          )
+      else:
+          # Normal course logic without conversation filtering
+          search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
+                                                 disabled_doc_groups, public_doc_groups)
     self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
 
     # Process the search results by extracting the page content and metadata
@@ -540,9 +592,20 @@ class RetrievalService:
           f"Runtime for capture search succeeded event: {time_for_capture_search_succeeded_event:.2f} seconds")
     return found_docs
 
-  def _embed_query_and_measure_latency(self, search_query, embedding_client):
+  def _embed_query_and_measure_latency(self, search_query, embedding_client, query_instruction: str | None = None):
     openai_start_time = time.monotonic()
-    user_query_embedding = embedding_client.embed_query(search_query)
+    text_to_embed = search_query
+
+    # If using a Qwen embedding model via OpenAI-compatible API, prefix the instruction for queries only.
+    try:
+      model_name = getattr(embedding_client, 'model', self.embedding_model)
+    except Exception:
+      model_name = self.embedding_model
+
+    if query_instruction and isinstance(embedding_client, OpenAIEmbeddings) and 'qwen' in str(model_name).lower():
+      text_to_embed = f"Instruct: {query_instruction}\nQuery:{search_query}"
+
+    user_query_embedding = embedding_client.embed_query(text_to_embed)
     self.openai_embedding_latency = time.monotonic() - openai_start_time
     return user_query_embedding
 
@@ -664,10 +727,9 @@ class RetrievalService:
           'heatmap': defaultdict(lambda: defaultdict(int)),
       }
 
-      for record in conversations:
+      for created_at in conversations:
         try:
-          created_at = record['created_at']
-          parsed_date = parser.parse(created_at).astimezone(central_tz)
+          parsed_date = created_at.astimezone(central_tz)
 
           day = parsed_date.date()
           hour = parsed_date.hour
@@ -763,3 +825,729 @@ class RetrievalService:
       print(f"Error fetching model usage counts for {project_name}: {str(e)}")
       self.sentry.capture_exception(e)
       return []
+
+  def _create_conversation_filter(self, conversation_id: str):
+    """Create a Qdrant filter for conversation-specific content."""
+    from qdrant_client.http import models
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key="conversation_id",
+                match=models.MatchValue(value=conversation_id)
+            )
+        ]
+    )
+
+# Removed duplicate methods - now using consolidated methods from VectorDatabase
+
+  # Add all these methods at the end of the RetrievalService class
+
+  def process_chat_file_sync(self, conversation_id: str, s3_path: str, course_name: str, 
+                          readable_filename: str, user_id: str = None, is_chat_upload: bool = True):
+    """
+    Synchronous chat file processor - handles all allowed file types without Beam dependencies.
+    Supported types: html, py, pdf, txt, md, srt, vtt, docx, ppt, pptx, xlsx, xls, xlsm, 
+    xlsb, xltx, xltm, xlt, xml, xlam, xla, xlw, xlr, csv, png, jpg
+    """
+    try:
+        
+        # Download file from S3 to process locally
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(s3_path).suffix) as tmp_file:
+            
+            # Use the S3 client to download the file
+            self.aws.s3_client.download_fileobj(
+                Bucket=os.environ['S3_BUCKET_NAME'], 
+                Key=s3_path, 
+                Fileobj=tmp_file
+            )
+            tmp_file.flush()
+            
+            # Determine file type and extract content
+            file_extension = Path(s3_path).suffix.lower()
+            mime_type = str(mimetypes.guess_type(tmp_file.name, strict=False)[0])
+            mime_category = mime_type.split('/')[0] if '/' in mime_type else mime_type
+            
+            # Validate file type is allowed
+            allowed_extensions = [
+                '.html', '.py', '.pdf', '.txt', '.md', '.srt', '.vtt', '.docx', '.ppt', '.pptx',
+                '.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm', '.xlt', '.xml', '.xlam', 
+                '.xla', '.xlw', '.xlr', '.csv', '.png', '.jpg'
+            ]
+            
+            if file_extension not in allowed_extensions:
+                return {
+                    'success': False,
+                    'chunks_created': 0,
+                    'error': f"File type {file_extension} not supported. Allowed types: {', '.join(allowed_extensions)}"
+                }
+            
+            # Extract text based on file type
+            text_content = self._extract_file_content(tmp_file.name, file_extension, mime_category)
+            
+            
+            if text_content and text_content.strip():
+                # Store in vector database with conversation_id
+                result = self._store_conversation_content(
+                    text_content, conversation_id, course_name, readable_filename, s3_path
+                )
+                
+                return result
+            else:
+                return {
+                    'success': False,
+                    'chunks_created': 0,
+                    'error': "No content extracted from file"
+                }
+                
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'chunks_created': 0,
+            'error': f"Processing error: {str(e)}"
+        }
+
+  def _extract_file_content(self, file_path: str, file_extension: str, mime_category: str) -> str:
+    """
+    Extract content from allowed file types only.
+    """
+    try:
+        
+        # Route to appropriate extraction method based on file extension
+        if file_extension == '.pdf':
+            return self._extract_pdf_content(file_path)
+        elif file_extension in ['.docx']:
+            return self._extract_docx_content(file_path)
+        elif file_extension in ['.txt', '.md']:
+            return self._extract_txt_content(file_path)
+        elif file_extension == '.html':
+            return self._extract_html_content(file_path)
+        elif file_extension == '.csv':
+            return self._extract_csv_content(file_path)
+        elif file_extension in ['.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm', '.xlt', '.xml', '.xlam', '.xla', '.xlw', '.xlr']:
+            return self._extract_excel_content(file_path)
+        elif file_extension in ['.ppt', '.pptx']:
+            return self._extract_ppt_content(file_path)
+        elif file_extension in ['.png', '.jpg']:
+            return self._extract_image_content(file_path)
+        elif file_extension in ['.srt', '.vtt']:
+            return self._extract_subtitle_content(file_path)
+        elif file_extension == '.py':
+            return self._extract_python_content(file_path)
+        else:
+            # This shouldn't happen since we validate extensions above
+            return f"Unsupported file type: {file_extension}"
+            
+    except Exception as e:
+        pass
+        return f"Error extracting content: {e}"
+
+  def _extract_pdf_content(self, file_path: str) -> str:
+    """Extract text from PDF using available libraries."""
+    try:
+        # Try PyMuPDF first (most reliable)
+        try:
+            import fitz
+            
+            doc = fitz.open(file_path)
+            text_content = []
+            
+            for i, page in enumerate(doc):
+                text = page.get_text().encode("utf8").decode("utf8", errors='ignore')
+                if text.strip():
+                    text_content.append(text)
+            
+            doc.close()
+            
+            full_text = '\n'.join(text_content)
+            
+            if full_text.strip():
+                return full_text
+            else:
+                pass  # No text found, continue to fallback
+                
+        except ImportError:
+            pass  # PyMuPDF not available, continue to fallback
+        except Exception as e:
+            pass
+        
+        # Try pdfplumber as fallback
+        try:
+            import pdfplumber
+            
+            text_content = []
+            with pdfplumber.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    page_text = page.extract_text()
+                    if page_text and page_text.strip():
+                        text_content.append(page_text)
+            
+            full_text = '\n\n'.join(text_content)
+            
+            if full_text.strip():
+                return full_text
+            else:
+                return self._ocr_pdf_content(file_path)
+                
+        except ImportError:
+            return self._ocr_pdf_content(file_path)
+        except Exception as e:
+            return self._ocr_pdf_content(file_path)
+        
+    except Exception as e:
+        return f"PDF processing error: {e}"
+
+  def _extract_docx_content(self, file_path: str) -> str:
+    """Extract text from DOCX file."""
+    try:
+        # Try python-docx first
+        try:
+            from docx import Document
+            
+            doc = Document(file_path)
+            text_content = []
+            
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_content.append(paragraph.text)
+            
+            # Extract from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            row_text.append(cell.text.strip())
+                    if row_text:
+                        text_content.append(" | ".join(row_text))
+            
+            full_text = '\n'.join(text_content)
+            
+            if full_text.strip():
+                return full_text
+            else:
+                pass
+                
+        except ImportError:
+            pass
+        except Exception as e:
+            pass
+        
+        # Try langchain as fallback
+        try:
+            from langchain.document_loaders import Docx2txtLoader
+            
+            loader = Docx2txtLoader(file_path)
+            documents = loader.load()
+            text_content = '\n'.join([doc.page_content for doc in documents])
+            
+            if text_content.strip():
+                return text_content
+            else:
+                return "No content found in DOCX file"
+                
+        except ImportError:
+            return "DOCX processing libraries not available"
+        except Exception as e:
+            return f"DOCX processing error: {e}"
+        
+    except Exception as e:
+        return f"DOCX processing error: {e}"
+
+  def _store_conversation_content(self, text_content: str, conversation_id: str, 
+                               course_name: str, readable_filename: str, s3_path: str) -> dict:
+    """Store extracted content in vector database with conversation_id."""
+    try:
+        
+        # Split text into chunks for better retrieval
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+        )
+        
+        chunks = text_splitter.split_text(text_content)
+        
+        # Use the enhanced embedding system with Qwen instruction support
+        documents = []
+        for i, chunk in enumerate(chunks):
+            try:
+                # Generate embedding using the enhanced system that supports Qwen instructions
+                embedding = self._embed_query_and_measure_latency(chunk, self.embeddings, self.qwen_query_instruction)
+                
+                # Create document with conversation metadata using UUID for ID
+                import uuid
+                doc = {
+                    "id": str(uuid.uuid4()),  # Use UUID instead of conversation_id_index
+                    "vector": embedding,
+                    "payload": {
+                        "course_name": course_name,
+                        "conversation_id": conversation_id,
+                        "readable_filename": readable_filename,
+                        "s3_path": s3_path,
+                        "page_content": chunk,  # Changed from "text" to "page_content"
+                        "chunk_index": i,
+                        "pagenumber": "",  # Add empty pagenumber for compatibility
+                        "url": "",  # Add empty url for compatibility
+                        "base_url": ""  # Add empty base_url for compatibility
+                    }
+                }
+                documents.append(doc)
+                
+            except Exception as e:
+                print("Error in _store_conversation_content: ", e)
+                pass
+                continue
+        
+        if documents:
+            # Store in Qdrant
+            from qdrant_client.http import models
+            
+            self.vdb.qdrant_client.upsert(
+                collection_name=os.environ.get('QDRANT_COLLECTION_NAME'),
+                points=[
+                    models.PointStruct(
+                        id=doc["id"],
+                        vector=doc["vector"],
+                        payload=doc["payload"]
+                    ) for doc in documents
+                ],
+                wait=True
+            )
+            
+            return {
+                'success': True,
+                'chunks_created': len(documents),
+                'total_chunks_attempted': len(chunks)
+            }
+        else:
+            return {
+                'success': False,
+                'chunks_created': 0,
+                'total_chunks_attempted': len(chunks)
+            }
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        self.sentry.capture_exception(e)
+        return {
+            'success': False,
+            'chunks_created': 0,
+            'total_chunks_attempted': 0,
+            'error': str(e)
+        }
+
+  def _extract_excel_content(self, file_path: str) -> str:
+    """Extract text from Excel files (.xlsx, .xls, etc.) with calculated values."""
+    try:
+        # Try enhanced openpyxl first for better value extraction
+        try:
+            import openpyxl
+            
+            # Load with data_only=True to get calculated values instead of formulas
+            workbook = openpyxl.load_workbook(file_path, data_only=True)
+            all_text = []
+            
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                sheet_text = []
+                
+                # Get the used range to avoid empty cells
+                if sheet.max_row > 0 and sheet.max_column > 0:
+                    for row_num in range(1, sheet.max_row + 1):
+                        row_data = []
+                        for col_num in range(1, sheet.max_column + 1):
+                            cell = sheet.cell(row=row_num, column=col_num)
+                            cell_value = cell.value
+                            
+                            if cell_value is not None:
+                                # Handle different data types
+                                if isinstance(cell_value, (int, float)):
+                                    # For numeric values, include cell reference
+                                    col_letter = openpyxl.utils.get_column_letter(col_num)
+                                    cell_ref = f"{col_letter}{row_num}"
+                                    row_data.append(f"{cell_value} (cell {cell_ref})")
+                                elif isinstance(cell_value, str) and cell_value.strip():
+                                    row_data.append(cell_value.strip())
+                                else:
+                                    row_data.append(str(cell_value))
+                        
+                        if row_data:
+                            sheet_text.append(f"Row {row_num}: " + " | ".join(row_data))
+                
+                if sheet_text:
+                    sheet_content = f"\n--- Sheet: {sheet_name} ---\n" + '\n'.join(sheet_text)
+                    all_text.append(sheet_content)
+            
+            content = '\n\n'.join(all_text)
+            
+            if content.strip():
+                return content
+                
+        except ImportError:
+            pass
+        except Exception:
+            pass
+        
+        # Fallback to langchain
+        try:
+            from langchain.document_loaders import UnstructuredExcelLoader
+            
+            loader = UnstructuredExcelLoader(file_path, mode="elements")
+            documents = loader.load()
+            text_content = '\n'.join([doc.page_content for doc in documents])
+            
+            if text_content.strip():
+                return text_content
+            else:
+                return "No content found in Excel file"
+                
+        except ImportError:
+            return "Excel processing libraries not available"
+        except Exception as e:
+            return f"Excel processing error: {e}"
+        
+    except Exception as e:
+        return f"Excel processing error: {e}"
+
+  def _extract_ppt_content(self, file_path: str) -> str:
+    """Extract comprehensive text from PowerPoint files (.ppt, .pptx)."""
+    try:
+        # Try enhanced python-pptx first for detailed extraction
+        try:
+            from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            
+            prs = Presentation(file_path)
+            all_content = []
+            
+            # Extract presentation title if available
+            if hasattr(prs.core_properties, 'title') and prs.core_properties.title:
+                all_content.append(f"PRESENTATION TITLE: {prs.core_properties.title}")
+            
+            for slide_num, slide in enumerate(prs.slides, 1):
+                slide_content = []
+                slide_content.append(f"\n=== SLIDE {slide_num} ===")
+                
+                # Extract slide title if available
+                if slide.shapes.title and slide.shapes.title.text.strip():
+                    slide_content.append(f"SLIDE TITLE: {slide.shapes.title.text.strip()}")
+                
+                # Process all shapes on the slide
+                for shape in slide.shapes:
+                    try:
+                        # Text content from text boxes and placeholders
+                        if hasattr(shape, "text") and shape.text.strip():
+                            # Skip title (already extracted)
+                            if shape != slide.shapes.title:
+                                slide_content.append(f"TEXT CONTENT: {shape.text.strip()}")
+                        
+                        # Table content
+                        elif shape.shape_type == MSO_SHAPE_TYPE.TABLE:
+                            table_content = []
+                            table_content.append("TABLE DATA:")
+                            for row_idx, row in enumerate(shape.table.rows):
+                                row_data = []
+                                for cell in row.cells:
+                                    if cell.text.strip():
+                                        row_data.append(cell.text.strip())
+                                if row_data:
+                                    table_content.append(f"  Row {row_idx + 1}: {' | '.join(row_data)}")
+                            
+                            if len(table_content) > 1:  # More than just header
+                                slide_content.extend(table_content)
+                        
+                        # Chart content (basic info)
+                        elif shape.shape_type == MSO_SHAPE_TYPE.CHART:
+                            slide_content.append("CHART DETECTED: Visual data representation present")
+                            if hasattr(shape, 'chart') and shape.chart:
+                                try:
+                                    # Try to get chart title
+                                    if hasattr(shape.chart, 'chart_title') and shape.chart.chart_title:
+                                        slide_content.append(f"CHART TITLE: {shape.chart.chart_title.text_frame.text}")
+                                except:
+                                    pass
+                        
+                        # Group shapes (nested content)
+                        elif shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                            group_content = []
+                            for group_shape in shape.shapes:
+                                if hasattr(group_shape, "text") and group_shape.text.strip():
+                                    group_content.append(group_shape.text.strip())
+                            if group_content:
+                                slide_content.append(f"GROUPED CONTENT: {' | '.join(group_content)}")
+                        
+                        # SmartArt and other shapes with text
+                        elif hasattr(shape, "text_frame") and shape.text_frame:
+                            for paragraph in shape.text_frame.paragraphs:
+                                if paragraph.text.strip():
+                                    slide_content.append(f"CONTENT: {paragraph.text.strip()}")
+                    
+                    except Exception:
+                        continue
+                
+                # Add slide notes if available
+                if slide.notes_slide and slide.notes_slide.notes_text_frame:
+                    notes_text = slide.notes_slide.notes_text_frame.text.strip()
+                    if notes_text:
+                        slide_content.append(f"SLIDE NOTES: {notes_text}")
+                
+                # Only add slide if it has content
+                if len(slide_content) > 1:  # More than just the slide header
+                    all_content.extend(slide_content)
+            
+            content = '\n'.join(all_content)
+            
+            if content.strip():
+                print(f"PowerPoint processed successfully with python-pptx - extracted {len(content)} characters")
+                return content
+                
+        except ImportError:
+            pass
+        except Exception:
+            pass
+        
+        # Fallback to langchain
+        try:
+            from langchain.document_loaders import UnstructuredPowerPointLoader
+            
+            loader = UnstructuredPowerPointLoader(file_path)
+            documents = loader.load()
+            text_content = '\n'.join([doc.page_content for doc in documents])
+            
+            if text_content.strip():
+                print(f"PowerPoint processed with langchain - extracted {len(text_content)} characters")
+                return text_content
+            else:
+                return "No content found in PowerPoint file"
+                
+        except ImportError:
+            return "PowerPoint processing libraries not available"
+        except Exception as e:
+            return f"PowerPoint processing error: {e}"
+        
+    except Exception as e:
+        return f"PowerPoint processing error: {e}"
+
+  def _extract_csv_content(self, file_path: str) -> str:
+    """Extract text from CSV files."""
+    try:
+        # Try langchain first
+        try:
+            from langchain.document_loaders import CSVLoader
+            
+            loader = CSVLoader(file_path)
+            documents = loader.load()
+            text_content = '\n'.join([doc.page_content for doc in documents])
+            
+            if text_content.strip():
+                print(f"CSV processed with langchain - extracted {len(text_content)} characters")
+                return text_content
+                
+        except ImportError:
+            pass
+        except Exception:
+            pass
+        
+        # Fallback to basic csv reading
+        try:
+            import csv
+            
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                reader = csv.reader(f)
+                rows = []
+                for row_num, row in enumerate(reader, 1):
+                    if row:  # Skip empty rows
+                        rows.append(f"Row {row_num}: {', '.join(row)}")
+                
+                if rows:
+                    return '\n'.join(rows)
+                else:
+                    return "No content found in CSV file"
+                    
+        except Exception as e:
+            return f"CSV processing error: {e}"
+        
+    except Exception as e:
+        return f"CSV processing error: {e}"
+
+  def _extract_txt_content(self, file_path: str) -> str:
+    """Extract text from plain text files (.txt, .md)."""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        if content.strip():
+            return content
+        else:
+            return "No content found in text file"
+            
+    except Exception as e:
+        return f"Text file processing error: {e}"
+
+  def _extract_html_content(self, file_path: str) -> str:
+    """Extract text from HTML files."""
+    try:
+        # Try BeautifulSoup first
+        try:
+            from bs4 import BeautifulSoup
+            
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+            
+            text = soup.get_text()
+            
+            # Clean up whitespace
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+            
+            if text.strip():
+                return text
+                
+        except ImportError:
+            pass
+        except Exception:
+            pass
+        
+        # Fallback to basic tag removal
+        try:
+            import re
+            
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            # Remove HTML tags
+            text = re.sub('<[^<]+?>', '', content)
+            
+            if text.strip():
+                return text
+            else:
+                return "No content found in HTML file"
+                
+        except Exception as e:
+            return f"HTML processing error: {e}"
+        
+    except Exception as e:
+        return f"HTML processing error: {e}"
+
+  def _extract_image_content(self, file_path: str) -> str:
+    """Extract text from images (.png, .jpg) using OCR."""
+    try:
+        try:
+            import pytesseract
+            from PIL import Image
+            
+            text_content = pytesseract.image_to_string(Image.open(file_path))
+            
+            if text_content.strip():
+                return text_content
+            else:
+                return "No text found in image"
+                
+        except ImportError:
+            return "Image OCR libraries not available (pytesseract, PIL)"
+        except Exception as e:
+            return f"Image OCR error: {e}"
+        
+    except Exception as e:
+        return f"Image processing error: {e}"
+
+  def _extract_subtitle_content(self, file_path: str) -> str:
+    """Extract text from subtitle files (.srt, .vtt)."""
+    try:
+        if file_path.endswith('.srt'):
+            try:
+                import pysrt
+                subs = pysrt.open(file_path)
+                text_content = ' '.join([sub.text for sub in subs])
+                
+                if text_content.strip():
+                    return text_content
+                else:
+                    return "No content found in SRT file"
+                    
+            except ImportError:
+                return self._extract_txt_content(file_path)
+            except Exception as e:
+                return f"SRT processing error: {e}"
+        
+        else:  # VTT file
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                
+                if content.strip():
+                    return content
+                else:
+                    return "No content found in VTT file"
+                    
+            except Exception as e:
+                return f"VTT processing error: {e}"
+        
+    except Exception as e:
+        return f"Subtitle processing error: {e}"
+
+  def _extract_python_content(self, file_path: str) -> str:
+    """Extract text from Python files (.py)."""
+    try:
+        try:
+            from langchain.document_loaders import PythonLoader
+            
+            loader = PythonLoader(file_path)
+            documents = loader.load()
+            text_content = '\n'.join([doc.page_content for doc in documents])
+            
+            if text_content.strip():
+                return text_content
+            
+        except ImportError:
+            pass
+        except Exception:
+            pass
+        
+        # Fallback to basic text reading
+        return self._extract_txt_content(file_path)
+        
+    except Exception as e:
+        return f"Python processing error: {e}"
+
+  def _ocr_pdf_content(self, file_path: str) -> str:
+    """OCR PDF content using pdfplumber and pytesseract."""
+    try:
+        import pdfplumber
+        import pytesseract
+        
+        text_content = []
+        
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                try:
+                    im = page.to_image()
+                    text = pytesseract.image_to_string(im.original)
+                    if text.strip():
+                        text_content.append(text)
+                except Exception:
+                    continue
+        
+        if text_content:
+            full_text = '\n\n'.join(text_content)
+            return full_text
+        else:
+            return "No text found via OCR"
+            
+    except ImportError:
+        return "OCR libraries not available: No module named 'pdfplumber'"
+    except Exception as e:
+        return f"OCR processing error: {e}"

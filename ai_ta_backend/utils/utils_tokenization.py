@@ -1,5 +1,6 @@
 import os
 from typing import Any
+from ai_ta_backend.database.sql import SQLDatabase
 
 import tiktoken
 
@@ -81,16 +82,12 @@ def count_tokens_and_cost(
 # load_dotenv()
 
 
-def analyze_conversations(supabase_client: Any = None):
-  import supabase
-
-  if supabase_client is None:
-    supabase_client = supabase.create_client(  # type: ignore
-        supabase_url=os.getenv('SUPABASE_URL'),  # type: ignore
-        supabase_key=os.getenv('SUPABASE_API_KEY'))  # type: ignore
+def analyze_conversations(database_client: Any = None):
+  if database_client is None:
+    database_client = SQLDatabase()
   # Get all conversations
-  response = supabase_client.table('llm-convo-monitor').select('convo').execute()
-  # print("total entries", response.data.count)
+
+  response = database_client.getLLMConvo()
 
   total_convos = 0
   total_messages = 0
