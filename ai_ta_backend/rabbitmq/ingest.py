@@ -127,30 +127,10 @@ class Ingest:
                     embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
                                                 openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
                 )
-<<<<<<< Updated upstream
-
-            if self.embedding_model == 'text-embedding-ada-002':
-                self.vectorstore = Qdrant(
-                    client=self.qdrant_client,
-                    collection_name=self.qdrant_collection_name,
-                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
-                                                openai_api_base=self.openai_api_base, model=self.embedding_model)
-                )
-                print("Vectorstore initialized with text-embedding-ada-002")
-            else:
-                self.vectorstore = Qdrant(
-                    client=self.qdrant_client,
-                    collection_name=self.qdrant_collection_name,
-                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
-                                                openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
-                )
-                print("Vectorstore initialized with NCSA_HOSTED model")
-=======
                 logging.info("Qdrant client initialized successfully")
             except Exception as e:
                 logging.error(f"Failed to initialize Qdrant client: {e}")
                 self.qdrant_client = None
->>>>>>> Stashed changes
         else:
             logging.error("QDRANT URL NOT FOUND!")
 
