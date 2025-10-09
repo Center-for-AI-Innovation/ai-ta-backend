@@ -63,10 +63,10 @@ class Ingest:
     """
 
     def __init__(self):
-        self.openai_api_key = os.getenv('OPENAI_API_KEY')
-        self.openai_api_base = os.environ['EMBEDDING_API_BASE'] + "/embeddings" if os.environ['EMBEDDING_API_BASE'] else None
-        self.ncsa_hosted_api_key = os.getenv('NCSA_HOSTED_API_KEY')
-        self.embedding_model = os.environ['EMBEDDING_MODEL']
+        self.openai_api_key = os.getenv('OPENAI_API_KEY') if os.getenv('OPENAI_API_KEY') else None
+        self.openai_api_base = os.getenv('EMBEDDING_API_BASE') + "/embeddings" if os.getenv('EMBEDDING_API_BASE') else 'https://api.openai.com/v1/embeddings'
+        self.ncsa_hosted_api_key = self.openai_api_key if self.openai_api_key else os.getenv('NCSA_HOSTED_API_KEY')
+        self.embedding_model = os.getenv('EMBEDDING_MODEL') if os.getenv('EMBEDDING_MODEL') else 'text-embedding-ada-002'
         self.qdrant_url = os.getenv('QDRANT_URL')
         self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
         self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
@@ -99,12 +99,23 @@ class Ingest:
                     collection_name=self.qdrant_collection_name,
                     vectors_config={"size": 4096, "distance": "Cosine"}
                 )
-            self.vectorstore = Qdrant(
-                client=self.qdrant_client,
-                collection_name=self.qdrant_collection_name,
-                embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
-                                            openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
-            )
+
+            if self.embedding_model == 'text-embedding-ada-002':
+                self.vectorstore = Qdrant(
+                    client=self.qdrant_client,
+                    collection_name=self.qdrant_collection_name,
+                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
+                                                openai_api_base=self.openai_api_base, model=self.embedding_model)
+                )
+                print("Vectorstore initialized with text-embedding-ada-002")
+            else:
+                self.vectorstore = Qdrant(
+                    client=self.qdrant_client,
+                    collection_name=self.qdrant_collection_name,
+                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
+                                                openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
+                )
+                print("Vectorstore initialized with NCSA_HOSTED model")
         else:
             logging.error("QDRANT API KEY OR URL NOT FOUND!")
 
@@ -146,6 +157,7 @@ class Ingest:
             url: List[str] | str | None = inputs.get('url', None)
             base_url: List[str] | str | None = inputs.get('base_url', None)
             readable_filename: List[str] | str = inputs.get('readable_filename', '')
+            force_embeddings: bool = inputs.get('force_embeddings', False)  # if content is duplicated, still rescan
 
             content: str | List[str] | None = inputs.get('content', None)  # defined if ingest type is webtext
             doc_groups: List[str] | str = inputs.get('groups', '')
@@ -154,21 +166,30 @@ class Ingest:
                 f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
             )
             success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                doc_groups)
+                                                doc_groups, force_embeddings)
             for retry_num in range(1, 3):
                 if isinstance(success_fail_dict, str):  # TODO: What does this indicate?
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups)
+                                                        doc_groups,force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
                 elif success_fail_dict['failure_ingest']:
                     logging.error(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups)
+                                                        doc_groups,force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
                 else:
                     break
             if success_fail_dict['failure_ingest']:
                 logging.error(f"INGEST FAILURE -- About to send to database. success_fail_dict: {success_fail_dict}")
+                self.sql_session.insert_failed_document({
+                    "s3_path": str(s3_paths),
+                    "readable_filename": readable_filename,
+                    "course_name": course_name,
+                    "url": url,
+                    "base_url": base_url,
+                    "doc_groups": doc_groups,
+                    "error": str(success_fail_dict),
+                })
 
             # Remove from documents in progress
             self.sql_session.delete_document_in_progress(job_id)
@@ -182,26 +203,27 @@ class Ingest:
             success_fail_dict = {"failure_ingest": {'error': str(e)}}
             return json.dumps(success_fail_dict)
 
-    def run_ingest(self, course_name, s3_paths, base_url, url, readable_filename, content, document_groups):
+    def run_ingest(self, course_name, s3_paths, base_url, url, readable_filename, content, document_groups,
+                   force_embeddings=False):
         """Routes ingest jobs based on the input data -> webscrape, url, readable_filename"""
         if content:
             return self.ingest_single_web_text(course_name, base_url, url, content, readable_filename,
-                                               groups=document_groups)
+                                               groups=document_groups, force_embeddings=force_embeddings)
         elif readable_filename == '':
             return self.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url,
-                                    groups=document_groups)
+                                    groups=document_groups, force_embeddings=force_embeddings)
         else:
             return self.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url,
-                                    groups=document_groups, readable_filename=readable_filename)
+                                    groups=document_groups, readable_filename=readable_filename, force_embeddings=force_embeddings)
 
     def bulk_ingest(self, course_name: str, s3_paths: Union[str, List[str]],
-                  **kwargs) -> Dict[str, None | str | Dict[str, str]]:
+                  force_embeddings: bool, **kwargs) -> Dict[str, None | str | Dict[str, str]]:
         """Bulk ingest a list of s3 paths into the vectorstore, and also into the database."""
         print(f"Top of bulk_ingest: ", kwargs)
 
-        def _ingest_single(ingest_method: Callable, s3_path, *args, **kwargs):
+        def _ingest_single(ingest_method: Callable, s3_path: str, force_embeddings: bool, *args, **kwargs):
             """Handle running an arbitrary ingest function for an individual file."""
-            ret = ingest_method(s3_path, *args, **kwargs)
+            ret = ingest_method(s3_path, force_embeddings, *args, **kwargs)
             if ret == "Success":
                 success_status['success_ingest'] = str(s3_path)
             else:
@@ -257,14 +279,14 @@ class Ingest:
                 # Ingest with specialized functions when possible, fallback to mimetype.
                 if file_extension in file_ingest_methods:
                     ingest_method = file_ingest_methods[file_extension]
-                    _ingest_single(ingest_method, s3_path, course_name, **kwargs)
+                    _ingest_single(ingest_method, s3_path, course_name, force_embeddings, **kwargs)
                 elif mime_category in mimetype_ingest_methods:
                     ingest_method = mimetype_ingest_methods[mime_category]
-                    _ingest_single(ingest_method, s3_path, course_name, **kwargs)
+                    _ingest_single(ingest_method, s3_path, course_name, force_embeddings, **kwargs)
                 else:
                     # No supported ingest... Fallback to attempting utf-8 decoding, otherwise fail.
                     try:
-                        self._ingest_single_txt(s3_path, course_name, **kwargs)
+                        self._ingest_single_txt(s3_path, course_name, force_embeddings, **kwargs)
                         success_status['success_ingest'] = s3_path
                     except Exception as e:
                         err_msg = f"No ingest method for filetype: {file_extension} (with generic type {mime_type}), for file: {s3_path}"
@@ -298,7 +320,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return success_status
 
-    def split_and_upload(self, texts: List[str], metadatas: List[Dict[str, Any]], **kwargs):
+    def split_and_upload(self, texts: List[str], metadatas: List[Dict[str, Any]], force_embeddings: bool, **kwargs):
         """
         This is usually the last step of document ingest. Chunk & upload to Qdrant (and Supabase.. todo).
         Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to Qdrant.
@@ -325,20 +347,20 @@ class Ingest:
             contexts: List[Document] = text_splitter.create_documents(texts=texts, metadatas=metadatas)
             input_texts = [{'input': context.page_content, 'model': self.embedding_model} for context in contexts]
 
-            # Check for duplicates
-            is_duplicate = self.check_for_duplicates(input_texts, metadatas)
-            if is_duplicate:
-                if self.posthog:
-                    self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_succeeded',
-                                         properties={
-                                             'course_name': metadatas[0].get('course_name', None),
-                                             's3_path': metadatas[0].get('s3_path', None),
-                                             'readable_filename': metadatas[0].get('readable_filename', None),
-                                             'url': metadatas[0].get('url', None),
-                                             'base_url': metadatas[0].get('base_url', None),
-                                             'is_duplicate': True,
-                                         })
-                return "Success"
+            # Check for duplicates (will also delete data if duplicate is found)
+            is_duplicate = self.check_for_duplicates(input_texts, metadatas, force_embeddings)
+            if is_duplicate and not force_embeddings:
+                    if self.posthog:
+                        self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_succeeded',
+                                             properties={
+                                                 'course_name': metadatas[0].get('course_name', None),
+                                                 's3_path': metadatas[0].get('s3_path', None),
+                                                 'readable_filename': metadatas[0].get('readable_filename', None),
+                                                 'url': metadatas[0].get('url', None),
+                                                 'base_url': metadatas[0].get('base_url', None),
+                                                 'is_duplicate': True,
+                                             })
+                    return "Success"
 
             # adding chunk index to metadata for parent doc retrieval
             for i, context in enumerate(contexts):
@@ -465,7 +487,7 @@ class Ingest:
             sentry_sdk.flush(timeout=20)
             raise Exception(err)
 
-    def check_for_duplicates(self, texts: List[Dict], metadatas: List[Dict[str, Any]]) -> bool:
+    def check_for_duplicates(self, texts: List[Dict], metadatas: List[Dict[str, Any]], force_embeddings: bool) -> bool:
         """
         For given metadata, fetch docs from Supabase based on S3 path or URL.
         If docs exists, concatenate the texts and compare with current texts, if same, return True.
@@ -500,10 +522,8 @@ class Ingest:
 
         db_whole_text = ""
         exact_doc_exists = False
-        if len(contents) > 0:  # a doc with same filename exists in Supabase
-            logging.info(f"Checking for Supabase contents: {contents}")
+        if len(contents) > 0:  # a doc with same filename exists in SQL
             for record in contents:
-                logging.info(f"Record: {record}")
                 if incoming_s3_path:
                     curr_filename = record['s3_path'].split('/')[-1]
                     older_s3_path = record['s3_path']
@@ -514,17 +534,14 @@ class Ingest:
                         # do not remove anything and proceed with duplicate checking
                         sql_filename = curr_filename
                 elif url:
-                    print("URL retrieved from SQL: ", record.keys())
                     sql_filename = record['url']
                 else:
                     continue
-                print("Original filename: ", original_filename, "Current SQL filename: ", sql_filename)
 
                 if original_filename == sql_filename:  # compare og s3_path/url with incoming s3_path/url
                     contexts = record
-
                     exact_doc_exists = True
-                    print("Exact doc exists in Supabase:", sql_filename)
+                    logging.info(f"Exact doc exists in DB: {sql_filename}")
                     break
 
             if exact_doc_exists:
@@ -536,14 +553,22 @@ class Ingest:
 
                 if db_whole_text == current_whole_text:
                     logging.info(f"Duplicate detected: {original_filename}.")
+                    if force_embeddings:
+                        self.delete_vectors(course_name, older_s3_path, url)
                     return True
                 else:
                     print(f"Updated file detected: {original_filename}")
-                    print("older s3_path/url to be deleted: ", sql_filename)
-                    if incoming_s3_path:
-                        delete_status = self.delete_data(course_name, older_s3_path, '')
+                    if force_embeddings:
+                        if incoming_s3_path:
+                            delete_status = self.delete_vectors(course_name, older_s3_path, '')
+                        else:
+                            delete_status = self.delete_vectors(course_name, '', url)
                     else:
-                        delete_status = self.delete_data(course_name, '', url)
+                        print("older s3_path/url to be deleted: ", sql_filename)
+                        if incoming_s3_path:
+                            delete_status = self.delete_data(course_name, older_s3_path, '')
+                        else:
+                            delete_status = self.delete_data(course_name, '', url)
                 return False
             else:
                 print(f"NOT a duplicate: {original_filename}")
@@ -554,8 +579,8 @@ class Ingest:
             return False
 
     def delete_data(self, course_name: str, s3_path: str, source_url: str):
-        """Delete file from S3, Qdrant, and Supabase."""
-        print(f"Deleting {s3_path} from S3, Qdrant, and Supabase for course {course_name}")
+        """Delete file from S3, Qdrant, and SQL."""
+        logging.info(f"Deleting {s3_path} from S3, Qdrant, and SQL for course {course_name}")
         try:
             if s3_path:
                 try:
@@ -622,8 +647,72 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return err
 
+    def delete_vectors(self, course_name: str, s3_path: str, source_url: str):
+        """Delete vector data from Qdrant and SQL."""
+        logging.info(f"Deleting {s3_path} vectors from Qdrant and SQL for course {course_name}")
+        try:
+            if s3_path:
+                # Delete from Qdrant
+                # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
+                try:
+                    self.qdrant_client.delete(
+                        collection_name=self.qdrant_collection_name,
+                        points_selector=models.Filter(must=[
+                            models.FieldCondition(
+                                key="s3_path",
+                                match=models.MatchValue(value=s3_path),
+                            ),
+                        ]),
+                    )
+                except Exception as e:
+                    if "timed out" in str(e):
+                        # Timed out still deletes: https://github.com/qdrant/qdrant/issues/3654#issuecomment-1955074525
+                        pass
+                    else:
+                        print("Error in deleting file from Qdrant:", e)
+                        sentry_sdk.capture_exception(e)
+                        raise e
+
+                try:
+                    self.sql_session.delete_document_by_s3_path(course_name=course_name, s3_path=s3_path)
+                except Exception as e:
+                    print("Error in deleting file from database:", e)
+                    sentry_sdk.capture_exception(e)
+
+            # Delete files by their URL identifier
+            elif source_url:
+                try:
+                    self.qdrant_client.delete(
+                        collection_name=self.qdrant_collection_name,
+                        points_selector=models.Filter(must=[
+                            models.FieldCondition(
+                                key="url",
+                                match=models.MatchValue(value=source_url),
+                            ),
+                        ]),
+                    )
+                except Exception as e:
+                    if "timed out" in str(e):
+                        pass
+                    else:
+                        print("Error in deleting file from Qdrant:", e)
+                        sentry_sdk.capture_exception(e)
+                        raise e
+
+                try:
+                    self.sql_session.delete_document_by_url(course_name=course_name, url=source_url)
+                except Exception as e:
+                    print("Error in deleting file from database:", e)
+                    sentry_sdk.capture_exception(e)
+
+            return "Success"
+        except Exception as e:
+            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            sentry_sdk.capture_exception(e)
+            return err
+
     def ingest_single_web_text(self, course_name: str, base_url: str, url: str, content: str, readable_filename: str,
-                               **kwargs) -> Dict[str, None | str | Dict[str, str]]:
+                               force_embeddings: bool, **kwargs) -> Dict[str, None | str | Dict[str, str]]:
         """Crawlee integration"""
         if self.posthog:
             self.posthog.capture('distinct_id_of_the_user', event='ingest_single_web_text_invoked',
@@ -645,7 +734,7 @@ class Ingest:
                 'url': url,
                 'base_url': base_url,
             }]
-            self.split_and_upload(texts=[content], metadatas=metadatas, **kwargs)
+            self.split_and_upload(texts=[content], metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
             if self.posthog:
                 self.posthog.capture('distinct_id_of_the_user',
                                      event='ingest_single_web_text_succeeded',
@@ -666,7 +755,7 @@ class Ingest:
             success_or_failure['failure_ingest'] = {'url': url, 'error': str(err)}
             return success_or_failure
 
-    def _ingest_single_py(self, s3_path: str, course_name: str, **kwargs):
+    def _ingest_single_py(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
         try:
             file_name = s3_path.split("/")[-1]
             file_path = "media/" + file_name  # download from s3 to local folder for ingest
@@ -691,7 +780,7 @@ class Ingest:
             # print(texts)
             os.remove(file_path)
 
-            success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas)
+            success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings)
             print("Python ingest: ", success_or_failure)
             return success_or_failure
 
@@ -702,7 +791,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_single_vtt(self, s3_path: str, course_name: str, **kwargs):
+    def _ingest_single_vtt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
         """
         Ingest a single .vtt file from S3.
         """
@@ -725,7 +814,7 @@ class Ingest:
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
 
-                success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+                success_or_failure = self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return success_or_failure
         except Exception as e:
             err = f"❌❌ Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
@@ -733,7 +822,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_html(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_html(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         print(f"IN _ingest_html s3_path `{s3_path}` kwargs: {kwargs}")
         try:
             response = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=s3_path)
@@ -758,7 +847,7 @@ class Ingest:
                 'timestamp': '',
             }]
 
-            success_or_failure = self.split_and_upload(text, metadata, **kwargs)
+            success_or_failure = self.split_and_upload(text, metadata, force_embeddings, **kwargs)
             print(f"_ingest_html: {success_or_failure}")
             return success_or_failure
         except Exception as e:
@@ -767,7 +856,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_single_video(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_video(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         """
         Ingest a single video file from S3.
         """
@@ -865,7 +954,7 @@ class Ingest:
                 'base_url': kwargs.get('base_url', ''),
             } for txt in text]
 
-            self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
+            self.split_and_upload(texts=text, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
             return "Success"
         except Exception as e:
             err = f"❌❌ Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -874,7 +963,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_docx(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_docx(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             with NamedTemporaryFile() as tmpfile:
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
@@ -894,7 +983,7 @@ class Ingest:
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
 
-                self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+                self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
         except Exception as e:
             err = f"❌❌ Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -903,7 +992,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_srt(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_srt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             import pysrt
 
@@ -930,7 +1019,7 @@ class Ingest:
             if len(text) == 0:
                 return "Error: SRT file appears empty. Skipping."
 
-            self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+            self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
             return "Success"
         except Exception as e:
             err = f"❌❌ Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -939,7 +1028,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_excel(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_excel(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             with NamedTemporaryFile() as tmpfile:
                 # download from S3 into pdf_tmpfile
@@ -961,7 +1050,7 @@ class Ingest:
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
 
-                self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+                self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
         except Exception as e:
             err = f"❌❌ Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -970,7 +1059,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_image(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_image(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             readable_filename = kwargs.get('readable_filename', Path(s3_path).name[37:])
             with NamedTemporaryFile(suffix="."+readable_filename.split(".")[-1]) as tmpfile:
@@ -998,7 +1087,7 @@ class Ingest:
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
 
-                self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+                self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
         except Exception as e:
             err = f"❌❌ Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -1007,7 +1096,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_csv(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_csv(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             with NamedTemporaryFile() as tmpfile:
                 # download from S3 into pdf_tmpfile
@@ -1028,7 +1117,7 @@ class Ingest:
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
 
-                self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+                self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
         except Exception as e:
             err = f"❌❌ Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -1037,7 +1126,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_pdf(self, s3_path: str, course_name: str, **kwargs):
+    def _ingest_single_pdf(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
         """
         Both OCR the PDF. And grab the first image as a PNG.
         LangChain `Documents` have .metadata and .page_content attributes.
@@ -1096,7 +1185,7 @@ class Ingest:
                 # count the total number of words in the pdf_texts. If it's less than 100, we'll OCR the PDF
                 has_words = any(text.strip() for text in pdf_texts)
                 if has_words:
-                    success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, **kwargs)
+                    success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 else:
                     print("⚠️ PDF IS EMPTY -- OCR-ing the PDF.")
                     success_or_failure = self._ocr_pdf(s3_path=s3_path, course_name=course_name, **kwargs)
@@ -1109,7 +1198,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ocr_pdf(self, s3_path: str, course_name: str, **kwargs):
+    def _ocr_pdf(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
         if self.posthog:
             self.posthog.capture('distinct_id_of_the_user',
                                  event='ocr_pdf_invoked',
@@ -1160,7 +1249,7 @@ class Ingest:
                 raise ValueError(
                     "Failed ingest: Could not detect ANY text in the PDF. OCR did not help. PDF appears empty of text.")
 
-            success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, **kwargs)
+            success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
             return success_or_failure
         except Exception as e:
             err = f"❌❌ Error in PDF ingest (with OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
@@ -1168,7 +1257,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_single_txt(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_txt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         """Ingest a single .txt or .md file from S3.
         Args:
             s3_path (str): A path to a .txt file in S3
@@ -1197,7 +1286,8 @@ class Ingest:
             }]
             print("Prior to ingest", metadatas)
 
-            success_or_failure = self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
+            success_or_failure = self.split_and_upload(texts=text, metadatas=metadatas,
+                                                       force_embeddings=force_embeddings, **kwargs)
             return success_or_failure
         except Exception as e:
             err = f"❌❌ Error in (TXT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
@@ -1205,7 +1295,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_ppt(self, s3_path: str, course_name: str, **kwargs) -> str:
+    def _ingest_single_ppt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         """
         Ingest a single .ppt or .pptx file from S3.
         """
@@ -1230,7 +1320,7 @@ class Ingest:
                     'base_url': kwargs.get('base_url', '')
                 } for doc in documents]
 
-                self.split_and_upload(texts=texts, metadatas=metadatas, **kwargs)
+                self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
         except Exception as e:
             err = f"❌❌ Error in (PPTX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
@@ -1239,7 +1329,7 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def ingest_github(self, github_url: str, course_name: str) -> str:
+    def ingest_github(self, github_url: str, course_name: str, force_embeddings: bool) -> str:
         """
         Clones the given GitHub URL and uses Langchain to load data.
         1. Clone the repo
@@ -1272,7 +1362,7 @@ class Ingest:
                     'pagenumber': '',
                     'timestamp': '',
                 }
-                self.split_and_upload(texts=[texts], metadatas=[metadatas])
+                self.split_and_upload(texts=[texts], metadatas=[metadatas], force_embeddings=force_embeddings)
             return "Success"
         except Exception as e:
             err = f"❌❌ Error in (GITHUB ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n{traceback.format_exc()}"
