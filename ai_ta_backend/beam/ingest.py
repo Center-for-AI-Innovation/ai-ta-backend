@@ -1225,9 +1225,37 @@ class Ingest():
       asyncio.run(oai.process_api_requests_from_file())
       print(f"⏰ embeddings runtime: {(time.monotonic() - embeddings_start_time):.2f} seconds")
       # parse results into dict of shape page_content -> embedding
-      embeddings_dict: dict[str, List[float]] = {
-          item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
-      }
+      # Transform Ollama response format to OpenAI format
+      embeddings_dict: dict[str, List[float]] = {}
+      for item in oai.results:
+          input_text = item[0]['input']
+          response = item[1]
+          
+          # Handle different response formats
+          if 'data' in response and len(response['data']) > 0:
+              # OpenAI format: {"data": [{"embedding": [...]}]}
+              embedding = response['data'][0]['embedding']
+          elif 'embedding' in response:
+              # Ollama format: {"embedding": [...]}
+              embedding = response['embedding']
+          else:
+              # Fallback: try to find embedding in any nested structure
+              embedding = None
+              if isinstance(response, dict):
+                  for key, value in response.items():
+                      if key == 'embedding' and isinstance(value, list):
+                          embedding = value
+                          break
+                      elif isinstance(value, dict) and 'embedding' in value:
+                          embedding = value['embedding']
+                          break
+          
+          if embedding is not None:
+              embeddings_dict[input_text] = embedding
+          else:
+              print(f"Warning: Could not extract embedding from response: {response}")
+              # Create a zero vector as fallback (you might want to handle this differently)
+              embeddings_dict[input_text] = [0.0] * 384  # nomic-embed-text has 384 dimensions
 
       ### BULK upload to Qdrant ###
       vectors: list[PointStruct] = []

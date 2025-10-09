@@ -91,14 +91,43 @@ class Ingest:
 
     def initialize_resources(self):
         # Initialize Qdrant client and create collection if necessary
-        if self.qdrant_api_key and self.qdrant_url:
-            self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
-            if not self.qdrant_client.get_collection(self.qdrant_collection_name):
-                logging.info(f"Creating collection {self.qdrant_collection_name}")
-                self.qdrant_client.create_collection(
+        if self.qdrant_url:
+            if self.qdrant_api_key:
+                self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
+            else:
+                # Qdrant without authentication
+                self.qdrant_client = QdrantClient(url=self.qdrant_url)
+            
+            try:
+                # Check if collection exists, create if it doesn't
+                try:
+                    collection_info = self.qdrant_client.get_collection(self.qdrant_collection_name)
+                    logging.info(f"Collection {self.qdrant_collection_name} already exists")
+                except Exception as e:
+                    error_str = str(e)
+                    logging.info(f"Collection check failed: {error_str}")
+                    if "404" in error_str or "Not Found" in error_str or "doesn't exist" in error_str:
+                        logging.info(f"Creating collection {self.qdrant_collection_name}")
+                        try:
+                            self.qdrant_client.create_collection(
+                                collection_name=self.qdrant_collection_name,
+                                vectors_config={"size": 384, "distance": "Cosine"}  # nomic-embed-text has 384 dimensions
+                            )
+                            logging.info(f"Collection {self.qdrant_collection_name} created successfully")
+                        except Exception as create_error:
+                            logging.error(f"Failed to create collection: {create_error}")
+                            raise create_error
+                    else:
+                        logging.error(f"Unexpected error checking collection: {e}")
+                        raise e
+                
+                self.vectorstore = Qdrant(
+                    client=self.qdrant_client,
                     collection_name=self.qdrant_collection_name,
-                    vectors_config={"size": 4096, "distance": "Cosine"}
+                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
+                                                openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
                 )
+<<<<<<< Updated upstream
 
             if self.embedding_model == 'text-embedding-ada-002':
                 self.vectorstore = Qdrant(
@@ -116,8 +145,14 @@ class Ingest:
                                                 openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
                 )
                 print("Vectorstore initialized with NCSA_HOSTED model")
+=======
+                logging.info("Qdrant client initialized successfully")
+            except Exception as e:
+                logging.error(f"Failed to initialize Qdrant client: {e}")
+                self.qdrant_client = None
+>>>>>>> Stashed changes
         else:
-            logging.error("QDRANT API KEY OR URL NOT FOUND!")
+            logging.error("QDRANT URL NOT FOUND!")
 
         # Connect to AWS S3 file store
         if self.aws_access_key_id and self.aws_secret_access_key:
@@ -382,9 +417,37 @@ class Ingest:
                 model=self.embedding_model)
             asyncio.run(oai.process_api_requests_from_file())
             print(f"⏰ embeddings runtime: {(time.monotonic() - embeddings_start_time):.2f} seconds")
-            embeddings_dict: dict[str, List[float]] = {
-                item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
-            }
+            # Transform Ollama response format to OpenAI format
+            embeddings_dict: dict[str, List[float]] = {}
+            for item in oai.results:
+                input_text = item[0]['input']
+                response = item[1]
+                
+                # Handle different response formats
+                if 'data' in response and len(response['data']) > 0:
+                    # OpenAI format: {"data": [{"embedding": [...]}]}
+                    embedding = response['data'][0]['embedding']
+                elif 'embedding' in response:
+                    # Ollama format: {"embedding": [...]}
+                    embedding = response['embedding']
+                else:
+                    # Fallback: try to find embedding in any nested structure
+                    embedding = None
+                    if isinstance(response, dict):
+                        for key, value in response.items():
+                            if key == 'embedding' and isinstance(value, list):
+                                embedding = value
+                                break
+                            elif isinstance(value, dict) and 'embedding' in value:
+                                embedding = value['embedding']
+                                break
+                
+                if embedding is not None:
+                    embeddings_dict[input_text] = embedding
+                else:
+                    print(f"Warning: Could not extract embedding from response: {response}")
+                    # Create a zero vector as fallback (you might want to handle this differently)
+                    embeddings_dict[input_text] = [0.0] * 384  # nomic-embed-text has 384 dimensions
 
             # Batched upload to Qdrant with temporary indexing threshold adjustments
             collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore

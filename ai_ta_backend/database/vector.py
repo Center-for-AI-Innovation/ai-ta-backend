@@ -4,8 +4,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from injector import inject
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores import Qdrant
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Qdrant
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import FieldCondition, MatchAny, MatchValue
 
@@ -43,10 +43,22 @@ class VectorDatabase():
       print(f"Error in cropwizard_qdrant_client: {e}")
       self.cropwizard_qdrant_client = None
 
+<<<<<<< Updated upstream
     # self.openai_api_key = os.getenv('OPENAI_API_KEY') if os.getenv('OPENAI_API_KEY') else os.getenv('NCSA_HOSTED_API_KEY')
     # self.vectorstore = Qdrant(client=self.qdrant_client,
     #                           collection_name=os.environ['QDRANT_COLLECTION_NAME'],
     #                           embeddings=OpenAIEmbeddings(openai_api_key=self.openai_api_key))
+=======
+    # Use Ollama embeddings for local/self-hosted setup to avoid external API keys
+    self.vectorstore = Qdrant(
+        client=self.qdrant_client,
+        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+        embeddings=OllamaEmbeddings(
+            base_url=os.environ.get('OLLAMA_SERVER_URL', 'http://uiuc-chat-ollama:11434'),
+            model=os.environ.get('EMBEDDING_MODEL', 'nomic-embed-text')
+        )
+    )
+>>>>>>> Stashed changes
 
   def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                     disabled_doc_groups: List[str], public_doc_groups: List[dict]):

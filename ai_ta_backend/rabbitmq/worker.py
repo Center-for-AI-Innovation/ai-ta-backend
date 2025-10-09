@@ -8,7 +8,10 @@ import logging
 import json
 import threading
 
-from ingest import Ingest
+try:
+    from ai_ta_backend.rabbitmq.ingest import Ingest
+except ModuleNotFoundError:
+    from ingest import Ingest
 from flask import Flask, jsonify
 
 
