@@ -32,6 +32,10 @@ COPY . .
 # Set Python path
 ENV PYTHONPATH="${PYTHONPATH}:/app/ai_ta_backend"
 
+# Sensible defaults for worker recycling; override via task env if needed
+ENV GUNICORN_MAX_REQUESTS=1000
+ENV GUNICORN_MAX_REQUESTS_JITTER=200
+
 # Expose port
 EXPOSE 8001
 
@@ -40,4 +44,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
 # Run the application
-CMD ["gunicorn", "--workers=2", "--threads=3", "--worker-class=gthread", "ai_ta_backend.main:app", "--timeout=1800", "--bind=0.0.0.0:8001"]
+CMD ["gunicorn", "--workers=2", "--threads=3", "--worker-class=gthread", "ai_ta_backend.main:app", "--timeout=1800", "--bind=0.0.0.0:8001", "--max-requests", "${GUNICORN_MAX_REQUESTS}", "--max-requests-jitter", "${GUNICORN_MAX_REQUESTS_JITTER}"]
