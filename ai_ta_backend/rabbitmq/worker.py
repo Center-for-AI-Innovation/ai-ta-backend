@@ -16,6 +16,7 @@ app = Flask(__name__)
 
 BACKOFF_BASE = float(os.getenv('BACKOFF_BASE', '1.0'))   # seconds
 BACKOFF_MAX  = float(os.getenv('BACKOFF_MAX', '30.0'))   # seconds
+PREFETCH_COUNT = int(os.getenv('RABBITMQ_PREFETCH_COUNT', '1'))  # messages
 
 stop_event = threading.Event()
 worker_thread: threading.Thread | None = None
@@ -50,6 +51,7 @@ class Worker:
         self.connection = pika.BlockingConnection(parameters)
         self.channel = self.connection.channel()
         self.channel.queue_declare(queue=self.rabbitmq_queue, durable=True)
+        self.channel.basic_qos(prefetch_count=PREFETCH_COUNT)
 
     def close(self):
         try:

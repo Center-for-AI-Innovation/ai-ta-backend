@@ -88,6 +88,9 @@ class Ingest:
         # Temporarily raise indexing threshold during ingestion, then revert
         self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
         self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
+        
+        # Embedding API retry configuration
+        self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
     def initialize_resources(self):
         # Initialize Qdrant client and create collection if necessary
@@ -377,7 +380,7 @@ class Ingest:
                 max_requests_per_minute=10_000,
                 max_tokens_per_minute=10_000_000,
                 token_encoding_name='cl100k_base',
-                max_attempts=1_000,
+                max_attempts=self.embedding_max_attempts,
                 logging_level=logging.INFO,
                 model=self.embedding_model)
             asyncio.run(oai.process_api_requests_from_file())
