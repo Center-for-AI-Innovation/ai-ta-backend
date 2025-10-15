@@ -3,6 +3,8 @@ import os
 import re
 import time
 import logging
+import gc
+import tracemalloc
 from typing import List
 
 from dotenv import load_dotenv
@@ -56,6 +58,17 @@ executor = Executor(app)
 # load API keys from globally-availabe .env file
 load_dotenv()
 
+# Lightweight, opt-in memory diagnostics
+TRACEMALLOC_ENABLED = os.getenv('TRACEMALLOC_ENABLED', 'false').lower() == 'true'
+_tracemalloc_started = False
+_baseline_snapshot = None
+
+def _ensure_tracemalloc_started():
+  global _tracemalloc_started
+  if not _tracemalloc_started:
+    tracemalloc.start(25)
+    _tracemalloc_started = True
+
 
 @app.route('/')
 def index() -> Response:
@@ -87,6 +100,71 @@ def health() -> Response:
   })
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
+
+
+@app.route('/debug/mem/start', methods=['POST'])
+def mem_start() -> Response:
+  if not TRACEMALLOC_ENABLED:
+    return jsonify({"enabled": False}), 403
+  _ensure_tracemalloc_started()
+  global _baseline_snapshot
+  gc.collect()
+  _baseline_snapshot = tracemalloc.take_snapshot()
+  return jsonify({"enabled": True, "status": "started"})
+
+
+@app.route('/debug/mem/stop', methods=['POST'])
+def mem_stop() -> Response:
+  if not TRACEMALLOC_ENABLED:
+    return jsonify({"enabled": False}), 403
+  global _tracemalloc_started, _baseline_snapshot
+  if _tracemalloc_started:
+    tracemalloc.stop()
+  _tracemalloc_started = False
+  _baseline_snapshot = None
+  return jsonify({"enabled": True, "status": "stopped"})
+
+
+@app.route('/debug/mem/heap', methods=['GET'])
+def mem_heap() -> Response:
+  if not TRACEMALLOC_ENABLED:
+    return jsonify({"enabled": False}), 403
+  _ensure_tracemalloc_started()
+  current, peak = tracemalloc.get_traced_memory()
+  return jsonify({
+    "enabled": True,
+    "current_bytes": int(current),
+    "peak_bytes": int(peak)
+  })
+
+
+@app.route('/debug/mem/stats', methods=['GET'])
+def mem_stats() -> Response:
+  if not TRACEMALLOC_ENABLED:
+    return jsonify({"enabled": False}), 403
+  _ensure_tracemalloc_started()
+  gc.collect()
+  global _baseline_snapshot
+  snap = tracemalloc.take_snapshot()
+  if _baseline_snapshot is not None:
+    stats = snap.compare_to(_baseline_snapshot, 'lineno')
+  else:
+    stats = snap.statistics('lineno')
+  top_n = int(os.getenv('TRACEMALLOC_TOP', '25'))
+  top = []
+  for s in stats[:top_n]:
+    top.append({
+      "trace": str(s.traceback).split('\n')[-1].strip(),
+      "size_bytes": int(s.size),
+      "count": int(s.count)
+    })
+  total = sum(int(s.size) for s in stats)
+  return jsonify({
+    "enabled": True,
+    "total_bytes": int(total),
+    "top": top,
+    "baseline": _baseline_snapshot is not None
+  })
 
 
 @app.route('/getTopContexts', methods=['POST'])
