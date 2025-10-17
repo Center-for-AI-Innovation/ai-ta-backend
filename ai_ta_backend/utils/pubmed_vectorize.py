@@ -73,7 +73,7 @@ def extract_text_from_pdf(file_path, s3_path):
 def process_pdf(key, bucket, temp_dir):
     """Process a single PDF file - for parallel execution"""
     minio_client = Minio(
-        endpoint=os.environ['MINIO_ENDPOINT'],
+        endpoint=os.environ['MINIO_URL'],
         access_key=os.environ['MINIO_ACCESS_KEY'],
         secret_key=os.environ['MINIO_SECRET_KEY'],
         secure=os.environ.get('MINIO_SECURE', 'false').lower() == 'true'
@@ -103,7 +103,7 @@ class MinioClient:
     def __init__(self):
         """Initialize MinIO client."""
         self.client = Minio(
-            endpoint=os.environ['MINIO_ENDPOINT'],
+            endpoint=os.environ['MINIO_URL'],
             access_key=os.environ['MINIO_ACCESS_KEY'],
             secret_key=os.environ['MINIO_SECRET_KEY'],
             secure=os.environ.get('MINIO_SECURE', 'false').lower() == 'true'

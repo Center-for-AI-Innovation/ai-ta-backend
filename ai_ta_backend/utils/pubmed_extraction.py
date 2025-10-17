@@ -26,7 +26,7 @@ from posthog import Posthog
 #     supabase_key=os.getenv('SUPABASE_API_KEY')  # type: ignore
 # )
 
-# MINIO_CLIENT = Minio(os.environ['MINIO_ENDPOINT'],
+# MINIO_CLIENT = Minio(os.environ['MINIO_URL'],
 #                      access_key=os.environ['MINIO_ACCESS_KEY'],
 #                      secret_key=os.environ['MINIO_SECRET'],
 #                      secure=True)
@@ -52,7 +52,7 @@ def extractPubmedData():
         )
 
   if 'MINIO_CLIENT' not in globals():
-        MINIO_CLIENT = Minio(os.environ['MINIO_ENDPOINT'],
+        MINIO_CLIENT = Minio(os.environ['MINIO_URL'],
                             access_key=os.environ['MINIO_ACCESS_KEY'],
                             secret_key=os.environ['MINIO_SECRET'],
                             secure=True)

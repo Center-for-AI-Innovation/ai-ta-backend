@@ -11,8 +11,8 @@ class AWSStorage:
     s3_config = {}
 
     # If running against local MinIO
-    if os.environ.get("LOCAL_MINIO") == "true" and os.environ.get("MINIO_ENDPOINT"):
-        s3_config["endpoint_url"] = os.environ["MINIO_ENDPOINT"]
+    if os.environ.get("LOCAL_MINIO") == "true" and os.environ.get("MINIO_URL"):
+        s3_config["endpoint_url"] = os.environ["MINIO_URL"]
     
     # AWS credentials
     if os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"):
