@@ -17,6 +17,7 @@ app = Flask(__name__)
 BACKOFF_BASE = float(os.getenv('BACKOFF_BASE', '1.0'))   # seconds
 BACKOFF_MAX  = float(os.getenv('BACKOFF_MAX', '30.0'))   # seconds
 PREFETCH_COUNT = int(os.getenv('RABBITMQ_PREFETCH_COUNT', '1'))  # messages
+MAX_JOB_RETRIES = int(os.getenv('MAX_JOB_RETRIES', '10'))  # messages
 
 stop_event = threading.Event()
 worker_thread: threading.Thread | None = None
@@ -26,6 +27,7 @@ worker_running = threading.Event()
 class Worker:
 
     def __init__(self):
+        self.consumer = None
         self.rabbitmq_url = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672')
         self.rabbitmq_ssl = os.getenv('RABBITMQ_SSL', False)
         self.rabbitmq_queue = os.getenv('RABBITMQ_QUEUE', 'uiuc-chat')
@@ -56,6 +58,7 @@ class Worker:
     def close(self):
         try:
             if self.channel and self.channel.is_open:
+                self.channel.stop_consuming(self.consumer)
                 self.channel.close()
         except Exception:
             pass
@@ -76,7 +79,7 @@ class Worker:
                 and self.channel.is_open
         )
 
-    def process_job(self, channel, method, properties, body):
+    def process_job(self, channel, method, header, body):
         content = json.loads(body.decode())
         job_id = content['job_id']
         logging.info("----------------------------------------")
@@ -85,39 +88,60 @@ class Worker:
         inputs = content['inputs']
         logging.info(inputs)
 
-        ingester = Ingest()
+        retry_count = content['retry_count'] if 'retry_count' in content else 0
+
         try:
-            ingester.main_ingest(job_id=job_id, **inputs)
-            #sql_session
-        finally:
-            # TODO: Catch errors into a retry loop or something else?
+            # acknowledge message immediately, on common failures it will be retried
             channel.basic_ack(delivery_tag=method.delivery_tag)
+            ingester = Ingest()
+            ingester.main_ingest(job_id=job_id, **inputs)
+        except:
+            if retry_count < MAX_JOB_RETRIES:
+                logging.info(f"Resubmitting {job_id} to queue (retry #{retry_count+1}.")
+                content["retry_count"] = retry_count + 1
+                properties = pika.BasicProperties(delivery_mode=2, reply_to=header.reply_to)
+                channel.basic_publish(exchange='',
+                                      routing_key=self.rabbitmq_queue,
+                                      properties=properties,
+                                      body=json.dumps(content))
+            else:
+                logging.info(f"Job {job_id} failed after {MAX_JOB_RETRIES} retries. Discarding job.")
 
     def listen_for_jobs(self):
         backoff = BACKOFF_BASE
         while not stop_event.is_set():
+            logging.info("Worker connecting to RabbitMQ...")
+            if not self.is_connected():
+                logging.error("RabbitMQ is offline")
+                return
+
+            logging.info("Worker connected to RabbitMQ")
+            self.consumer = self.channel.basic_consume(
+                queue=self.rabbitmq_queue,
+                on_message_callback=self.process_job,
+                auto_ack=False
+            )
+
+            # start listening
+            logging.info("Waiting for messages. To exit press CTRL+C")
+            worker_running.set()  # mark healthy
+
             try:
-                logging.info("Worker connecting to RabbitMQ...")
-                if not self.is_connected():
-                    logging.error("RabbitMQ is offline")
-                    return
-
-                logging.info("Worker connected to RabbitMQ")
-
-                self.channel.basic_consume(
-                    queue=self.rabbitmq_queue,
-                    on_message_callback=self.process_job,
-                    auto_ack=False
-                )
-
-                logging.info("Waiting for messages. To exit press CTRL+C")
-                worker_running.set()  # mark healthy
-                self.channel.start_consuming()
-
-            except Exception:
-                worker_running.clear()
+                # pylint: disable=protected-access
+                while self.channel and self.channel.is_open and self.channel._consumer_infos:
+                    self.channel.connection.process_data_events(time_limit=1)  # 1 second
+            except SystemExit:
+                raise
+            except KeyboardInterrupt:
+                raise
+            except GeneratorExit:
+                raise
+            except Exception:  # pylint: disable=broad-except
                 logging.error("Worker crashed/disconnected:\n%s", traceback.format_exc())
+            finally:
+                logging.info("Stopped listening for messages.")
                 self.close()
+                self.connection = None
 
                 # backoff with cap
                 if stop_event.wait(backoff):
