@@ -445,20 +445,20 @@ class Ingest:
                     logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
 
             # Supabase SQL insertion
-            contexts_for_supa = [{
-                "text": context.page_content,
-                "pagenumber": context.metadata.get('pagenumber'),
-                "timestamp": context.metadata.get('timestamp'),
-                "chunk_index": context.metadata.get('chunk_index'),
-                "embedding": embeddings_dict[context.page_content]
-            } for context in contexts]
+            # contexts_for_supa = [{
+            #     "text": context.page_content,
+            #     "pagenumber": context.metadata.get('pagenumber'),
+            #     "timestamp": context.metadata.get('timestamp'),
+            #     "chunk_index": context.metadata.get('chunk_index'),
+            #     "embedding": embeddings_dict[context.page_content]
+            # } for context in contexts]
             document = {
                 "course_name": contexts[0].metadata.get('course_name'),
                 "s3_path": contexts[0].metadata.get('s3_path'),
                 "readable_filename": contexts[0].metadata.get('readable_filename'),
                 "url": contexts[0].metadata.get('url'),
                 "base_url": contexts[0].metadata.get('base_url'),
-                "contexts": contexts_for_supa,
+                # "contexts": contexts_for_supa,
             }
             document_size_mb = len(json.dumps(document).encode('utf-8')) / (1024 * 1024)
             logging.info("Inserting document (size: %.2f MB)", document_size_mb)
