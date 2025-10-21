@@ -56,6 +56,7 @@ except ModuleNotFoundError:
 
 load_dotenv()
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger('pika').setLevel(logging.WARNING)
 
 class Ingest:
     """

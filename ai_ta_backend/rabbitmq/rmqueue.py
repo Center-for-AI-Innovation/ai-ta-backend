@@ -12,6 +12,8 @@ except ModuleNotFoundError:
     from rmsql import SQLAlchemyIngestDB
     import models
 
+logging.getLogger('pika').setLevel(logging.WARNING)
+
 
 # TODO: Move into the class?
 sql_session = SQLAlchemyIngestDB()

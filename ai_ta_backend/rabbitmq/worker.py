@@ -24,6 +24,8 @@ worker_thread: threading.Thread | None = None
 worker_running = threading.Event()
 
 
+logging.getLogger('pika').setLevel(logging.WARNING)
+
 class Worker:
 
     def __init__(self):
