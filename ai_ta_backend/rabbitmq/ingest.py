@@ -57,6 +57,9 @@ except ModuleNotFoundError:
 load_dotenv()
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger('pika').setLevel(logging.WARNING)
+logging.getLogger('boto3').setLevel(logging.WARNING)
+logging.getLogger('botocore').setLevel(logging.WARNING)
+logging.getLogger('nose').setLevel(logging.WARNING)
 
 class Ingest:
     """

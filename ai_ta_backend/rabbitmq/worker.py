@@ -8,6 +8,7 @@ import logging
 import json
 import threading
 
+from rmsql import SQLAlchemyIngestDB
 from ingest import Ingest
 from flask import Flask, jsonify
 
@@ -24,7 +25,11 @@ worker_thread: threading.Thread | None = None
 worker_running = threading.Event()
 
 
+
+
 logging.getLogger('pika').setLevel(logging.WARNING)
+
+sql_session = SQLAlchemyIngestDB()
 
 class Worker:
 
@@ -93,16 +98,40 @@ class Worker:
         retry_count = content['retry_count'] if 'retry_count' in content else 0
 
         try:
-            # acknowledge message immediately, on common failures it will be retried
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-            ingester = Ingest()
-            ingester.main_ingest(job_id=job_id, **inputs)
-        except:
+            # flag this message as "processing started" so we can ack it later if memory runs out
+
+            prog_doc = sql_session.fetch_document_in_progress(job_id)
+            if not prog_doc:
+                logging.error(f"Job ID {job_id} not found in DocumentsInProgress table.")
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+            else:
+                if "error" in prog_doc and prog_doc["error"] == 'Attempting ingest':
+                    sql_session.insert_failed_document({
+                        "s3_path": str(prog_doc["s3_path"]),
+                        "readable_filename": prog_doc["readable_filename"],
+                        "course_name": prog_doc["course_name"],
+                        "url": prog_doc["url"],
+                        "base_url": prog_doc["base_url"],
+                        "doc_groups": prog_doc["doc_groups"],
+                        "error": "Ingest could not resolve successfully, worker crashed (e.g. ran out of memory)",
+                    })
+                    sql_session.delete_document_in_progress(job_id)
+                    channel.basic_ack(delivery_tag=method.delivery_tag)
+                else:
+                    prog_doc["error"] = 'Attempting ingest'
+                    sql_session.update_document_in_progress(prog_doc)
+
+                    ingester = Ingest()
+                    ingester.main_ingest(job_id=job_id, **inputs)
+                    channel.basic_ack(delivery_tag=method.delivery_tag)
+        except Exception as e:
             if retry_count < MAX_JOB_RETRIES:
-                logging.info(f"Resubmitting {job_id} to queue (retry #{retry_count+1}.")
+                logging.info(f"Resubmitting {job_id} to queue (retry #{retry_count+1})")
                 content["retry_count"] = retry_count + 1
                 properties = pika.BasicProperties(delivery_mode=2, reply_to=header.reply_to)
-                channel.basic_publish(exchange='',
+                # TODO: Channel is likely broken here
+                self.connect()
+                self.channel.basic_publish(exchange='',
                                       routing_key=self.rabbitmq_queue,
                                       properties=properties,
                                       body=json.dumps(content))

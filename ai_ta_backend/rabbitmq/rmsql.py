@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from typing import List, TypeVar, Generic, TypedDict
 load_dotenv()
 
-from sqlalchemy import create_engine, NullPool
+from sqlalchemy import create_engine, NullPool, update
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import insert
 from sqlalchemy import delete
@@ -115,7 +115,22 @@ class SQLAlchemyIngestDB:
             session.flush()
 
             session.refresh(doc_progress)
-            return doc_progress.to_dict()
+        return doc_progress.to_dict()
+
+    def fetch_document_in_progress(self, job_id: str) -> dict:
+        with self.get_session() as session:
+            result = session.query(models.DocumentsInProgress).filter(
+                models.DocumentsInProgress.beam_task_id == job_id
+            ).first()
+            return result.to_dict() if result else None
+
+    def update_document_in_progress(self, doc_progress: dict):
+        with self.get_session() as session:
+            session.query(models.DocumentsInProgress) \
+                .filter(models.DocumentsInProgress.beam_task_id == doc_progress['beam_task_id']) \
+                .update(doc_progress)
+            session.commit()
+            return doc_progress
 
     def insert_failed_document(self, failed_doc_payload: dict):
         with self.get_session() as session:
