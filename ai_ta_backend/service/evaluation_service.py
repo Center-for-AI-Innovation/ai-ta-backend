@@ -17,9 +17,6 @@ from ai_ta_backend.service.retrieval_service import RetrievalService
 
 class CropWizardConfig:
     def __init__(self):
-        self.prompt_endpoint = str(
-            getenv("EVALUATION_CONTEXT_URL")
-        )  # API endpoint to retrieve contexts
         self.answer_endpoint = str(
             getenv("EVALUATION_ANSWER_URL")
         )  # API endpoint to retrieve answers
@@ -35,20 +32,13 @@ class CropWizardConfig:
             If the user asks an introductory question or greeting along the lines of "hello" or "what can you do?" or "What's in here?" or "what is CropWizard?" or similar, then please respond with a warm welcome to CropWizard, the AI farm assistant chatbot. Tell them that you can answer questions using the entire knowledge base of Extension plus a growing list of open-access research publications. Whether you need information on crop management, pest control, or any other farming-related topic, feel free to ask!
             When the provided documents don't contain the answer, say in bold italic text "The CropWizard database doesn't have anything covering this exact question, but here's what I know from my general world knowledge." Always refer to the provided documents as "the CropWizard database" and use bold italics when giving this disclaimer."""
 
-    # def __repr__(self):
-    #     return f"<CropWizardConfig(db_version={self.db_version}, fetching from={self.cw_groups})>"
-
     def get_config(self):
         """Returns the configuration as a dictionary."""
         return {
-            "prompt_endpoint": self.prompt_endpoint,
             "answer_endpoint": self.answer_endpoint,
             "cropwiz_api_key": self.cropwiz_api_key,
-            # "db_version": self.db_version,
             "cw_groups": self.cw_groups,
             "token_limit": self.token_limit,
-            # "model": self.model,
-            # "temperature": self.temperature,
             "cropwiz_sys_prompt": self.cropwiz_sys_prompt,
         }
 
@@ -83,7 +73,6 @@ class OpenAIConfig:
         environ["OPENAI_API_KEY"] = str(getenv("EVALUATION_OPENAI_API_KEY"))
 
         self.api_key = environ["OPENAI_API_KEY"]
-        # self.temperature = 0.1  # Default temperature
 
     def __repr__(self):
         return f"<OpenAI API key is initialized>"
@@ -92,7 +81,6 @@ class OpenAIConfig:
         """Returns the OpenAI configuration as a dictionary."""
         return {
             "api_key": self.api_key,
-            # "temperature": self.temperature,
         }
 
 
@@ -108,7 +96,6 @@ class OllamaConfig:
             "qwen2.5:14b": "qwen2.5:14b-instruct-fp16",
             "qwen2.5:7b": "qwen2.5:7b-instruct-fp16",
         }
-        # self.temperature = 0.1  # Default temperature
 
     def __repr__(self):
         return f"<self.ollama_config(base_url={self.base_url})>"
@@ -118,7 +105,6 @@ class OllamaConfig:
         return {
             "base_url": self.base_url,
             "available_models": list(self.available_models.keys()),
-            # "temperature": self.temperature,
         }
 
 
