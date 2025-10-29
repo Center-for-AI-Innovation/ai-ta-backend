@@ -23,17 +23,17 @@ class CropWizardConfig:
         self.cropwiz_api_key = str(
             getenv("EVALUATION_UIUC_CHAT_API_KEY")
         )  # API key to access UIUC.chat
-        self.db_version = "cropwizard-1.5"  # CropWizard version
+        # self.db_version = "cropwizard-1.5"  # CropWizard version
         self.cw_groups = ["All Documents"]  # Subset of documents
         self.token_limit = 128000  # Token Limit
-        self.model = "gpt-4o-mini"  # Default model
-        self.temperature = 0.1  # Default temperature
+        # self.model = "gpt-4o-mini"  # Default model
+        # self.temperature = 0.1  # Default temperature
         self.cropwiz_sys_prompt = """You are a helpful assistant. Follow the user's instructions carefully. Respond using markdown. If the question is related to farming in ANY WAY then always answer the question even if the documents are not helpful. Give the users the most helpful response possible as best you can. Remember this: always give a reasonable answer to the users question and never refuse to answer even if you have little information to go on; give an array of helpful answers if necessary. ALWAYS respond with something helpful to answer their questions and propose solutions. ALWAYS provide citations, but ONLY when relevant. 
             If the user asks an introductory question or greeting along the lines of "hello" or "what can you do?" or "What's in here?" or "what is CropWizard?" or similar, then please respond with a warm welcome to CropWizard, the AI farm assistant chatbot. Tell them that you can answer questions using the entire knowledge base of Extension plus a growing list of open-access research publications. Whether you need information on crop management, pest control, or any other farming-related topic, feel free to ask!
             When the provided documents don't contain the answer, say in bold italic text "The CropWizard database doesn't have anything covering this exact question, but here's what I know from my general world knowledge." Always refer to the provided documents as "the CropWizard database" and use bold italics when giving this disclaimer."""
 
-    def __repr__(self):
-        return f"<CropWizardConfig(db_version={self.db_version}, fetching from={self.cw_groups})>"
+    # def __repr__(self):
+    #     return f"<CropWizardConfig(db_version={self.db_version}, fetching from={self.cw_groups})>"
 
     def get_config(self):
         """Returns the configuration as a dictionary."""
@@ -41,11 +41,11 @@ class CropWizardConfig:
             "prompt_endpoint": self.prompt_endpoint,
             "answer_endpoint": self.answer_endpoint,
             "cropwiz_api_key": self.cropwiz_api_key,
-            "db_version": self.db_version,
+            # "db_version": self.db_version,
             "cw_groups": self.cw_groups,
             "token_limit": self.token_limit,
-            "model": self.model,
-            "temperature": self.temperature,
+            # "model": self.model,
+            # "temperature": self.temperature,
             "cropwiz_sys_prompt": self.cropwiz_sys_prompt,
         }
 
@@ -80,7 +80,7 @@ class OpenAIConfig:
         environ["OPENAI_API_KEY"] = str(getenv("EVALUATION_OPENAI_API_KEY"))
 
         self.api_key = environ["OPENAI_API_KEY"]
-        self.temperature = 0.1  # Default temperature
+        # self.temperature = 0.1  # Default temperature
 
     def __repr__(self):
         return f"<OpenAI API key is initialized>"
@@ -89,7 +89,7 @@ class OpenAIConfig:
         """Returns the OpenAI configuration as a dictionary."""
         return {
             "api_key": self.api_key,
-            "temperature": self.temperature,
+            # "temperature": self.temperature,
         }
 
 
@@ -105,7 +105,7 @@ class OllamaConfig:
             "qwen2.5:14b": "qwen2.5:14b-instruct-fp16",
             "qwen2.5:7b": "qwen2.5:7b-instruct-fp16",
         }
-        self.temperature = 0.1  # Default temperature
+        # self.temperature = 0.1  # Default temperature
 
     def __repr__(self):
         return f"<self.ollama_config(base_url={self.base_url})>"
@@ -115,7 +115,7 @@ class OllamaConfig:
         return {
             "base_url": self.base_url,
             "available_models": list(self.available_models.keys()),
-            "temperature": self.temperature,
+            # "temperature": self.temperature,
         }
 
 
@@ -138,6 +138,7 @@ class EvaluationService:
     def get_prompt_tokens(
         self,
         prompt: str,
+        course_name: str,
         log: bool = True,
     ) -> str:
         """
@@ -149,12 +150,11 @@ class EvaluationService:
         A dictionary of tokens representing the fragments, retrieved from the submitted prompt.
         """
         url = self.config.prompt_endpoint
-        db = self.config.db_version
         groups = self.config.cw_groups
         limit = self.config.token_limit
 
         payload: dict = {
-            "course_name": db,
+            "course_name": course_name,
             "doc_groups": groups,
             "search_query": prompt,
             "token_limit": limit,
@@ -187,13 +187,13 @@ class EvaluationService:
 
         return fragments
 
-    def query_cropwizard(self, prompt: str, log: bool = True) -> str:
+    def query_cropwizard(
+        self, prompt: str, model: str, course_name: str, log: bool = True
+    ) -> str:
         """
         Function to send a prompt to CropWizard and get the response.
         """
-        model = self.config.model
         url = self.config.answer_endpoint
-        course = self.config.db_version
         group = self.config.cw_groups
         limit = self.config.token_limit
 
@@ -204,7 +204,7 @@ class EvaluationService:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "course_name": course,
+            "course_name": course_name,
             "doc_groups": group,
             "token_limit": limit,
             "stream": True,
@@ -244,7 +244,9 @@ class EvaluationService:
 
         return response.text
 
-    def create_test_cases(self, question_answer_pairs: dict) -> dict:
+    def create_test_cases(
+        self, question_answer_pairs: dict, model: str, course_name: str
+    ) -> dict:
         """
         Creates a test case dictionary from a question-answer dictionary.
 
@@ -264,8 +266,10 @@ class EvaluationService:
         for key, value in question_answer_pairs.items():
             sleep(0.25)  # Added sleep to avoid issues on the server side
             test_cases["question"].append(key)
-            test_cases["answer"].append(self.query_cropwizard(key))
-            test_cases["retrieved_contexts"].append(self.get_prompt_tokens(key))
+            test_cases["answer"].append(self.query_cropwizard(key, model, course_name))
+            test_cases["retrieved_contexts"].append(
+                self.get_prompt_tokens(key, course_name)
+            )
             test_cases["ground_truth"].append(value)
 
         return test_cases
@@ -369,7 +373,10 @@ class EvaluationService:
     def single_judge_evaluation(
         self,
         question_answer_pairs: dict,
-        judge: str = "gpt-4o-mini",
+        judge: str,
+        course_name: str,
+        temperature: float,
+        model: str,
         log: bool = True,
     ) -> dict:
         """
@@ -386,7 +393,7 @@ class EvaluationService:
         # Initialize report
 
         # Create test cases and preprocess them
-        test_cases = self.create_test_cases(question_answer_pairs)
+        test_cases = self.create_test_cases(question_answer_pairs, model, course_name)
         processed_test_cases = self.preprocess_test_cases(test_cases)
         evaluation_dict, errors = self.create_dataset(processed_test_cases)
 
@@ -403,42 +410,38 @@ class EvaluationService:
         # Initialize Langchain LLM wrapper
         llm_options = {
             # OpenAI models
-            "gpt-4o-mini": ChatOpenAI(
-                model="gpt-4o-mini", temperature=self.openai_config.temperature
-            ),
-            "gpt-4o": ChatOpenAI(
-                model="gpt-4o", temperature=self.openai_config.temperature
-            ),
+            "gpt-4o-mini": ChatOpenAI(model="gpt-4o-mini", temperature=temperature),
+            "gpt-4o": ChatOpenAI(model="gpt-4o", temperature=temperature),
             # Ollama models
             "llama3.1:8b": ChatOllama(
                 model="llama3.1:8b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "llama3.2:1b": ChatOllama(
                 model="llama3.2:1b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "llama3.2:3b": ChatOllama(
                 model="llama3.2:3b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "deepseek-r1:14b": ChatOllama(
                 model="deepseek-r1:14b-qwen-distill-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "qwen2.5:14b": ChatOllama(
                 model="qwen2.5:14b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "qwen2.5:7b": ChatOllama(
                 model="qwen2.5:7b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             # Commented out models that could be added in the future
             # "claude-3-7-sonnet": ChatAnthropic(model="claude-3-5-sonnet-latest", temperature=0.1),
@@ -470,12 +473,15 @@ class EvaluationService:
             llm=evaluator_llm,
         )
 
-        return {"results": self.process_scores(results.scores)}
+        return {"results": self.process_scores(results.scores)}  # type: ignore
 
     def multi_judge_evaluation(
         self,
         question_answer_pairs: dict,
-        judges: list = ["gpt-4o-mini"],
+        judges: list,
+        course_name: str,
+        temperature: float,
+        model: str,
         log: bool = True,
     ) -> dict:
         """
@@ -491,7 +497,7 @@ class EvaluationService:
             dict: A dictionary containing the evaluation results for all judges and the path to the markdown report.
         """
         # Create test cases and preprocess them - only done once for all judges
-        test_cases = self.create_test_cases(question_answer_pairs)
+        test_cases = self.create_test_cases(question_answer_pairs, model, course_name)
         processed_test_cases = self.preprocess_test_cases(test_cases)
         evaluation_dict, errors = self.create_dataset(processed_test_cases)
 
@@ -508,42 +514,38 @@ class EvaluationService:
         # Initialize Langchain LLM wrapper options
         llm_options = {
             # OpenAI models
-            "gpt-4o-mini": ChatOpenAI(
-                model="gpt-4o-mini", temperature=self.openai_config.temperature
-            ),
-            "gpt-4o": ChatOpenAI(
-                model="gpt-4o", temperature=self.openai_config.temperature
-            ),
+            "gpt-4o-mini": ChatOpenAI(model="gpt-4o-mini", temperature=temperature),
+            "gpt-4o": ChatOpenAI(model="gpt-4o", temperature=temperature),
             # Ollama models
             "llama3.1:8b": ChatOllama(
                 model="llama3.1:8b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "llama3.2:1b": ChatOllama(
                 model="llama3.2:1b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "llama3.2:3b": ChatOllama(
                 model="llama3.2:3b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "deepseek-r1:14b": ChatOllama(
                 model="deepseek-r1:14b-qwen-distill-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "qwen2.5:14b": ChatOllama(
                 model="qwen2.5:14b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             "qwen2.5:7b": ChatOllama(
                 model="qwen2.5:7b-instruct-fp16",
                 base_url=self.ollama_config.base_url,
-                temperature=self.ollama_config.temperature,
+                temperature=temperature,
             ),
             # Commented out models that could be added in the future
             # "claude-3-5-sonnet": ChatAnthropic(model="claude-3-5-sonnet-latest", temperature=0.1),
@@ -579,6 +581,7 @@ class EvaluationService:
                     metrics.FactualCorrectness(),
                 ],
                 llm=evaluator_llm,
+                return_executor=False,
             )
 
             # Store results for this judge
@@ -599,7 +602,12 @@ class EvaluationService:
         return processed_scores
 
     def evaluate(
-        self, question_answer_pair, test_judge: list = ["gpt-4o-mini"]
+        self,
+        question_answer_pair,
+        test_judge: list,
+        course_name: str,
+        temperature: float,
+        model: str,
     ) -> dict:
         imported_dataset = question_answer_pair
         list_of_judge_tests = [
@@ -614,10 +622,14 @@ class EvaluationService:
         ]
         if all(item in list_of_judge_tests for item in test_judge):
             if len(test_judge) == 1:
-                result = self.single_judge_evaluation(imported_dataset, test_judge[0])
+                result = self.single_judge_evaluation(
+                    imported_dataset, test_judge[0], course_name, temperature, model
+                )
                 return result
             elif len(test_judge) > 1:
-                result = self.multi_judge_evaluation(imported_dataset, test_judge)
+                result = self.multi_judge_evaluation(
+                    imported_dataset, test_judge, course_name, temperature, model
+                )
                 return result
         else:
             raise ValueError(f"One or more invalid values for test_judge: {test_judge}")

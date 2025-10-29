@@ -82,8 +82,11 @@ def evaluate(service: EvaluationService) -> Response:
   data = request.get_json()
   questions = data.get("questions", "")
   judge = data.get("judge", ["gpt-4o-mini"])
+  course_name = data.get("course_name")
+  temperature = data.get("temperature")
+  model = data.get("model")
 
-  result = service.evaluate(questions, judge)
+  result = service.evaluate(questions, judge, course_name, temperature, model)
   response = jsonify(result)
   response.headers.add("Access-Control-Allow-Origin", "*")
   return response
