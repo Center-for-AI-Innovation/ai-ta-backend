@@ -1,3 +1,4 @@
+import asyncio
 from injector import inject
 import logging
 import requests
@@ -10,6 +11,8 @@ from ragas.llms import LangchainLLMWrapper
 from ragas import evaluate as ragas_eval
 from ragas import metrics, EvaluationDataset
 from time import sleep
+
+from ai_ta_backend.service.retrieval_service import RetrievalService
 
 
 class CropWizardConfig:
@@ -121,9 +124,11 @@ class OllamaConfig:
 
 class EvaluationService:
     @inject
-    def __init__(self):
+    def __init__(self, retrieval_service: RetrievalService):
         # Load environment variables
         load_dotenv()
+
+        self.retrieval_service = retrieval_service
 
         # Initialize CropWizard specific variables
         self.config = CropWizardConfig()
@@ -139,8 +144,7 @@ class EvaluationService:
         self,
         prompt: str,
         course_name: str,
-        log: bool = True,
-    ) -> str:
+    ) -> list[dict] | str:
         """
         Posts a prompt to CropWizard, and returns the token vector as a JSON.
         Arguments:
@@ -149,46 +153,26 @@ class EvaluationService:
         Returns:
         A dictionary of tokens representing the fragments, retrieved from the submitted prompt.
         """
-        url = self.config.prompt_endpoint
         groups = self.config.cw_groups
-        limit = self.config.token_limit
+        search_query = prompt
+        doc_groups = groups
+        top_n = 100
 
-        payload: dict = {
-            "course_name": course_name,
-            "doc_groups": groups,
-            "search_query": prompt,
-            "token_limit": limit,
-            "api_key": self.config.cropwiz_api_key,
-        }
+        found_documents = asyncio.run(
+            self.retrieval_service.getTopContexts(
+                search_query, course_name, doc_groups, top_n
+            )
+        )
 
-        response = requests.post(url, json=payload)
-
-        # Error handling
-        assert (
-            response.status_code == 200
-        ), f"Failed to retrieve data for get_prompt_tokens (error_code: {response.status_code})"
-        if "ERROR: In /getTopContexts" in response.json():
-            for attempt in range(3):
-                if log:
-                    logging.error(
-                        f"Error ({attempt + 1}) in get_prompt_tokens() for question {prompt}: {response.json()}"
-                    )
-                sleep(0.25)
-                response = requests.post(url, json=payload)
-                if "ERROR: In /getTopContexts" not in response.json():
-                    break
-                elif attempt == 3:
-                    if log:
-                        logging.error(
-                            f"Max retries reached for get_prompt_tokens(). Failed request to obtain chunks for question: {prompt}."
-                        )
-
-        fragments = response.json()
-
-        return fragments
+        return found_documents
 
     def query_cropwizard(
-        self, prompt: str, model: str, course_name: str, log: bool = True
+        self,
+        prompt: str,
+        model: str,
+        course_name: str,
+        temperature: float,
+        log: bool = True,
     ) -> str:
         """
         Function to send a prompt to CropWizard and get the response.
@@ -203,7 +187,7 @@ class EvaluationService:
                 {"role": "system", "content": self.config.cropwiz_sys_prompt},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.1,
+            "temperature": temperature,
             "course_name": course_name,
             "doc_groups": group,
             "token_limit": limit,
@@ -245,7 +229,11 @@ class EvaluationService:
         return response.text
 
     def create_test_cases(
-        self, question_answer_pairs: dict, model: str, course_name: str
+        self,
+        question_answer_pairs: dict,
+        model: str,
+        course_name: str,
+        temperature: float,
     ) -> dict:
         """
         Creates a test case dictionary from a question-answer dictionary.
@@ -266,7 +254,9 @@ class EvaluationService:
         for key, value in question_answer_pairs.items():
             sleep(0.25)  # Added sleep to avoid issues on the server side
             test_cases["question"].append(key)
-            test_cases["answer"].append(self.query_cropwizard(key, model, course_name))
+            test_cases["answer"].append(
+                self.query_cropwizard(key, model, course_name, temperature)
+            )
             test_cases["retrieved_contexts"].append(
                 self.get_prompt_tokens(key, course_name)
             )
@@ -393,7 +383,9 @@ class EvaluationService:
         # Initialize report
 
         # Create test cases and preprocess them
-        test_cases = self.create_test_cases(question_answer_pairs, model, course_name)
+        test_cases = self.create_test_cases(
+            question_answer_pairs, model, course_name, temperature
+        )
         processed_test_cases = self.preprocess_test_cases(test_cases)
         evaluation_dict, errors = self.create_dataset(processed_test_cases)
 
@@ -497,7 +489,9 @@ class EvaluationService:
             dict: A dictionary containing the evaluation results for all judges and the path to the markdown report.
         """
         # Create test cases and preprocess them - only done once for all judges
-        test_cases = self.create_test_cases(question_answer_pairs, model, course_name)
+        test_cases = self.create_test_cases(
+            question_answer_pairs, model, course_name, temperature
+        )
         processed_test_cases = self.preprocess_test_cases(test_cases)
         evaluation_dict, errors = self.create_dataset(processed_test_cases)
 
@@ -585,7 +579,7 @@ class EvaluationService:
             )
 
             # Store results for this judge
-            all_results[judge_name] = self.process_scores(results.scores)
+            all_results[judge_name] = self.process_scores(results.scores)  # type: ignore
 
         return {"results": all_results}
 
