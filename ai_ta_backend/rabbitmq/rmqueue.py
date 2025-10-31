@@ -62,8 +62,16 @@ class Queue:
             logging.error("RabbitMQ is offline")
 
         # SQL record first
+        # Handle s3_paths: convert string to list, or get first element from list
+        s3_path_value = ''
+        if 's3_paths' in inputs:
+            s3_paths = inputs['s3_paths']
+            if isinstance(s3_paths, str):
+                s3_path_value = s3_paths
+            elif isinstance(s3_paths, list) and len(s3_paths) > 0:
+                s3_path_value = s3_paths[0]
         doc_progress_payload = models.DocumentsInProgress(
-            s3_path=inputs['s3_paths'][0] if 's3_paths' in inputs else '',
+            s3_path=s3_path_value,
             readable_filename=inputs['readable_filename'],
             course_name=inputs['course_name']
         )

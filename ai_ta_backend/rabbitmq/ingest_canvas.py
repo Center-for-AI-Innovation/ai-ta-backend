@@ -253,7 +253,7 @@ class IngestCanvas:
             data = {
                 'course_name': course_name,
                 'readable_filename': readable_filename,
-                's3_paths': s3_path,
+                's3_paths': [s3_path],
                 'base_url': f"{self.canvas_url}/courses/{canvas_course_id}",
             }
             print(f"Posting readable_filename: '{readable_filename}' with S3 path: '{s3_path}'")

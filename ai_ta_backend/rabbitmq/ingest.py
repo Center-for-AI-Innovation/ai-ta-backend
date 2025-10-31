@@ -305,22 +305,27 @@ class Ingest:
                             self.posthog.capture('distinct_id_of_the_user', event='ingest_failure',
                                 properties={
                                     'course_name': course_name,
-                                    's3_path': s3_paths,
+                                    's3_path': s3_path,
                                     'kwargs': kwargs,
                                     'error': err_msg
                                 })
             return success_status
         except Exception as e:
             err = f"❌❌ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()  # type: ignore
+            # Use s3_path if available (from loop), otherwise use first item from s3_paths list or s3_paths itself if it's a string
+            try:
+                error_s3_path = s3_path if 's3_path' in locals() else (s3_paths[0] if isinstance(s3_paths, list) and len(s3_paths) > 0 else s3_paths)
+            except (NameError, TypeError, IndexError):
+                error_s3_path = str(s3_paths) if s3_paths else "unknown"
             success_status['failure_ingest'] = {
-                's3_path': s3_path,
+                's3_path': error_s3_path,
                 'error': f"MAJOR ERROR DURING INGEST: {err}"
             }
             if self.posthog:
                 self.posthog.capture('distinct_id_of_the_user', event='ingest_failure',
                                     properties={
                                         'course_name': course_name,
-                                        's3_path': s3_paths,
+                                        's3_path': error_s3_path,
                                         'kwargs': kwargs,
                                         'error': err
                                     })
