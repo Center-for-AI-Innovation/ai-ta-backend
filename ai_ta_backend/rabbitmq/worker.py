@@ -15,12 +15,9 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-BACKOFF_BASE = float(os.getenv('BACKOFF_BASE', '1.0'))   # seconds
-BACKOFF_MAX  = float(os.getenv('BACKOFF_MAX', '30.0'))   # seconds
 PREFETCH_COUNT = int(os.getenv('RABBITMQ_PREFETCH_COUNT', '1'))  # messages
 MAX_JOB_RETRIES = int(os.getenv('MAX_JOB_RETRIES', '10'))  # messages
 
-stop_event = threading.Event()
 worker_thread: threading.Thread | None = None
 worker_running = threading.Event()
 
@@ -138,45 +135,38 @@ class Worker:
                 logging.info(f"Job {job_id} failed after {MAX_JOB_RETRIES} retries. Discarding job.")
 
     def listen_for_jobs(self):
-        backoff = BACKOFF_BASE
-        while not stop_event.is_set():
-            logging.info("Worker connecting to RabbitMQ...")
-            if not self.is_connected():
-                logging.error("RabbitMQ is offline")
-                return
+        logging.info("Worker connecting to RabbitMQ...")
+        if not self.is_connected():
+            logging.error("RabbitMQ is offline")
+            return
 
-            logging.info("Worker connected to RabbitMQ")
-            self.consumer = self.channel.basic_consume(
-                queue=self.rabbitmq_queue,
-                on_message_callback=self.process_job,
-                auto_ack=False
-            )
+        logging.info("Worker connected to RabbitMQ")
+        self.consumer = self.channel.basic_consume(
+            queue=self.rabbitmq_queue,
+            on_message_callback=self.process_job,
+            auto_ack=False
+        )
 
-            # start listening
-            logging.info("Waiting for messages. To exit press CTRL+C")
-            worker_running.set()  # mark healthy
+        # start listening
+        logging.info("Waiting for messages. To exit press CTRL+C")
+        worker_running.set()  # mark healthy
 
-            try:
-                # pylint: disable=protected-access
-                while self.channel and self.channel.is_open and self.channel._consumer_infos:
-                    self.channel.connection.process_data_events(time_limit=1)  # 1 second
-            except SystemExit:
-                raise
-            except KeyboardInterrupt:
-                raise
-            except GeneratorExit:
-                raise
-            except Exception:  # pylint: disable=broad-except
-                logging.error("Worker crashed/disconnected:\n%s", traceback.format_exc())
-            finally:
-                logging.info("Stopped listening for messages.")
-                self.close()
-                self.connection = None
-
-                # backoff with cap
-                if stop_event.wait(backoff):
-                    break
-                backoff = min(backoff * 2, BACKOFF_MAX)
+        try:
+            # pylint: disable=protected-access
+            while self.channel and self.channel.is_open and self.channel._consumer_infos:
+                self.channel.connection.process_data_events(time_limit=1)  # 1 second
+        except SystemExit:
+            raise
+        except KeyboardInterrupt:
+            raise
+        except GeneratorExit:
+            raise
+        except Exception:  # pylint: disable=broad-except
+            logging.error("Worker crashed/disconnected:\n%s", traceback.format_exc())
+        finally:
+            logging.info("Stopped listening for messages.")
+            self.close()
+            self.connection = None
 
         # final cleanup
         worker_running.clear()
@@ -208,6 +198,5 @@ if __name__ == '__main__':
         app.run(host='0.0.0.0', port=8001, threaded=True)
     finally:
         # Graceful shutdown
-        stop_event.set()
         if worker_thread:
             worker_thread.join(timeout=10)
