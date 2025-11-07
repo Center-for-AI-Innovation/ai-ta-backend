@@ -1,0 +1,4 @@
+.env
+/pipeline_state
+pipeline_state.json
+pipeline_state.failed.*
