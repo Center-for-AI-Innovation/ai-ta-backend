@@ -106,6 +106,7 @@ import time
 # for storing API inputs, outputs, and metadata
 from dataclasses import dataclass, field
 from typing import Any, List
+from wsgiref.util import request_uri
 
 import aiohttp  # for making API calls concurrently
 import tiktoken  # for counting tokens
@@ -135,7 +136,8 @@ class OpenAIAPIProcessor:
     """Processes API requests in parallel, throttling to stay under rate limits."""
     # constants
     seconds_to_pause_after_rate_limit_error = 15
-    seconds_to_sleep_each_loop = 0.001  # 1 ms limits max throughput to 1,000 requests per second
+    # seconds_to_sleep_each_loop = 0.001  # 1 ms limits max throughput to 1,000 requests per second
+    seconds_to_sleep_each_loop = 0.01
 
     # initialize logging
     logging.basicConfig(level=self.logging_level)
@@ -173,14 +175,13 @@ class OpenAIAPIProcessor:
       if next_request is None:
         if not queue_of_requests_to_retry.empty():
           next_request = queue_of_requests_to_retry.get_nowait()
-          logging.debug(f"Retrying request {next_request.task_id}: {next_request}")
+          logging.debug(f"Retrying request {next_request.task_id}")
         elif file_not_finished:
           try:
             # get new request
             # request_json = json.loads(next(requests))
             request_json = next(requests)
 
-            logging.info(f"Sending embedding request: {request_json}")
             next_request = APIRequest(task_id=next(task_id_generator),
                                       request_json=request_json,
                                       token_consumption=num_tokens_consumed_from_request(
@@ -189,7 +190,7 @@ class OpenAIAPIProcessor:
                                       metadata=request_json.pop("metadata", None))
             status_tracker.num_tasks_started += 1
             status_tracker.num_tasks_in_progress += 1
-            logging.debug(f"Reading request {next_request.task_id}: {next_request}")
+            logging.debug(f"Reading request {next_request.task_id}")
           except StopIteration:
             # if file runs out, set flag to stop reading it
             logging.debug("Read file exhausted")
@@ -218,7 +219,6 @@ class OpenAIAPIProcessor:
           next_request.attempts_left -= 1
 
           # call API
-          # TODO: NOT SURE RESPONSE WILL WORK HERE
           task = asyncio.create_task(
               next_request.call_api(
                   request_url=self.request_url,
@@ -344,7 +344,7 @@ class APIRequest:
       if self.attempts_left:
         retry_queue.put_nowait(self)
       else:
-        logging.error(f"Request {self.request_json} failed after all attempts. Saving errors: {self.result}")
+        logging.error(f"Request {self.task_id} failed after all attempts. Saving errors: {self.result}")
         data = ([self.request_json, [str(e) for e in self.result], self.metadata]
                 if self.metadata else [self.request_json, [str(e) for e in self.result]])
         #append_to_jsonl(data, save_filepath)

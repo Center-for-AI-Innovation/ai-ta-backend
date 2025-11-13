@@ -56,6 +56,10 @@ except ModuleNotFoundError:
 
 load_dotenv()
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger('pika').setLevel(logging.WARNING)
+logging.getLogger('boto3').setLevel(logging.WARNING)
+logging.getLogger('botocore').setLevel(logging.WARNING)
+logging.getLogger('nose').setLevel(logging.WARNING)
 
 class Ingest:
     """
@@ -88,6 +92,9 @@ class Ingest:
         # Temporarily raise indexing threshold during ingestion, then revert
         self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
         self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
+        
+        # Embedding API retry configuration
+        self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
     def initialize_resources(self):
         # Initialize Qdrant client and create collection if necessary
@@ -298,22 +305,27 @@ class Ingest:
                             self.posthog.capture('distinct_id_of_the_user', event='ingest_failure',
                                 properties={
                                     'course_name': course_name,
-                                    's3_path': s3_paths,
+                                    's3_path': s3_path,
                                     'kwargs': kwargs,
                                     'error': err_msg
                                 })
             return success_status
         except Exception as e:
             err = f"❌❌ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()  # type: ignore
+            # Use s3_path if available (from loop), otherwise use first item from s3_paths list or s3_paths itself if it's a string
+            try:
+                error_s3_path = s3_path if 's3_path' in locals() else (s3_paths[0] if isinstance(s3_paths, list) and len(s3_paths) > 0 else s3_paths)
+            except (NameError, TypeError, IndexError):
+                error_s3_path = str(s3_paths) if s3_paths else "unknown"
             success_status['failure_ingest'] = {
-                's3_path': s3_path,
+                's3_path': error_s3_path,
                 'error': f"MAJOR ERROR DURING INGEST: {err}"
             }
             if self.posthog:
                 self.posthog.capture('distinct_id_of_the_user', event='ingest_failure',
                                     properties={
                                         'course_name': course_name,
-                                        's3_path': s3_paths,
+                                        's3_path': error_s3_path,
                                         'kwargs': kwargs,
                                         'error': err
                                     })
@@ -377,7 +389,7 @@ class Ingest:
                 max_requests_per_minute=10_000,
                 max_tokens_per_minute=10_000_000,
                 token_encoding_name='cl100k_base',
-                max_attempts=1_000,
+                max_attempts=self.embedding_max_attempts,
                 logging_level=logging.INFO,
                 model=self.embedding_model)
             asyncio.run(oai.process_api_requests_from_file())
@@ -441,20 +453,20 @@ class Ingest:
                     logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
 
             # Supabase SQL insertion
-            contexts_for_supa = [{
-                "text": context.page_content,
-                "pagenumber": context.metadata.get('pagenumber'),
-                "timestamp": context.metadata.get('timestamp'),
-                "chunk_index": context.metadata.get('chunk_index'),
-                "embedding": embeddings_dict[context.page_content]
-            } for context in contexts]
+            # contexts_for_supa = [{
+            #     "text": context.page_content,
+            #     "pagenumber": context.metadata.get('pagenumber'),
+            #     "timestamp": context.metadata.get('timestamp'),
+            #     "chunk_index": context.metadata.get('chunk_index'),
+            #     "embedding": embeddings_dict[context.page_content]
+            # } for context in contexts]
             document = {
                 "course_name": contexts[0].metadata.get('course_name'),
                 "s3_path": contexts[0].metadata.get('s3_path'),
                 "readable_filename": contexts[0].metadata.get('readable_filename'),
                 "url": contexts[0].metadata.get('url'),
                 "base_url": contexts[0].metadata.get('base_url'),
-                "contexts": contexts_for_supa,
+                # "contexts": contexts_for_supa,
             }
             document_size_mb = len(json.dumps(document).encode('utf-8')) / (1024 * 1024)
             logging.info("Inserting document (size: %.2f MB)", document_size_mb)
