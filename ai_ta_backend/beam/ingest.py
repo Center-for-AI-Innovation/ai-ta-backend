@@ -1,6 +1,7 @@
 """
 To deploy: beam deploy ingest.py:ingest
 Use CAII gmail to auth.
+beam serve ingest.py:ingest
 """
 
 from typing import Any, Callable, Dict, List, Optional, Union, cast
@@ -680,6 +681,8 @@ class Ingest():
       # check file size
       file_size = os.path.getsize(webm_tmpfile.name)
       # split the audio into 25MB chunks
+      text_with_timestamps = []  # List of (text, start_time, end_time) tuples
+
       if file_size > 26214400:
         # load the webm file into audio object
         full_audio = AudioSegment.from_file(webm_tmpfile.name, "webm")
@@ -687,6 +690,7 @@ class Ingest():
         split_segment = 35 * 60 * 1000
         start = 0
         count = 0
+        time_offset = 0.0  # Track absolute time offset in seconds
 
         while count < file_count:
           with NamedTemporaryFile(suffix=".webm", dir=media_dir, delete=False) as split_tmp:
@@ -698,33 +702,73 @@ class Ingest():
 
             audio_chunk.export(split_tmp.name, format="webm")
 
-            # transcribe the split file and store the text in dictionary
+            # transcribe with verbose_json to get timestamps
             with open(split_tmp.name, "rb") as f:
-              transcript = openai.Audio.transcribe("whisper-1", f)
-            transcript_list.append(transcript['text'])  # type: ignore
+              transcript = openai.Audio.transcribe("whisper-1", f, response_format="verbose_json")
+
+            # Extract segments with timestamps
+            if 'segments' in transcript:
+              for segment in transcript['segments']:
+                text_with_timestamps.append({
+                    'text': segment['text'].strip(),
+                    'start': segment['start'] + time_offset,
+                    'end': segment['end'] + time_offset
+                })
+            else:
+              # Fallback if segments not available
+              transcript_list.append(transcript.get('text', ''))
+
+          # Update time offset for next chunk (convert milliseconds to seconds)
+          time_offset += (split_segment / 1000.0)
           start += split_segment
           split_segment += split_segment
           count += 1
           os.remove(split_tmp.name)
       else:
-        # transcribe the full audio
+        # transcribe the full audio with verbose_json
         with open(webm_tmpfile.name, "rb") as f:
-          transcript = openai.Audio.transcribe("whisper-1", f)
-        transcript_list.append(transcript['text'])  # type: ignore
+          transcript = openai.Audio.transcribe("whisper-1", f, response_format="verbose_json")
+
+        if 'segments' in transcript:
+          for segment in transcript['segments']:
+            text_with_timestamps.append({
+                'text': segment['text'].strip(),
+                'start': segment['start'],
+                'end': segment['end']
+            })
+        else:
+          # Fallback if segments not available
+          transcript_list.append(transcript.get('text', ''))
 
       os.remove(webm_tmpfile.name)
 
-      text = [txt for txt in transcript_list]
-      metadatas: List[Dict[str, Any]] = [{
-          'course_name': course_name,
-          's3_path': s3_path,
-          'readable_filename': kwargs.get('readable_filename',
-                                          Path(s3_path).name[37:]),
-          'pagenumber': '',
-          'timestamp': text.index(txt),
-          'url': kwargs.get('url', ''),
-          'base_url': kwargs.get('base_url', ''),
-      } for txt in text]
+      # Prepare texts and metadatas with real timestamps
+      if text_with_timestamps:
+        text = [item['text'] for item in text_with_timestamps]
+        metadatas: List[Dict[str, Any]] = [{
+            'course_name': course_name,
+            's3_path': s3_path,
+            'readable_filename': kwargs.get('readable_filename',
+                                            Path(s3_path).name[37:]),
+            'pagenumber': '',
+            'timestamp': item['start'],  # Real timestamp in seconds
+            'timestamp_end': item['end'],  # End timestamp in seconds
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
+        } for item in text_with_timestamps]
+      else:
+        # Fallback to old behavior if verbose_json failed
+        text = [txt for txt in transcript_list]
+        metadatas: List[Dict[str, Any]] = [{
+            'course_name': course_name,
+            's3_path': s3_path,
+            'readable_filename': kwargs.get('readable_filename',
+                                            Path(s3_path).name[37:]),
+            'pagenumber': '',
+            'timestamp': text.index(txt),
+            'url': kwargs.get('url', ''),
+            'base_url': kwargs.get('base_url', ''),
+        } for txt in text]
 
       self.split_and_upload(texts=text, metadatas=metadatas, **kwargs)
       return "Success"

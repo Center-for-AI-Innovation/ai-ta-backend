@@ -143,10 +143,16 @@ class RetrievalService:
       for doc in found_docs:
         valid_docs.append(doc)
 
+      # Merge video segments for better context
+      start_time_merge = time.monotonic()
+      valid_docs = self._merge_video_segments(valid_docs, course_name)
+      time_to_merge_segments = time.monotonic() - start_time_merge
+
       print(f"Course: {course_name} ||| search_query: {search_query}\n"
             f"⏰ Runtime of getTopContexts: {(time.monotonic() - start_time_overall):.2f} seconds\n"
             f"Runtime for parallel operations: {time_for_parallel_operations:.2f} seconds, "
-            f"Runtime to complete vector_search: {time_to_retrieve_docs:.2f} seconds")
+            f"Runtime to complete vector_search: {time_to_retrieve_docs:.2f} seconds, "
+            f"Runtime to merge video segments: {time_to_merge_segments:.2f} seconds")
       if len(valid_docs) == 0:
         return []
 
@@ -573,6 +579,136 @@ class RetrievalService:
         self.sentry.capture_exception(e)
     return found_docs
 
+  def _is_video_file(self, s3_path: str, url: str = None) -> bool:
+    """Check if a file is a video based on its path or URL."""
+    video_extensions = ('.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.m4v')
+    video_sites = ('youtube.com', 'youtu.be', 'vimeo.com')
+
+    if s3_path and any(s3_path.lower().endswith(ext) for ext in video_extensions):
+      return True
+    if url and any(site in url.lower() for site in video_sites):
+      return True
+    return False
+
+  def _merge_video_segments(self, found_docs: List[Document], course_name: str,
+                            context_window_sec: float = 60.0) -> List[Document]:
+    """
+    Merge adjacent video segments to provide better context.
+
+    Args:
+      found_docs: List of retrieved documents
+      course_name: The course name for Qdrant collection filtering
+      context_window_sec: Time window (seconds) before and after to fetch segments
+
+    Returns:
+      List of documents with merged video segments
+    """
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Range
+
+    print(f"Merging video segments for course: {course_name}")
+    print(f"Total documents before merging: found_docs: {len(found_docs)}")
+
+    # Separate video and non-video documents
+    video_docs = []
+    non_video_docs = []
+
+    for doc in found_docs:
+      s3_path = doc.metadata.get('s3_path', '')
+      url = doc.metadata.get('url', '')
+      if self._is_video_file(s3_path, url):
+        video_docs.append(doc)
+      else:
+        non_video_docs.append(doc)
+
+    if not video_docs:
+      return found_docs  # No videos to process
+    print(f"Found {len(video_docs)} video documents to process.")
+    print(f"Found {len(non_video_docs)} non-video documents to retain.")
+    # Group video docs by s3_path
+    videos_by_path = defaultdict(list)
+    for doc in video_docs:
+      s3_path = doc.metadata.get('s3_path', '')
+      if s3_path:
+        videos_by_path[s3_path].append(doc)
+
+    merged_video_docs = []
+
+    # Process each video file
+    for s3_path, docs_list in videos_by_path.items():
+      for doc in docs_list:
+        # Get the timestamp of this segment
+        timestamp_field = doc.metadata.get('pagenumber_or_timestamp') or doc.metadata.get('pagenumber')
+
+        if timestamp_field is None:
+          # Not a timestamped segment, keep as-is
+          merged_video_docs.append(doc)
+          continue
+
+        try:
+          center_timestamp = float(timestamp_field)
+        except (ValueError, TypeError):
+          # Not a numeric timestamp, keep as-is
+          merged_video_docs.append(doc)
+          continue
+
+        # Query Qdrant for adjacent segments
+        try:
+          adjacent_segments = self.vdb.qdrant_client.scroll(
+              collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+              scroll_filter=Filter(must=[
+                  FieldCondition(key="course_name", match=MatchValue(value=course_name)),
+                  FieldCondition(key="s3_path", match=MatchValue(value=s3_path)),
+                  FieldCondition(
+                      key="pagenumber_or_timestamp",
+                      range=Range(
+                          gte=center_timestamp - context_window_sec,
+                          lte=center_timestamp + context_window_sec,
+                      ))
+              ]),
+              limit=50,  # Fetch up to 50 segments
+              with_payload=True,
+              with_vectors=False,
+          )
+          print(f"Found {len(adjacent_segments[0])} adjacent segments for video {s3_path} around timestamp {center_timestamp}.")
+          # Extract and sort segments by timestamp
+          segments = []
+          for point in adjacent_segments[0]:  # scroll returns (points, next_page_offset)
+            payload = point.payload
+            try:
+              seg_timestamp = float(payload.get('pagenumber_or_timestamp', 0))
+              segments.append({
+                  'timestamp': seg_timestamp,
+                  'text': payload.get('page_content', ''),
+                  'timestamp_end': payload.get('timestamp_end')
+              })
+            except (ValueError, TypeError):
+              continue
+
+          # Sort by timestamp
+          segments.sort(key=lambda x: x['timestamp'])
+
+          # Merge text
+          merged_text = ' '.join([seg['text'] for seg in segments if seg['text']])
+
+          # Create merged document with original metadata but merged text
+          merged_doc = Document(
+              page_content=merged_text,
+              metadata={
+                  **doc.metadata,
+                  'timestamp': center_timestamp,  # Keep the matched segment's timestamp
+                  'pagenumber_or_timestamp': str(center_timestamp),
+                  'pagenumber': str(center_timestamp),
+              })
+          merged_video_docs.append(merged_doc)
+          print(f"Merged {len(segments)} segments for video {s3_path} at timestamp {center_timestamp}.")
+        except Exception as e:
+          print(f"Error merging video segments for {s3_path}: {e}")
+          # Fallback: keep original document
+          merged_video_docs.append(doc)
+
+    # Return merged videos + non-videos
+    return merged_video_docs + non_video_docs
+
   def _capture_search_succeeded_event(self, search_query, course_name, search_results):
     vector_score_calc_latency_sec = time.monotonic()
     # Removed because it takes 0.15 seconds to _calculate_vector_scores... not worth it rn.
@@ -604,10 +740,10 @@ class RetrievalService:
 
   def format_for_json(self, found_docs: List[Document]) -> List[Dict]:
     """Format documents into JSON-serializable dictionaries.
-      
+
       Args:
           found_docs: List of Document objects containing page content and metadata
-          
+
       Returns:
           List of dictionaries with text content and metadata fields
       """
@@ -619,6 +755,7 @@ class RetrievalService:
             # OPTIONAL
             "s3_path": doc.metadata.get("s3_path"),
             "pagenumber": doc.metadata.get("pagenumber"),  # Handles both old and new schema
+            "pagenumber_or_timestamp": doc.metadata.get("pagenumber_or_timestamp"),  # For video timestamps
             "url": doc.metadata.get("url"),
             "base_url": doc.metadata.get("base_url"),
             "doc_groups": doc.metadata.get("doc_groups"),
