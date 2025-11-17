@@ -315,8 +315,10 @@ class VectorDatabase():
         for result in results:
           result.payload['page_content'] = result.payload.get('text', '')
           s3_path = 'clinical-trials/' + result.payload.get('s3_path', 'unknown.txt')
-          result.payload['readable_filename'] = "Clinical Trial: " + s3_path.split("/")[-1].replace('.txt', '')
-          result.payload['url'] = result.payload.get('uspto_url', '')
+          filename = os.path.basename(s3_path)
+          readable_name = os.path.splitext(filename)[0] if filename else 'Unknown Clinical Trial'
+          result.payload['readable_filename'] = f"Clinical Trial: {readable_name}"
+          result.payload['url'] = result.payload.get('url') or ''
           result.payload['s3_path'] = s3_path
           result.payload['course_name'] = course_name
           updated_results.append(result)
