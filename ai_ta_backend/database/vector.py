@@ -200,7 +200,7 @@ class VectorDatabase():
       """Search clinicaltrials collection with error handling"""
       try:
         results = self.vyriad_qdrant_client.search(
-            collection_name='clinical-file',
+            collection_name='clinical-trials',
             with_vectors=False,
             query_vector=user_query_embedding,
             limit=top_n,
