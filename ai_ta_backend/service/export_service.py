@@ -659,7 +659,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path, redis_clien
       bcc_emails.append('rohan13@illinois.edu')
 
     # add course owner email to admin_emails
-    # admin_emails.append(course_metadata['course_owner'])
+    admin_emails.append(course_metadata['course_owner'])
     admin_emails = list(set(admin_emails))
     print("admin_emails: ", admin_emails)
     print("bcc_emails: ", bcc_emails)
