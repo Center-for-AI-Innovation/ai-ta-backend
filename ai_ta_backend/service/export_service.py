@@ -39,9 +39,6 @@ class ExportService:
     self.sentry = sentry
     self.executor = executor
 
-    print("Connecting to Redis... with url: ", os.environ['REDIS_URL'])
-    self.redis_client = redis.Redis.from_url(os.environ['REDIS_URL'], db=0)
-
   def test_process(self):
     """
         This function is used to test the process.
@@ -72,7 +69,7 @@ class ExportService:
       filename = course_name + '_' + str(uuid.uuid4()) + '_documents.zip'
       s3_filepath = f"courses/{course_name}/{filename}"
       # background task of downloading data - map it with above ID
-      self.executor.submit(export_data_in_bg, response, "documents", course_name, s3_filepath, self.redis_client)
+      self.executor.submit(export_data_in_bg, response, "documents", course_name, s3_filepath)
       return {"response": 'Download from S3', "s3_path": s3_filepath}
 
     else:
@@ -92,7 +89,7 @@ class ExportService:
 
         curr_doc_count = 0
         # create a temporary directory
-        temp_dir = tempfile.mkdtemp(prefix="export_")
+        temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
         filename = course_name + '_' + str(uuid.uuid4()) + '_documents.jsonl'
         file_path = os.path.join(temp_dir, filename)
@@ -149,7 +146,7 @@ class ExportService:
       filename = course_name[0:10] + '-' + str(generate_short_id()) + '_convos.zip'
       s3_filepath = f"courses/{course_name}/{filename}"
       # background task of downloading data - map it with above ID
-      self.executor.submit(export_data_in_bg, response, "conversations", course_name, s3_filepath, self.redis_client)
+      self.executor.submit(export_data_in_bg, response, "conversations", course_name, s3_filepath)
       return {"response": 'Download from S3', "s3_path": s3_filepath}
 
     # Fetch data
@@ -163,7 +160,7 @@ class ExportService:
       last_id = response["data"][-1]['id']
       total_count = count
 
-      temp_dir = tempfile.mkdtemp(prefix="export_")
+      temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
       filename = course_name[0:10] + '-convos.jsonl'
       file_path = os.path.join(temp_dir, filename)
@@ -234,7 +231,7 @@ class ExportService:
       last_id = response["data"][-1]['id']
       total_count = count
 
-      temp_dir = tempfile.mkdtemp(prefix="export_")
+      temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
       filename = course_name[0:10] + '-convos.jsonl'
       file_path = os.path.join(temp_dir, filename)
@@ -305,7 +302,7 @@ class ExportService:
       print(
           f"Response count greater than 500, processing in background. Filename: {filename}, S3 filepath: {s3_filepath}"
       )
-      self.executor.submit(export_data_in_bg_extended, response, "conversations", course_name, s3_filepath, self.redis_client)
+      self.executor.submit(export_data_in_bg_extended, response, "conversations", course_name, s3_filepath)
       return {"response": 'Download from S3', "s3_path": s3_filepath}
 
     if response_count > 0:
@@ -483,7 +480,7 @@ def export_convo_history_user_bg(conversations, count, user_email, s3_path, proj
       return {"response": "Error finalizing export!"}
 
 
-def export_data_in_bg_extended(response, download_type, course_name, s3_path, redis_client=None):
+def export_data_in_bg_extended(response, download_type, course_name, s3_path):
   """
   This function is called to upload the extended conversation history to S3.
   Args:
@@ -542,7 +539,9 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path, re
     s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
 
     # get admin email IDs from Redis
-    course_metadata_json = redis_client.get('course_metadatas', key=course_name)
+    print("Connecting to Redis... with url: ", os.environ['REDIS_URL'])
+    redis_client = redis.Redis.from_url(os.environ['REDIS_URL'], db=0)
+    course_metadata_json = redis_client.hget('course_metadatas', key=course_name)
     if not course_metadata_json:
       raise ValueError(f"No course metadata found in Redis for project '{course_name}'")
     course_metadata = json.loads(course_metadata_json)
@@ -576,7 +575,7 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path, re
     # Encountered pickling error while running the background task. So, moved the function outside the class.
 
 
-def export_data_in_bg(response, download_type, course_name, s3_path, redis_client=None):
+def export_data_in_bg(response, download_type, course_name, s3_path):
   """
 	This function is called in export_documents_csv() to upload the documents to S3.
 	1. download the documents in batches of 100 and upload them to S3.
@@ -587,7 +586,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path, redis_clien
 		response (dict): The response from the Supabase query.
 		download_type (str): The type of download - 'documents' or 'conversations'.
 		course_name (str): The name of the course.
-	  s3_path (str): The S3 path where the file will be uploaded.
+	    s3_path (str): The S3 path where the file will be uploaded.
 	"""
   s3 = AWSStorage()
   sql = SQLDatabase()
@@ -598,7 +597,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path, redis_clien
   print("pre-defined s3_path: ", s3_path)
 
   curr_doc_count = 0
-  temp_dir = tempfile.mkdtemp(prefix="export_")
+  temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
   file_path = os.path.join(temp_dir, filename)
@@ -645,7 +644,9 @@ def export_data_in_bg(response, download_type, course_name, s3_path, redis_clien
     s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
 
     # get admin email IDs from Redis
-    course_metadata_json = redis_client.get('course_metadatas', key=course_name)
+    print("Connecting to Redis... with url: ", os.environ['REDIS_URL'])
+    redis_client = redis.Redis.from_url(os.environ['REDIS_URL'], db=0)
+    course_metadata_json = redis_client.hget('course_metadatas', key=course_name)
     if not course_metadata_json:
       raise ValueError(f"No course metadata found in Redis for project '{course_name}'")
     course_metadata = json.loads(course_metadata_json)
@@ -709,7 +710,7 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
 
   curr_doc_count = 0
 
-  temp_dir = tempfile.mkdtemp(prefix="export_")
+  temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
   file_path = os.path.join(temp_dir, filename)

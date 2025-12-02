@@ -16,7 +16,7 @@ def _initialize_file_paths(course_name: str):
     base_name = _initialize_base_name(course_name)
 
     # Create a unique temp directory for this course_name
-    temp_dir = tempfile.mkdtemp(prefix=f"{course_name}_")
+    temp_dir = tempfile.mkdtemp(prefix=f"{course_name}_", dir=tempfile.gettempdir())
 
     file_paths = {
         "zip": os.path.join(temp_dir, base_name + ".zip"),
@@ -258,7 +258,7 @@ def _append_to_jsonl(convo_data, jsonl_file_path, error_log):
 
 
 def _create_zip(file_paths, error_log):
-  temp_dir = tempfile.mkdtemp(prefix="export_")
+  temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
   zip_file_path = os.path.join(temp_dir, os.path.basename(file_paths['zip']))
   error_log_path = os.path.join(temp_dir, 'error.log')
   with open(error_log_path, 'w') as log_file:
@@ -286,7 +286,7 @@ def _create_zip(file_paths, error_log):
 
 
 def _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log):
-  temp_dir = tempfile.mkdtemp(prefix="user_convo_export_")
+  temp_dir = tempfile.mkdtemp(prefix="user_convo_export_", dir=tempfile.gettempdir())
   zip_file_path = os.path.join(temp_dir, 'user_convo_export.zip')
   error_log_path = os.path.join(temp_dir, 'error.log')
 
