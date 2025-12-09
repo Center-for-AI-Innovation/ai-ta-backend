@@ -313,7 +313,6 @@ class CanvasIngest():
     4. Delete extracted files from local directory
     """
 
-    print("In ingest_course_content")
     try:
       # a dictionary of all contents we want to ingest - files, pages, modules, syllabus, assignments, discussions.
       if content_ingest_dict is None:

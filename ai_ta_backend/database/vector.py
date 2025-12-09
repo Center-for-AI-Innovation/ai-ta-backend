@@ -43,9 +43,10 @@ class VectorDatabase():
       print(f"Error in cropwizard_qdrant_client: {e}")
       self.cropwizard_qdrant_client = None
 
-    self.vectorstore = Qdrant(client=self.qdrant_client,
-                              collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-                              embeddings=OpenAIEmbeddings(openai_api_key=os.environ['VLADS_OPENAI_KEY']))
+    # self.openai_api_key = os.getenv('OPENAI_API_KEY') if os.getenv('OPENAI_API_KEY') else os.getenv('NCSA_HOSTED_API_KEY')
+    # self.vectorstore = Qdrant(client=self.qdrant_client,
+    #                           collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+    #                           embeddings=OpenAIEmbeddings(openai_api_key=self.openai_api_key))
 
   def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                     disabled_doc_groups: List[str], public_doc_groups: List[dict]):
@@ -199,7 +200,7 @@ class VectorDatabase():
       """Search clinicaltrials collection with error handling"""
       try:
         results = self.vyriad_qdrant_client.search(
-            collection_name='clinical-file',
+            collection_name='clinical-trials',
             with_vectors=False,
             query_vector=user_query_embedding,
             limit=top_n,
@@ -314,8 +315,10 @@ class VectorDatabase():
         for result in results:
           result.payload['page_content'] = result.payload.get('text', '')
           s3_path = 'clinical-trials/' + result.payload.get('s3_path', 'unknown.txt')
-          result.payload['readable_filename'] = "Clinical Trial: " + s3_path.split("/")[-1].replace('.txt', '')
-          result.payload['url'] = result.payload.get('uspto_url', '')
+          filename = os.path.basename(s3_path)
+          readable_name = os.path.splitext(filename)[0] if filename else 'Unknown Clinical Trial'
+          result.payload['readable_filename'] = f"Clinical Trial: {readable_name}"
+          result.payload['url'] = result.payload.get('url') or ''
           result.payload['s3_path'] = s3_path
           result.payload['course_name'] = course_name
           updated_results.append(result)
@@ -379,7 +382,14 @@ class VectorDatabase():
   def _create_search_filter(self, course_name: str, doc_groups: List[str], admin_disabled_doc_groups: List[str],
                             public_doc_groups: List[dict]) -> models.Filter:
     """
-    Create search conditions for the vector search.
+    Create search conditions for regular searches (no conversation filtering).
+    Excludes chunks with any conversation_id.
+    
+    Args:
+        course_name: The course/project name to filter by
+        doc_groups: List of document groups to include
+        admin_disabled_doc_groups: List of document groups to exclude
+        public_doc_groups: List of public document groups that can be accessed
     """
 
     must_conditions = []
@@ -390,6 +400,12 @@ class VectorDatabase():
     if admin_disabled_doc_groups:
       must_not_conditions.append(FieldCondition(key='doc_groups', match=MatchAny(any=admin_disabled_doc_groups)))
 
+    # For regular searches, only include chunks that have NO conversation_id field
+    # This ensures we only get regular course chunks and prevents cross-conversation leaks
+    must_conditions.append(models.IsEmptyCondition(
+        is_empty={"key": "conversation_id"}  # Only include chunks where conversation_id field is empty/missing
+    ))
+    
     # Handle public_doc_groups
     if public_doc_groups:
       for public_doc_group in public_doc_groups:
@@ -411,11 +427,30 @@ class VectorDatabase():
     # Add the own_course_condition to should_conditions
     should_conditions.append(own_course_condition)
 
-    # Construct the final filter
-    vector_search_filter = models.Filter(should=should_conditions, must_not=must_not_conditions)
+    # Construct the final filter (apply must to enforce no conversation_id)
+    vector_search_filter = models.Filter(must=must_conditions, should=should_conditions, must_not=must_not_conditions)
 
     print(f"Vector search filter: {vector_search_filter}")
     return vector_search_filter
+
+  def _create_conversation_search_filter(self, conversation_id: str) -> models.Filter:
+    """
+    Create search conditions for conversation-specific chunks.
+    Only includes chunks with the specified conversation_id.
+    
+    Args:
+        conversation_id: The specific conversation ID to filter by
+    """
+
+    must_conditions = []
+
+    # Conversation ID filter - this is sufficient since conversation_id is unique
+    must_conditions.append(FieldCondition(
+        key='conversation_id', 
+        match=MatchValue(value=conversation_id)
+    ))
+    
+    return models.Filter(must=must_conditions)
 
   def delete_data(self, collection_name: str, key: str, value: str):
     """
@@ -446,3 +481,65 @@ class VectorDatabase():
             ),
         ]),
     )
+
+  def _create_conversation_filter(self, conversation_id: str) -> models.Filter:
+    """
+    Create a filter for conversation-specific documents.
+    """
+    return models.Filter(
+        must=[
+            FieldCondition(
+                key='conversation_id',
+                match=MatchValue(value=conversation_id)
+            )
+        ]
+    )
+
+  def _combine_filters(self, search_filter: models.Filter, conversation_filter: models.Filter = None) -> models.Filter:
+    """
+    Combine search filter with conversation filter using AND logic.
+    
+    Args:
+        search_filter: The main search filter (course_name, doc_groups, etc.)
+        conversation_filter: The conversation-specific filter (optional)
+    
+    Returns:
+        Combined filter using AND logic for security
+    """
+    combined_conditions = []
+    
+    # Add conditions from search filter
+    if search_filter.must:
+        combined_conditions.extend(search_filter.must)
+    
+    # Add conditions from conversation filter if provided
+    if conversation_filter and conversation_filter.must:
+        combined_conditions.extend(conversation_filter.must)
+    
+    # Combine must_not conditions
+    combined_must_not = []
+    if search_filter.must_not:
+        combined_must_not.extend(search_filter.must_not)
+    if conversation_filter and conversation_filter.must_not:
+        combined_must_not.extend(conversation_filter.must_not)
+    
+    return models.Filter(must=combined_conditions, must_not=combined_must_not)
+
+  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str], 
+                                 user_query_embedding, top_n, disabled_doc_groups: List[str], 
+                                 public_doc_groups: List[dict], custom_filter: models.Filter):
+    """
+    Search the vector database with a custom filter.
+    Used for conversation-specific document filtering.
+    """
+    search_results = self.qdrant_client.search(
+        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
+        query_filter=custom_filter,
+        with_vectors=False,
+        query_vector=user_query_embedding,
+        limit=top_n,
+        search_params=models.SearchParams(
+            quantization=models.QuantizationSearchParams(rescore=False)
+        )
+    )
+    return search_results

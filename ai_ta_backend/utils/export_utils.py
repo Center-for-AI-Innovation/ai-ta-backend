@@ -1,28 +1,36 @@
 import json
 import os
+import tempfile
 import zipfile
 from urllib.parse import urlparse
 
 import xlsxwriter
+from datetime import datetime
 
 
 def _initialize_base_name(course_name):
   return course_name[0:15] + '-conversation-export'
 
 
-def _initialize_file_paths(course_name):
-  base_name = _initialize_base_name(course_name)
-  file_paths = {
-      'zip': base_name + '.zip',
-      'excel': base_name + '.xlsx',
-      'jsonl': base_name + '.jsonl',
-      'markdown_dir': os.path.join(os.getcwd(), 'markdown export'),
-      'media_dir': os.path.join(os.getcwd(), 'media_files')
-  }
-  os.makedirs(file_paths['markdown_dir'], exist_ok=True)
-  os.makedirs(file_paths['media_dir'], exist_ok=True)
-  print(f"Initialized directories: {file_paths['markdown_dir']}, {file_paths['media_dir']}")
-  return file_paths
+def _initialize_file_paths(course_name: str):
+    base_name = _initialize_base_name(course_name)
+
+    # Create a unique temp directory for this course_name
+    temp_dir = tempfile.mkdtemp(prefix=f"{course_name}_")
+
+    file_paths = {
+        "zip": os.path.join(temp_dir, base_name + ".zip"),
+        "excel": os.path.join(temp_dir, base_name + ".xlsx"),
+        "jsonl": os.path.join(temp_dir, base_name + ".jsonl"),
+        "markdown_dir": os.path.join(temp_dir, "markdown_export"),
+        "media_dir": os.path.join(temp_dir, "media_files"),
+    }
+
+    os.makedirs(file_paths["markdown_dir"], exist_ok=True)
+    os.makedirs(file_paths["media_dir"], exist_ok=True)
+
+    print(f"Initialized directories: {file_paths['markdown_dir']}, {file_paths['media_dir']}")
+    return file_paths
 
 
 def _initialize_excel(excel_file_path):
@@ -74,25 +82,26 @@ def _process_conversation(s3, convo, course_name, file_paths, worksheet, row_num
 
 def _process_conversation_for_user_convo_export(s3, convo, project_name, markdown_dir, media_dir, error_log):
   try:
-    print("processing convo: ", convo)
-    convo_id = convo['id']
-    name = convo['name']
-    user_email = convo['user_email']
-    timestamp = convo['created_at']
-    messages = convo['messages']
+    messages = convo["messages"]
+    convo_id = str(convo.get("id")) if convo else None
+    name = convo.get("name")
+    user_email = convo.get("user_email")
+    timestamp = convo.get("created_at")
 
-    _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log,
-                                           timestamp, name, project_name)
+    _create_markdown_for_user_convo_export(
+      s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log, timestamp, name, project_name
+    )
 
-    print(f"Processed conversation ID {convo_id}")
   except Exception as e:
-    print(f"Error processing conversation ID {convo.id}: {str(e)}")
-    error_log.append(f"Error processing conversation ID {convo.id}: {str(e)}")
+    error_log.append(f"Error processing conversation {convo}: {e}")
+    raise
 
 
 def _create_markdown(s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log, timestamp, convo_name):
   try:
-    markdown_filename = f"{timestamp.split('T')[0]}-{convo_name}.md"
+    if isinstance(timestamp, datetime):
+      timestamp = timestamp.isoformat()
+    markdown_filename = f"{timestamp}-{convo_name}.md"
     markdown_file_path = os.path.join(markdown_dir, markdown_filename)
     with open(markdown_file_path, 'w') as md_file:
       md_file.write(f"## Conversation ID: {convo_id}\n")
@@ -116,21 +125,19 @@ def _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir,
                                            timestamp, name, project_name):
   try:
     print(f"Creating markdown file for conversation ID {convo_id}")
-    markdown_filename = f"{name}-{timestamp.split('T')}.md"
+    if isinstance(timestamp, datetime):
+      timestamp = timestamp.isoformat()
+    markdown_filename = f"{name}-{timestamp}.md"
     markdown_file_path = os.path.join(markdown_dir, markdown_filename)
 
     with open(markdown_file_path, 'w') as md_file:
       # md_file.write(f"Conversation ID: {convo_id}\n")
       md_file.write(f"## **UIUC Chat Conversation for Project**: {project_name}\n\n")
       md_file.write(f"## **User Email**: {user_email}\n\n")
-      md_file.write(f"Date: {timestamp.split('T')[0]}\n\n")
+      md_file.write(f"Date Time: {timestamp}\n\n")
 
       for message in messages:
-        text = message['content_text']
-        img_urls = message['content_image_url']
         img_desc = message['image_description']
-        print(f"text: {text}")
-        print(f"img_urls: {img_urls}")
         role = "User" if message['role'] == 'user' else "Assistant" if message['role'] == 'assistant' else "System"
 
         # content = _process_message_content(s3, message['content'], convo_id, media_dir, error_log)
@@ -251,8 +258,9 @@ def _append_to_jsonl(convo_data, jsonl_file_path, error_log):
 
 
 def _create_zip(file_paths, error_log):
-  zip_file_path = os.path.join(os.getcwd(), file_paths['zip'])
-  error_log_path = os.path.join(os.getcwd(), 'error.log')
+  temp_dir = tempfile.mkdtemp(prefix="export_")
+  zip_file_path = os.path.join(temp_dir, os.path.basename(file_paths['zip']))
+  error_log_path = os.path.join(temp_dir, 'error.log')
   with open(error_log_path, 'w') as log_file:
     for error in error_log:
       log_file.write(error + '\n')
@@ -272,12 +280,16 @@ def _create_zip(file_paths, error_log):
     zipf.write(file_paths['jsonl'], os.path.basename(file_paths['jsonl']))
     zipf.write(error_log_path, 'error.log')
   print(f"Created zip file at path: {zip_file_path}")
+  os.remove(error_log_path)
+
   return zip_file_path
 
 
 def _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log):
-  zip_file_path = os.path.join(os.getcwd(), 'user_convo_export.zip')
-  error_log_path = os.path.join(os.getcwd(), 'error.log')
+  temp_dir = tempfile.mkdtemp(prefix="user_convo_export_")
+  zip_file_path = os.path.join(temp_dir, 'user_convo_export.zip')
+  error_log_path = os.path.join(temp_dir, 'error.log')
+
   with open(error_log_path, 'w') as log_file:
     for error in error_log:
       log_file.write(error + '\n')
@@ -292,6 +304,7 @@ def _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log):
                    os.path.join(media_dir.split('/')[-1], os.path.relpath(os.path.join(root, file), media_dir)))
     zipf.write(error_log_path, 'error.log')
   print(f"Created zip file at path: {zip_file_path}")
+  os.remove(error_log_path)
   return zip_file_path
 
 
