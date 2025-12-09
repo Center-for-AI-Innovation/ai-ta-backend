@@ -88,14 +88,6 @@ class OllamaConfig:
     def __init__(self):
         # self.base_url = str(getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         self.base_url = str(getenv("OLLAMA_BASE_URL", str(getenv("OLLAMA_API_URL"))))
-        self.available_models = {  # Add other self-hosted models as needed
-            "llama3.1:8b": "llama3.1:8b-instruct-fp16",
-            "llama3.2:1b": "llama3.2:1b-instruct-fp16",
-            "llama3.2:3b": "llama3.2:3b-instruct-fp16",
-            "deepseek-r1:14b": "deepseek-r1:14b-qwen-distill-fp16",
-            "qwen2.5:14b": "qwen2.5:14b-instruct-fp16",
-            "qwen2.5:7b": "qwen2.5:7b-instruct-fp16",
-        }
 
     def __repr__(self):
         return f"<self.ollama_config(base_url={self.base_url})>"
@@ -104,7 +96,6 @@ class OllamaConfig:
         """Returns the Ollama configuration as a dictionary."""
         return {
             "base_url": self.base_url,
-            "available_models": list(self.available_models.keys()),
         }
 
 
