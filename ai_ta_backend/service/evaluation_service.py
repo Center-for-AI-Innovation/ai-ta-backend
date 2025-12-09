@@ -346,46 +346,7 @@ class EvaluationService:
             )
         return dataset
 
-    def single_judge_evaluation(
-        self,
-        question_answer_pairs: dict,
-        judge: str,
-        course_name: str,
-        temperature: float,
-        model: str,
-        log: bool = True,
-    ) -> dict:
-        """
-        Evaluates RAG performance for a set of question-answer pairs using a specified LLM judge.
-
-        Args:
-            question_answer_pairs (dict): A dictionary containing question-answer pairs for evaluation.
-            judge (str, optional): A string representing the choice of LLM model to use for evaluation. Defaults to "gpt-4o-mini".
-            log (bool, optional): Whether to log errors. Defaults to True.
-
-        Returns:
-            dict: A dictionary containing the evaluation results and the path to the markdown report.
-        """
-        # Initialize report
-
-        # Create test cases and preprocess them
-        test_cases = self.create_test_cases(
-            question_answer_pairs, model, course_name, temperature
-        )
-        processed_test_cases = self.preprocess_test_cases(test_cases)
-        evaluation_dict, errors = self.create_dataset(processed_test_cases)
-
-        # Log errors
-        if errors:
-            if log:
-                logging.error(f"errors in dataset creation: {errors}")
-
-        # Convert dataset to LangSmith format
-        langsmith_ragas_eval = EvaluationDataset.from_list(
-            self.convert_dict_to_list(evaluation_dict)
-        )
-
-        # Initialize Langchain LLM wrapper
+    def get_llm_options(self, temperature):
         llm_options = {
             # OpenAI models
             "gpt-4o-mini": ChatOpenAI(model="gpt-4o-mini", temperature=temperature),
@@ -428,6 +389,50 @@ class EvaluationService:
             # "llama3-70b": ChatNVIDIA(model="meta/llama3-70b-instruct", temperature=0.1),
         }
 
+        return llm_options  # type: ignore
+
+    def single_judge_evaluation(
+        self,
+        question_answer_pairs: dict,
+        judge: str,
+        course_name: str,
+        temperature: float,
+        model: str,
+        log: bool = True,
+    ) -> dict:
+        """
+        Evaluates RAG performance for a set of question-answer pairs using a specified LLM judge.
+
+        Args:
+            question_answer_pairs (dict): A dictionary containing question-answer pairs for evaluation.
+            judge (str, optional): A string representing the choice of LLM model to use for evaluation. Defaults to "gpt-4o-mini".
+            log (bool, optional): Whether to log errors. Defaults to True.
+
+        Returns:
+            dict: A dictionary containing the evaluation results and the path to the markdown report.
+        """
+        # Initialize report
+
+        # Create test cases and preprocess them
+        test_cases = self.create_test_cases(
+            question_answer_pairs, model, course_name, temperature
+        )
+        processed_test_cases = self.preprocess_test_cases(test_cases)
+        evaluation_dict, errors = self.create_dataset(processed_test_cases)
+
+        # Log errors
+        if errors:
+            if log:
+                logging.error(f"errors in dataset creation: {errors}")
+
+        # Convert dataset to LangSmith format
+        langsmith_ragas_eval = EvaluationDataset.from_list(
+            self.convert_dict_to_list(evaluation_dict)
+        )
+
+        # Initialize Langchain LLM wrapper
+        llm_options = self.get_llm_options(temperature)
+
         # Check if the judge model is in the available options
         if judge in llm_options:
             evaluator_llm = LangchainLLMWrapper(llm_options[judge])
@@ -451,7 +456,7 @@ class EvaluationService:
             llm=evaluator_llm,
         )
 
-        return {"results": self.process_scores(results.scores)}  # type: ignore
+        return {"results": self.process_scores(results.scores)}
 
     def multi_judge_evaluation(
         self,
@@ -492,47 +497,7 @@ class EvaluationService:
         )
 
         # Initialize Langchain LLM wrapper options
-        llm_options = {
-            # OpenAI models
-            "gpt-4o-mini": ChatOpenAI(model="gpt-4o-mini", temperature=temperature),
-            "gpt-4o": ChatOpenAI(model="gpt-4o", temperature=temperature),
-            # Ollama models
-            "llama3.1:8b": ChatOllama(
-                model="llama3.1:8b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "llama3.2:1b": ChatOllama(
-                model="llama3.2:1b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "llama3.2:3b": ChatOllama(
-                model="llama3.2:3b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "deepseek-r1:14b": ChatOllama(
-                model="deepseek-r1:14b-qwen-distill-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "qwen2.5:14b": ChatOllama(
-                model="qwen2.5:14b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "qwen2.5:7b": ChatOllama(
-                model="qwen2.5:7b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            # Commented out models that could be added in the future
-            # "claude-3-5-sonnet": ChatAnthropic(model="claude-3-5-sonnet-latest", temperature=0.1),
-            # "command-r-plus": ChatCohere(model="command-r-plus", temperature=0.1),
-            # "gemini-2-flash": ChatGoogleGenerativeAI(model="gemini-2.0-flash-001", temperature=0.1),
-            # "llama3-70b": ChatNVIDIA(model="meta/llama3-70b-instruct", temperature=0.1),
-        }
+        llm_options = self.get_llm_options(temperature)
 
         # Dictionary to store results for each judge
         all_results = {}
@@ -590,17 +555,10 @@ class EvaluationService:
         model: str,
     ) -> dict:
         imported_dataset = question_answer_pair
-        list_of_judge_tests = [
-            "gpt-4o-mini",
-            "gpt-4o",
-            "deepseek-r1:14b",
-            "llama3.1:8b",
-            "llama3.2:1b",
-            "llama3.2:3b",
-            "qwen2.5:14b",
-            "qwen2.5:7b",
-        ]
-        if all(item in list_of_judge_tests for item in test_judge):
+
+        llm_options = self.get_llm_options(temperature)
+
+        if all(item in llm_options for item in test_judge):
             if len(test_judge) == 1:
                 result = self.single_judge_evaluation(
                     imported_dataset, test_judge[0], course_name, temperature, model
