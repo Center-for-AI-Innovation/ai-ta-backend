@@ -68,25 +68,8 @@ class LangchainConfig:
         }
 
 
-class OpenAIConfig:
-    def __init__(self):
-        environ["OPENAI_API_KEY"] = str(getenv("EVALUATION_OPENAI_API_KEY"))
-
-        self.api_key = environ["OPENAI_API_KEY"]
-
-    def __repr__(self):
-        return f"<OpenAI API key is initialized>"
-
-    def get_config(self):
-        """Returns the OpenAI configuration as a dictionary."""
-        return {
-            "api_key": self.api_key,
-        }
-
-
 class OllamaConfig:
     def __init__(self):
-        # self.base_url = str(getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         self.base_url = str(getenv("OLLAMA_BASE_URL", str(getenv("OLLAMA_API_URL"))))
 
     def __repr__(self):
@@ -114,7 +97,6 @@ class EvaluationService:
         self.langchain_config = LangchainConfig()
 
         # Initialize LLM specific environment variables
-        self.openai_config = OpenAIConfig()
         self.ollama_config = OllamaConfig()
 
     def get_prompt_tokens(
@@ -143,74 +125,10 @@ class EvaluationService:
 
         return found_documents
 
-    def query_cropwizard(
-        self,
-        prompt: str,
-        model: str,
-        course_name: str,
-        temperature: float,
-        log: bool = True,
-    ) -> str:
-        """
-        Function to send a prompt to CropWizard and get the response.
-        """
-        url = self.config.answer_endpoint
-        group = self.config.cw_groups
-        limit = self.config.token_limit
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": self.config.cropwiz_sys_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": temperature,
-            "course_name": course_name,
-            "doc_groups": group,
-            "token_limit": limit,
-            "stream": True,
-            "api_key": self.config.cropwiz_api_key,
-        }
-
-        response = requests.post(url, json=payload)
-        # Error handling
-        assert (
-            response.status_code == 200
-        ), f"failed to retrieve data for query_cropwizard (error_code: {response.status_code})"
-
-        if "Error processing streaming response" in response.text:
-            for attempt in range(3):
-                if log:
-                    logging.error(
-                        f"Error ({attempt + 1}) in query_cropwizard() for question {prompt}: {response.text}"
-                    )
-                sleep(0.25)
-                response = requests.post(url, json=payload)
-                if "Error processing streaming response" not in response.text:
-                    break
-                elif attempt == 3:
-                    if log:
-                        logging.error(
-                            f"Max retries reached for query_cropwizard(). Failed request to obtain streamed response for question: {prompt}."
-                        )
-
-        if (
-            "The CropWizard database doesn't have anything covering this exact question"
-            in response.text
-        ):
-            if log:
-                logging.error(
-                    f"Vector search mismatch for question: {prompt} - not found in database"
-                )
-
-        return response.text
-
     def create_test_cases(
         self,
         question_answer_pairs: dict,
-        model: str,
         course_name: str,
-        temperature: float,
     ) -> dict:
         """
         Creates a test case dictionary from a question-answer dictionary.
@@ -228,14 +146,12 @@ class EvaluationService:
             "ground_truth": [],
         }
 
-        for key, value in question_answer_pairs.items():
+        for value in question_answer_pairs:
             sleep(0.25)  # Added sleep to avoid issues on the server side
-            test_cases["question"].append(key)
-            test_cases["answer"].append(
-                self.query_cropwizard(key, model, course_name, temperature)
-            )
+            test_cases["question"].append(value["question"])
+            test_cases["answer"].append(value["answer"])
             test_cases["retrieved_contexts"].append(
-                self.get_prompt_tokens(key, course_name)
+                self.get_prompt_tokens(value["question"], course_name)
             )
             test_cases["ground_truth"].append(value)
 
@@ -337,42 +253,32 @@ class EvaluationService:
             )
         return dataset
 
-    def get_llm_options(self, temperature):
+    def get_llm_options(self, judges, model_config, temperature):
+
+        llm_options = {}
+
+        for judge in judges:
+            model = model_config[judge]
+            provider = model["provider"]
+            model_id = model["model_id"]
+
+            if provider == "OpenAI":
+                llm_options[judge] = ChatOpenAI(
+                    model=model_id,
+                    temperature=temperature,
+                    api_key=model["api_key"],
+                )
+            else:
+                llm_options[judge] = ChatOllama(
+                    model=model_id,
+                    base_url=self.ollama_config.base_url,
+                    temperature=temperature,
+                )
+
+        return llm_options
+
         llm_options = {
             # OpenAI models
-            "gpt-4o-mini": ChatOpenAI(model="gpt-4o-mini", temperature=temperature),
-            "gpt-4o": ChatOpenAI(model="gpt-4o", temperature=temperature),
-            # Ollama models
-            "llama3.1:8b": ChatOllama(
-                model="llama3.1:8b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "llama3.2:1b": ChatOllama(
-                model="llama3.2:1b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "llama3.2:3b": ChatOllama(
-                model="llama3.2:3b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "deepseek-r1:14b": ChatOllama(
-                model="deepseek-r1:14b-qwen-distill-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "qwen2.5:14b": ChatOllama(
-                model="qwen2.5:14b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
-            "qwen2.5:7b": ChatOllama(
-                model="qwen2.5:7b-instruct-fp16",
-                base_url=self.ollama_config.base_url,
-                temperature=temperature,
-            ),
             # Commented out models that could be added in the future
             # "claude-3-7-sonnet": ChatAnthropic(model="claude-3-5-sonnet-latest", temperature=0.1),
             # "command-r-plus": ChatCohere(model="command-r-plus", temperature=0.1),
@@ -380,7 +286,7 @@ class EvaluationService:
             # "llama3-70b": ChatNVIDIA(model="meta/llama3-70b-instruct", temperature=0.1),
         }
 
-        return llm_options  # type: ignore
+        return llm_options  # type: ign
 
     def single_judge_evaluation(
         self,
@@ -388,7 +294,7 @@ class EvaluationService:
         judge: str,
         course_name: str,
         temperature: float,
-        model: str,
+        model_config: dict,
         log: bool = True,
     ) -> dict:
         """
@@ -406,7 +312,8 @@ class EvaluationService:
 
         # Create test cases and preprocess them
         test_cases = self.create_test_cases(
-            question_answer_pairs, model, course_name, temperature
+            question_answer_pairs,
+            course_name,
         )
         processed_test_cases = self.preprocess_test_cases(test_cases)
         evaluation_dict, errors = self.create_dataset(processed_test_cases)
@@ -422,17 +329,9 @@ class EvaluationService:
         )
 
         # Initialize Langchain LLM wrapper
-        llm_options = self.get_llm_options(temperature)
+        llm_options = self.get_llm_options([judge], model_config, temperature)
 
-        # Check if the judge model is in the available options
-        if judge in llm_options:
-            evaluator_llm = LangchainLLMWrapper(llm_options[judge])
-        else:
-            if log:
-                logging.error(
-                    f"Model '{judge}' not found in available models. Reverting to default model (gpt-4o-mini)."
-                )
-            evaluator_llm = LangchainLLMWrapper(llm_options["gpt-4o-mini"])
+        evaluator_llm = LangchainLLMWrapper(llm_options[judge])
 
         # Run evaluation
         results = ragas_eval(
@@ -447,7 +346,7 @@ class EvaluationService:
             llm=evaluator_llm,
         )
 
-        return {"results": self.process_scores(results.scores)}
+        return {"results": self.process_scores(results.scores)}  # type: ignore
 
     def multi_judge_evaluation(
         self,
@@ -455,7 +354,7 @@ class EvaluationService:
         judges: list,
         course_name: str,
         temperature: float,
-        model: str,
+        model_config: dict,
         log: bool = True,
     ) -> dict:
         """
@@ -471,9 +370,7 @@ class EvaluationService:
             dict: A dictionary containing the evaluation results for all judges and the path to the markdown report.
         """
         # Create test cases and preprocess them - only done once for all judges
-        test_cases = self.create_test_cases(
-            question_answer_pairs, model, course_name, temperature
-        )
+        test_cases = self.create_test_cases(question_answer_pairs, course_name)
         processed_test_cases = self.preprocess_test_cases(test_cases)
         evaluation_dict, errors = self.create_dataset(processed_test_cases)
 
@@ -488,7 +385,7 @@ class EvaluationService:
         )
 
         # Initialize Langchain LLM wrapper options
-        llm_options = self.get_llm_options(temperature)
+        llm_options = self.get_llm_options(judges, model_config, temperature)
 
         # Dictionary to store results for each judge
         all_results = {}
@@ -496,15 +393,7 @@ class EvaluationService:
         # Process each judge
         for judge_name in judges:
             # Check if the judge model is in the available options
-            if judge_name in llm_options:
-                evaluator_llm = LangchainLLMWrapper(llm_options[judge_name])
-            else:
-                if log:
-                    logging.error(
-                        f"Model '{judge_name}' not found in available models. Reverting to default model (gpt-4o-mini)."
-                    )
-                judge_name = "gpt-4o-mini"  # Fall back to default
-                evaluator_llm = LangchainLLMWrapper(llm_options[judge_name])
+            evaluator_llm = LangchainLLMWrapper(llm_options[judge_name])
 
             # Run evaluation for this judge
             results = ragas_eval(
@@ -539,28 +428,25 @@ class EvaluationService:
 
     def evaluate(
         self,
-        question_answer_pair,
+        dataset,
         test_judge: list,
         course_name: str,
         temperature: float,
-        model: str,
+        model_config: dict,
     ) -> dict:
-        imported_dataset = question_answer_pair
 
-        llm_options = self.get_llm_options(temperature)
+        # llm_options = self.get_llm_options(temperature)
 
-        if all(item in llm_options for item in test_judge):
-            if len(test_judge) == 1:
-                result = self.single_judge_evaluation(
-                    imported_dataset, test_judge[0], course_name, temperature, model
-                )
-                return result
-            elif len(test_judge) > 1:
-                result = self.multi_judge_evaluation(
-                    imported_dataset, test_judge, course_name, temperature, model
-                )
-                return result
-        else:
-            raise ValueError(f"One or more invalid values for test_judge: {test_judge}")
+        # if all(item in llm_options for item in test_judge):
+        if len(test_judge) == 1:
+            result = self.single_judge_evaluation(
+                dataset, test_judge[0], course_name, temperature, model_config
+            )
+            return result
+        elif len(test_judge) > 1:
+            result = self.multi_judge_evaluation(
+                dataset, test_judge, course_name, temperature, model_config
+            )
+            return result
 
         return {}
