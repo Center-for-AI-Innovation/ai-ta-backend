@@ -1,0 +1,96 @@
+name: Build and Push Backend Images on Tag
+
+on:
+  push:
+    tags:
+      - '*'
+
+# Environment variables for ECR repositories
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: uiuc-chat-backend
+  ECR_REPOSITORY_WORKER: uiuc-chat-worker
+
+# Only build and push images, do not deploy
+jobs:
+  build-and-push:
+    name: Build and Push Backend Images (dev & prod)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (dev ECR)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag (tag only)
+        id: set-tag
+        run: |
+          GIT_TAG=${GITHUB_REF#refs/tags/}
+          IMAGE_TAG="${GIT_TAG}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "git_tag=${GIT_TAG}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push backend image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          echo "Building backend image with tag: $IMAGE_TAG"
+          docker build -f Self-Hosted-Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Output image tag
+        run: |
+          echo "Backend image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+
+  build-and-push-worker:
+    name: Build and Push Worker Images (dev & prod)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (dev ECR)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr-worker
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set worker image tag (tag only)
+        id: set-worker-tag
+        run: |
+          GIT_TAG=${GITHUB_REF#refs/tags/}
+          IMAGE_TAG="${GIT_TAG}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "git_tag=${GIT_TAG}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push worker image to Amazon ECR
+        id: build-worker-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-worker.outputs.registry }}
+        run: |
+          set -euo pipefail
+          echo "Building worker image with tag: $IMAGE_TAG"
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG ai_ta_backend/rabbitmq/
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG
+
+      - name: Output worker image tag
+        run: |
+          echo "Worker image: ${{ steps.login-ecr-worker.outputs.registry }}/${{ env.ECR_REPOSITORY_WORKER }}:${{ env.IMAGE_TAG }}"

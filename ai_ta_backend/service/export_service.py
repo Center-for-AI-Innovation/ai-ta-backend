@@ -4,11 +4,9 @@ import os
 import tempfile
 import uuid
 import zipfile
-from urllib.parse import urlparse
 
 import pandas as pd
 import requests
-import xlsxwriter
 from injector import inject
 
 from ai_ta_backend.database.aws import AWSStorage
@@ -17,14 +15,13 @@ from ai_ta_backend.executors.process_pool_executor import ProcessPoolExecutorAda
 from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.export_utils import (
-    _cleanup,
-    _create_zip,
-    _create_zip_for_user_convo_export,
-    _initialize_base_name,
-    _initialize_excel,
-    _initialize_file_paths,
-    _process_conversation,
-    _process_conversation_for_user_convo_export,
+  _cleanup,
+  _create_zip,
+  _create_zip_for_user_convo_export,
+  _initialize_excel,
+  _initialize_file_paths,
+  _process_conversation,
+  _process_conversation_for_user_convo_export,
 )
 
 
@@ -62,9 +59,11 @@ class ExportService:
 				to_date (str, optional): The end date for the data export. Defaults to ''.
 		"""
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'documents')
+    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date)
+
+    count = response.get("count", 0)
     # add a condition to route to direct download or s3 download
-    if response.count > 500:
+    if count > 500:
       # call background task to upload to s3
 
       filename = course_name + '_' + str(uuid.uuid4()) + '_documents.zip'
@@ -75,26 +74,32 @@ class ExportService:
 
     else:
       # Fetch data
-      if response.count > 0:
+      if count > 0:
         # batch download
-        total_doc_count = response.count
-        first_id = response.data[0]['id']
-        last_id = response.data[-1]['id']
+        total_doc_count = count
+        if not "data" in response and len(response["data"]) <= 0:
+          return {"response": "No data found between the given dates."}
+
+        first_id = response["data"][0]['id']
+        last_id = response["data"][-1]['id']
 
         print("total_doc_count: ", total_doc_count)
         print("first_id: ", first_id)
         print("last_id: ", last_id)
 
         curr_doc_count = 0
+        # create a temporary directory
+        temp_dir = tempfile.mkdtemp(prefix="export_")
+
         filename = course_name + '_' + str(uuid.uuid4()) + '_documents.jsonl'
-        file_path = os.path.join(os.getcwd(), filename)
+        file_path = os.path.join(temp_dir, filename)
 
         while curr_doc_count < total_doc_count:
           print("Fetching data from id: ", first_id)
 
           response = self.sql.getDocsForIdsGte(course_name, first_id)
-          df = pd.DataFrame(response.data)
-          curr_doc_count += len(response.data)
+          df = pd.DataFrame(response["data"])
+          curr_doc_count += len(response["data"])
 
           # writing to file
           if not os.path.isfile(file_path):
@@ -102,20 +107,20 @@ class ExportService:
           else:
             df.to_json(file_path, orient='records', lines=True, mode='a')
 
-          if len(response.data) > 0:
-            first_id = response.data[-1]['id'] + 1
+          if len(response["data"]) > 0:
+            first_id = response["data"][-1]['id'] + 1
 
         # Download file
         try:
           # zip file
           zip_filename = filename.split('.')[0] + '.zip'
-          zip_file_path = os.path.join(os.getcwd(), zip_filename)
+          zip_file_path = os.path.join(temp_dir, zip_filename)
 
           with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(file_path, filename)
 
           os.remove(file_path)
-          return {"response": (zip_file_path, zip_filename, os.getcwd())}
+          return {"response": zip_file_path}
         except Exception as e:
           print(e)
           self.sentry.capture_exception(e)
@@ -133,9 +138,10 @@ class ExportService:
 		"""
     print("Exporting conversation history to json file...")
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'llm-convo-monitor')
+    response = self.sql.getConversationsBetweenDates(course_name, from_date, to_date)
 
-    if response.count > 500:
+    count = response.get("count", 0)
+    if count > 500:
       # call background task to upload to s3
       filename = course_name[0:10] + '-' + str(generate_short_id()) + '_convos.zip'
       s3_filepath = f"courses/{course_name}/{filename}"
@@ -144,22 +150,29 @@ class ExportService:
       return {"response": 'Download from S3', "s3_path": s3_filepath}
 
     # Fetch data
-    if response.count > 0:
+    if count > 0:
       print("id count greater than zero")
-      first_id = response.data[0]['id']
-      last_id = response.data[-1]['id']
-      total_count = response.count
+
+      if not "data" in response and len(response["data"]) <= 0:
+        return {"response": "No data found between the given dates."}
+
+      first_id = response["data"][0]['id']
+      last_id = response["data"][-1]['id']
+      total_count = count
+
+      temp_dir = tempfile.mkdtemp(prefix="export_")
 
       filename = course_name[0:10] + '-convos.jsonl'
-      file_path = os.path.join(os.getcwd(), filename)
+      file_path = os.path.join(temp_dir, filename)
+
       curr_count = 0
       # Fetch data in batches of 25 from first_id to last_id
       while curr_count < total_count:
         print("Fetching data from id: ", first_id)
         response = self.sql.getAllConversationsBetweenIds(course_name, first_id, last_id)
         # Convert to pandas dataframe
-        df = pd.DataFrame(response.data)
-        curr_count += len(response.data)
+        df = pd.DataFrame(response["data"])
+        curr_count += len(response["data"])
 
         # Append to csv file
         if not os.path.isfile(file_path):
@@ -168,21 +181,21 @@ class ExportService:
           df.to_json(file_path, orient='records', lines=True, mode='a')
 
         # Update first_id
-        if len(response.data) > 0:
-          first_id = response.data[-1]['id'] + 1
+        if len(response["data"]) > 0:
+          first_id = response["data"][-1]['id'] + 1
           print("updated first_id: ", first_id)
 
       # Download file
       try:
         # zip file
         zip_filename = filename.split('.')[0] + '.zip'
-        zip_file_path = os.path.join(os.getcwd(), zip_filename)
+        zip_file_path = os.path.join(temp_dir, zip_filename)
 
         with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
           zipf.write(file_path, filename)
         os.remove(file_path)
 
-        return {"response": (zip_file_path, zip_filename, os.getcwd())}
+        return {"response": zip_file_path}
       except Exception as e:
         print(e)
         self.sentry.capture_exception(e)
@@ -196,9 +209,10 @@ class ExportService:
     """
     print("Exporting conversation history to json file...")
 
-    response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'llm-convo-monitor')
+    response = self.sql.getConversationsBetweenDates(course_name, from_date, to_date)
 
-    if response.count > 500:
+    count = response.get("count", 0)
+    if count > 500:
       # call background task to upload to s3
       filename = course_name[0:10] + '-' + str(generate_short_id()) + '-convos.zip'
       s3_filepath = f"courses/{course_name}/{filename}"
@@ -207,22 +221,28 @@ class ExportService:
       return {"response": 'Download from S3', "s3_path": s3_filepath}
 
     # Fetch data
-    if response.count > 0:
+    if count > 0:
       print("id count greater than zero")
-      first_id = response.data[0]['id']
-      last_id = response.data[-1]['id']
-      total_count = response.count
+
+      if not "data" in response and len(response["data"]) <= 0:
+        return {"response": "No data found between the given dates."}
+
+      first_id = response["data"][0]['id']
+      last_id = response["data"][-1]['id']
+      total_count = count
+
+      temp_dir = tempfile.mkdtemp(prefix="export_")
 
       filename = course_name[0:10] + '-convos.jsonl'
-      file_path = os.path.join(os.getcwd(), filename)
+      file_path = os.path.join(temp_dir, filename)
       curr_count = 0
       # Fetch data in batches of 25 from first_id to last_id
       while curr_count < total_count:
         print("Fetching data from id: ", first_id)
         response = self.sql.getAllConversationsBetweenIds(course_name, first_id, last_id)
         # Convert to pandas dataframe
-        df = pd.DataFrame(response.data)
-        curr_count += len(response.data)
+        df = pd.DataFrame(response["data"])
+        curr_count += len(response["data"])
 
         # Append to csv file
         if not os.path.isfile(file_path):
@@ -231,21 +251,21 @@ class ExportService:
           df.to_json(file_path, orient='records', lines=True, mode='a')
 
         # Update first_id
-        if len(response.data) > 0:
-          first_id = response.data[-1]['id'] + 1
+        if len(response["data"]) > 0:
+          first_id = response["data"][-1]['id'] + 1
           print("updated first_id: ", first_id)
 
       # Download file
       try:
         # zip file
         zip_filename = filename.split('.')[0] + '.zip'
-        zip_file_path = os.path.join(os.getcwd(), zip_filename)
+        zip_file_path = os.path.join(temp_dir, zip_filename)
 
         with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
           zipf.write(file_path, filename)
         os.remove(file_path)
 
-        return {"response": (zip_file_path, zip_filename, os.getcwd())}
+        return {"response": zip_file_path}
       except Exception as e:
         print(e)
         self.sentry.capture_exception(e)
@@ -267,15 +287,16 @@ class ExportService:
     error_log = []
 
     try:
-      response = self.sql.getDocumentsBetweenDates(course_name, from_date, to_date, 'llm-convo-monitor')
-      responseCount = response.count or 0
-      print(f"Received request to export: {responseCount} conversations")
+      response = self.sql.getConversationsBetweenDates(course_name, from_date, to_date)
+
+      response_count = response.get("count", 0)
+      print(f"Received request to export: {response_count} conversations")
     except Exception as e:
       error_log.append(f"Error fetching documents: {str(e)}")
       print(f"Error fetching documents: {str(e)}")
       return {"response": "Error fetching documents!"}
 
-    if responseCount > 500:
+    if response_count > 500:
       filename = course_name[0:10] + '-' + str(generate_short_id()) + '_convos_extended.zip'
       s3_filepath = f"courses/{course_name}/{filename}"
       print(
@@ -284,12 +305,15 @@ class ExportService:
       self.executor.submit(export_data_in_bg_extended, response, "conversations", course_name, s3_filepath)
       return {"response": 'Download from S3', "s3_path": s3_filepath}
 
-    if responseCount > 0:
+    if response_count > 0:
       try:
-        first_id = response.data[0]['id']
-        last_id = response.data[-1]['id']
-        total_count = response.count or 0
-        print(f"Processing conversations. First ID: {first_id}, Last ID: {last_id}, Total count: {total_count}")
+
+        if not "data" in response and len(response["data"]) <= 0:
+          return {"response": "No data found between the given dates."}
+
+        first_id = response["data"][0]['id']
+        last_id = response["data"][-1]['id']
+        print(f"Processing conversations. First ID: {first_id}, Last ID: {last_id}, Total count: {response_count}")
 
         file_paths = _initialize_file_paths(course_name)
         # print(f"Initialized file paths: {file_paths}")
@@ -303,20 +327,19 @@ class ExportService:
       curr_count = 0
       row_num = 1
 
-      while curr_count < total_count:
+      while curr_count < response_count:
         try:
           print(f"Fetching conversations from ID: {first_id} to {last_id}")
           response = self.sql.getAllConversationsBetweenIds(course_name, first_id, last_id)
-          curr_count += len(response.data)
-          # print(f"Fetched {len(response.data)} conversations, current count: {curr_count}")
+          curr_count += len(response["data"])
 
-          for convo in response.data:
+          for convo in response["data"]:
             # print(f"Processing conversation ID: {convo['convo_id']}")
             _process_conversation(self.s3, convo, course_name, file_paths, worksheet, row_num, error_log, wrap_format)
             row_num += len(convo['convo']['messages'])
 
-          if len(response.data) > 0:
-            first_id = response.data[-1]['id'] + 1
+          if len(response["data"]) > 0:
+            first_id = response["data"][-1]['id'] + 1
             # print(f"Updated first ID to: {first_id}")
         except Exception as e:
           error_log.append(f"Error processing conversations: {str(e)}")
@@ -337,7 +360,7 @@ class ExportService:
         print(f"Error finalizing export: {str(e)}")
         return {"response": "Error finalizing export!"}
 
-      return {"response": (zip_file_path, file_paths['zip'], os.getcwd())}
+      return {"response": zip_file_path}
     else:
       print("No data found between the given dates.")
       return {"response": "No data found between the given dates."}
@@ -354,14 +377,14 @@ class ExportService:
     try:
       # get all conversations for the user and project
       response = self.sql.getAllConversationsForUserAndProject(user_email, project_name)
-      print("response: ", response)
-      count = response.count or 0
+      count = response.get("count", 0)
       print(f"Received request to export: {count} conversations")
 
       if count > 500:
         filename = f"{user_email}_{project_name}_conversations.zip"
         s3_filepath = f"/conversations/{filename}"
-        self.executor.submit(export_convo_history_user_bg, response.data, count, user_email, s3_filepath, project_name)
+        self.executor.submit(export_convo_history_user_bg, response.get("data"), count, user_email, s3_filepath,
+                             project_name)
         return {"response": 'Download from S3', "s3_path": s3_filepath}
 
     except Exception as e:
@@ -381,29 +404,18 @@ class ExportService:
           os.makedirs(markdown_dir, exist_ok=True)
           os.makedirs(media_dir, exist_ok=True)
 
-          # Fetch conversations in batches
-          # while curr_count < count:
-          # try:
-          # response = self.sql.getAllConversationsForUserAndProject(user_email, project_name)
-          # curr_count += len(response.data)
-          # print("curr_count: ", curr_count)
-          # Process conversations
-          # print("response.data: ", response.data)
-          for convo in response.data:
+          if not response or 'data' not in response:
+            print("No data found in the response.")
+            return {"response": "No data found for the given user and project."}
+
+          for convo in response['data']:
             _process_conversation_for_user_convo_export(self.s3, convo, project_name, markdown_dir, media_dir,
                                                         error_log)
 
-            # row_num += 1
-
-            # except Exception as e:
-            #   error_log.append(f"Error fetching conversations: {str(e)}")
-            #   print(f"Error fetching conversations: {str(e)}")
-            #   return {"response": "Error fetching conversations!"}
-            #   break
           # Create zip file
           zip_file_path = _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log)
 
-          return {"response": (zip_file_path, 'user_convo_export.zip', os.getcwd())}
+          return {"response": zip_file_path}
       except Exception as e:
         error_log.append(f"Error creating markdown directory: {str(e)}")
         print(f"Error creating markdown directory: {str(e)}")
@@ -433,23 +445,19 @@ def export_convo_history_user_bg(conversations, count, user_email, s3_path, proj
     os.makedirs(media_dir, exist_ok=True)
 
     try:
-      # row_num = 1
       curr_count = 0
       error_log = []
       while curr_count < count:
         try:
           response = sql.getAllConversationsForUserAndProject(user_email, project_name, curr_count)
-          curr_count += len(response.data)
-
-          for convo in response.data:
+          curr_count += len(response["data"])
+          for convo in response["data"]:
             _process_conversation_for_user_convo_export(s3, convo, project_name, markdown_dir, media_dir, error_log)
-            # row_num += len(convo)
 
         except Exception as e:
           error_log.append(f"Error fetching conversations: {str(e)}")
           print(f"Error fetching conversations: {str(e)}")
           return {"response": "Error fetching conversations!"}
-          break
 
       # create zip file
       zip_file_path = _create_zip_for_user_convo_export(markdown_dir, media_dir, error_log)
@@ -485,8 +493,8 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path):
   s3 = AWSStorage()
   sql = SQLDatabase()
 
-  total_doc_count = response.count
-  first_id = response.data[0]['id']
+  total_doc_count = response.get("count", 0)
+  first_id = response["data"][0]['id']
   curr_doc_count = 0
 
   file_paths = _initialize_file_paths(course_name)
@@ -499,16 +507,16 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path):
   while curr_doc_count < total_doc_count:
     try:
       response = sql.getAllFromTableForDownloadType(course_name, download_type, first_id)
-      curr_doc_count += len(response.data)
+      curr_doc_count += len(response["data"])
 
-      for convo in response.data:
+      for convo in response["data"]:
         print(f"Processing conversation ID: {convo['convo_id']}")
         _process_conversation(s3, convo, course_name, file_paths, worksheet, row_num, error_log, wrap_format)
         row_num += len(convo['convo']['messages'])
 
       # Update first_id for the next batch
-      if len(response.data) > 0:
-        first_id = response.data[-1]['id'] + 1
+      if len(response["data"]) > 0:
+        first_id = response["data"][-1]['id'] + 1
         # print(f"Updated first ID to: {first_id}")
     except Exception as e:
       error_log.append(f"Error processing conversations: {str(e)}")
@@ -581,21 +589,23 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
   s3 = AWSStorage()
   sql = SQLDatabase()
 
-  total_doc_count = response.count
-  first_id = response.data[0]['id']
+  total_doc_count = response.get("count", 0)
+  first_id = response["data"][0]['id']
   print("total_doc_count: ", total_doc_count)
   print("pre-defined s3_path: ", s3_path)
 
   curr_doc_count = 0
+  temp_dir = tempfile.mkdtemp(prefix="export_")
+
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
-  file_path = os.path.join(os.getcwd(), filename)
+  file_path = os.path.join(temp_dir, filename)
 
   # download data in batches of 100
   while curr_doc_count < total_doc_count:
     print("Fetching data from id: ", first_id)
     response = sql.getAllFromTableForDownloadType(course_name, download_type, first_id)
-    df = pd.DataFrame(response.data)
-    curr_doc_count += len(response.data)
+    df = pd.DataFrame(response["data"])
+    curr_doc_count += len(response["data"])
 
     # writing to file
     if not os.path.isfile(file_path):
@@ -603,12 +613,12 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
     else:
       df.to_json(file_path, orient='records', lines=True, mode='a')
 
-    if len(response.data) > 0:
-      first_id = response.data[-1]['id'] + 1
+    if len(response["data"]) > 0:
+      first_id = response["data"][-1]['id'] + 1
 
   # zip file
   zip_filename = filename.split('.')[0] + '.zip'
-  zip_file_path = os.path.join(os.getcwd(), zip_filename)
+  zip_file_path = os.path.join(temp_dir, zip_filename)
 
   with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
     zipf.write(file_path, filename)
@@ -690,21 +700,24 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
   s3 = AWSStorage()
   sql = SQLDatabase()
 
-  total_doc_count = response.count
-  first_id = response.data[0]['id']
+  total_doc_count = response.get("count", 0)
+  first_id = response["data"][0]['id']
   print("total_doc_count: ", total_doc_count)
   print("pre-defined s3_path: ", s3_path)
 
   curr_doc_count = 0
+
+  temp_dir = tempfile.mkdtemp(prefix="export_")
+
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
-  file_path = os.path.join(os.getcwd(), filename)
+  file_path = os.path.join(temp_dir, filename)
 
   # download data in batches of 100
   while curr_doc_count < total_doc_count:
     print("Fetching data from id: ", first_id)
     response = sql.getAllFromTableForDownloadType(course_name, download_type, first_id)
-    df = pd.DataFrame(response.data)
-    curr_doc_count += len(response.data)
+    df = pd.DataFrame(response["data"])
+    curr_doc_count += len(response["data"])
 
     # writing to file
     if not os.path.isfile(file_path):
@@ -712,12 +725,12 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
     else:
       df.to_json(file_path, orient='records', lines=True, mode='a')
 
-    if len(response.data) > 0:
-      first_id = response.data[-1]['id'] + 1
+    if len(response["data"]) > 0:
+      first_id = response["data"][-1]['id'] + 1
 
   # zip file
   zip_filename = filename.split('.')[0] + '.zip'
-  zip_file_path = os.path.join(os.getcwd(), zip_filename)
+  zip_file_path = os.path.join(temp_dir, zip_filename)
 
   with zipfile.ZipFile(zip_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
     zipf.write(file_path, filename)

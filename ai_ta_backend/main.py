@@ -1,18 +1,18 @@
 import asyncio
-import json
 import os
+import re
 import time
+import logging
 from typing import List
 
 from dotenv import load_dotenv
 from flask import (
-    Flask,
-    Response,
-    abort,
-    jsonify,
-    make_response,
-    request,
-    send_from_directory,
+  Flask,
+  Response,
+  abort,
+  jsonify,
+  request,
+  send_file,
 )
 from flask_cors import CORS
 from flask_executor import Executor
@@ -40,11 +40,12 @@ from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
-from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
 from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
+from ai_ta_backend.rabbitmq.rmqueue import Queue
+from ai_ta_backend.rabbitmq.ingest_canvas import IngestCanvas
 
 app = Flask(__name__)
 CORS(app)
@@ -68,6 +69,22 @@ def index() -> Response:
   """
   response = jsonify(
       {"hi there, this is a 404": "Welcome to UIUC.chat backend 🚅 Read the docs here: https://docs.uiuc.chat/ "})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/health')
+def health() -> Response:
+  """Health check endpoint for ECS health checks and load balancer.
+  
+  Returns:
+      JSON: Health status response
+  """
+  response = jsonify({
+    "status": "healthy",
+    "service": "ai-ta-backend",
+    "timestamp": time.time()
+  })
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
@@ -211,8 +228,8 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   start_time = time.monotonic()
   # background execution of tasks!!
   flaskExecutor.submit(service.delete_data, course_name, s3_path, source_url)
-  print(f"From {course_name}, deleted file: {s3_path}")
-  print(f"⏰ Runtime of FULL delete func: {(time.monotonic() - start_time):.2f} seconds")
+  logging.info(f"From {course_name}, deleted file: {s3_path}")
+  logging.debug(f"⏰ Runtime of FULL delete func: {(time.monotonic() - start_time):.2f} seconds")
   # we need instant return. Delets are "best effort" assume always successful... sigh :(
   response = jsonify({"outcome": 'success'})
   response.headers.add('Access-Control-Allow-Origin', '*')
@@ -398,11 +415,17 @@ def export_convo_history(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
@@ -434,11 +457,17 @@ def export_convo_history_v2(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
@@ -467,15 +496,22 @@ def export_convo_history_user(service: ExportService):
     response = jsonify({'response': 'Error fetching conversations'})
     response.status_code = 500
     response.headers.add('Access-Control-Allow-Origin', '*')
-
-  else:
-    print("export_status['response'][2]: ", export_status['response'][2])
-    print("export_status['response'][1]: ", export_status['response'][1])
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+  elif export_status['response'] == "Error creating markdown directory!":
+    response = jsonify({'response': 'Error creating markdown directory!'})
+    response.status_code = 500
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+  else:
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    os.remove(file_path)
 
   return response
 
@@ -503,11 +539,17 @@ def export_conversations_custom(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
@@ -534,11 +576,17 @@ def exportDocuments(service: ExportService):
     response.headers.add('Access-Control-Allow-Origin', '*')
 
   else:
-    response = make_response(
-        send_from_directory(export_status['response'][2], export_status['response'][1], as_attachment=True))
+    file_path = export_status['response']
+    filename = os.path.basename(file_path)
+
+    response = send_file(
+      file_path,
+      as_attachment=True,
+      download_name=filename,
+      mimetype="application/zip"
+    )
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers["Content-Disposition"] = f"attachment; filename={export_status['response'][1]}"
-    os.remove(export_status['response'][0])
+    os.remove(file_path)
 
   return response
 
@@ -688,6 +736,83 @@ def run_flow(service: WorkflowService) -> Response:
       response.headers.add('Access-Control-Allow-Origin', '*')
       return response
 
+@app.route('/ingest', methods=['POST'])
+def ingest() -> Response:
+  active_queue = Queue()
+  data = request.get_json()
+  logging.info("Data received: %s", data)
+
+  # TODO: Authentication?
+
+  job_id = active_queue.addJobToIngestQueue(data)
+  logging.info("Result from addJobToIngestQueue:  %s", job_id)
+
+  response = jsonify(
+    {
+      "outcome": f'Queued Ingest task',
+      "task_id": job_id
+    }
+  )
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+@app.route('/canvas_ingest', methods=['POST'])
+def canvas_ingest() -> Response:
+  data = request.get_json()
+  logging.info("Canvas ingest data: %s", data)
+
+  course_name: str = data.get('course_name', '')
+  canvas_url: str = data.get('canvas_url', None)
+  files: bool = data.get('files', True)
+  pages: bool = data.get('pages', True)
+  modules: bool = data.get('modules', True)
+  syllabus: bool = data.get('syllabus', True)
+  assignments: bool = data.get('assignments', True)
+  discussions: bool = data.get('discussions', True)
+  options = {
+    'files': str(files).lower() == 'true',
+    'pages': str(pages).lower() == 'true',
+    'modules': str(modules).lower() == 'true',
+    'syllabus': str(syllabus).lower() == 'true',
+    'assignments': str(assignments).lower() == 'true',
+    'discussions': str(discussions).lower() == 'true',
+  }
+
+  print("Course Name: ", course_name)
+  print("Canvas URL: ", canvas_url)
+  print("Download Options: ", options)
+
+  # canvas.illinois.edu/courses/COURSE_CODE
+  match = re.search(r'canvas\.illinois\.edu/courses/([^/]+)', canvas_url)
+  canvas_course_id = match.group(1) if match else None
+
+  canvas_id = os.getenv("CANVAS_ACCESS_TOKEN", default="")
+  if len(canvas_id) == 0:
+      response = jsonify(message=f"CANVAS_ACCESS_TOKEN is not configured.")
+      response.status_code = 500
+      response.headers.add('Access-Control-Allow-Origin', '*')
+      return response
+
+  try:
+      ingester = IngestCanvas()
+      accept_status = ingester.auto_accept_enrollments(canvas_course_id)
+      job_ids = ingester.ingest_course_content(canvas_course_id=canvas_course_id,
+                                       course_name=course_name,
+                                       content_ingest_dict=options)
+
+      response = jsonify(
+        {
+          "outcome": f'Queued Canvas Ingest task',
+          "ingest_task_ids": job_ids
+        }
+      )
+      response.headers.add('Access-Control-Allow-Origin', '*')
+      return response
+  except Exception as e:
+      response = jsonify(error=str(e), message=f"Internal Server Error {e}")
+      response.status_code = 500
+      response.headers.add('Access-Control-Allow-Origin', '*')
+      return response
 
 @app.route('/createProject', methods=['POST'])
 def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> Response:
@@ -698,12 +823,13 @@ def createProject(service: ProjectService, flaskExecutor: ExecutorInterface) -> 
   project_name = data.get('project_name', '')
   project_description = data.get('project_description', '')
   project_owner_email = data.get('project_owner_email', '')
+  is_private = data.get('is_private', False)
 
   if project_name == '':
     # proper web error "400 Bad request"
     abort(400, description=f"Missing one or more required parameters: 'project_name' must be provided.")
   print(f"In /createProject for: {project_name}")
-  result = service.create_project(project_name, project_description, project_owner_email)
+  result = service.create_project(project_name, project_description, project_owner_email, is_private)
 
   # Do long-running LLM task in the background.
   flaskExecutor.submit(service.generate_json_schema, project_name, project_description)

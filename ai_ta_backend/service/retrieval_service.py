@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Dict, List, Union
 import tempfile
 import mimetypes
+import logging
 from pathlib import Path
 
 import openai
@@ -34,6 +35,14 @@ from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.sentry_service import SentryService
 from qdrant_client.http import models
 
+# Qwen query instruction for Illinois Chat retrieval.
+# Docs are embedded without instruction during ingest; only queries get this prefix.
+DEFAULT_QWEN_QUERY_INSTRUCTION = (
+    "Given a user search query, retrieve the most relevant passages from the Illinois Chat knowledge "
+    "base stored in Qdrant to answer the query accurately. Prioritize authoritative course materials, "
+    "syllabi, FAQs, official documentation, web pages, and other relevant sources. Ignore boilerplate/navigation text."
+)
+
 class RetrievalService:
   """
     Contains all methods for business logic of the retrieval service.
@@ -48,18 +57,33 @@ class RetrievalService:
     self.sentry = sentry
     self.posthog = posthog
     self.thread_pool_executor = thread_pool_executor
-    openai.api_key = os.environ["VLADS_OPENAI_KEY"]
+    self.openai_api_key = os.getenv("OPENAI_API_KEY") if os.getenv("OPENAI_API_KEY") else os.getenv("NCSA_HOSTED_API_KEY")
+    self.embedding_model = os.getenv('EMBEDDING_MODEL') if os.getenv('EMBEDDING_MODEL') else 'text-embedding-ada-002'
+    self.openai_api_base = os.getenv('EMBEDDING_API_BASE') if os.getenv('EMBEDDING_API_BASE') else 'https://api.openai.com/v1'
 
-    self.embeddings = OpenAIEmbeddings(
-        model='text-embedding-ada-002',
-        openai_api_key=os.environ["VLADS_OPENAI_KEY"],
-        # openai_api_key=os.environ["AZURE_OPENAI_KEY"],
-        # openai_api_base=os.environ["AZURE_OPENAI_ENDPOINT"],
-        # openai_api_type=os.environ['OPENAI_API_TYPE'],
-        # openai_api_version=os.environ["OPENAI_API_VERSION"],
-    )
+    if self.embedding_model == 'text-embedding-ada-002':
+        self.embeddings = OpenAIEmbeddings(
+            model=self.embedding_model,
+            openai_api_key=self.openai_api_key,
+            openai_api_base=self.openai_api_base,
+        )
+    else:
+        self.embeddings = OpenAIEmbeddings(
+            model=self.embedding_model,
+            openai_api_key=self.openai_api_key,
+            openai_api_base=self.openai_api_base,
+            # tiktoken_model_name="cl100k_base",
+            tiktoken_enabled=False,
+            # openai_api_key=os.environ["AZURE_OPENAI_KEY"],
+            # openai_api_base=os.environ["AZURE_OPENAI_ENDPOINT"],
+            # openai_api_type=os.environ['OPENAI_API_TYPE'],
+            # openai_api_version=os.environ["OPENAI_API_VERSION"],
+        )
 
     self.nomic_embeddings = OllamaEmbeddings(base_url=os.environ['OLLAMA_SERVER_URL'], model='nomic-embed-text:v1.5')
+
+    # Allow override via env; fallback to sane default for Illinois Chat retrieval.
+    self.qwen_query_instruction = os.getenv('QWEN_QUERY_INSTRUCTION', DEFAULT_QWEN_QUERY_INSTRUCTION)
 
     # self.llm = AzureChatOpenAI(
     #     temperature=0,
@@ -121,13 +145,13 @@ class RetrievalService:
         tasks = [
             loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
             loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
-            loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client)
+            loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client, self.qwen_query_instruction)
         ]
 
       disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
 
-      disabled_doc_groups = [doc_group['name'] for doc_group in disabled_doc_groups_response.data]
-      public_doc_groups = [doc_group['doc_groups'] for doc_group in public_doc_groups_response.data]
+      disabled_doc_groups = [doc_group for doc_group in disabled_doc_groups_response["data"]]
+      public_doc_groups = public_doc_groups_response["data"]
 
       time_for_parallel_operations = time.monotonic() - start_time_overall
       start_time_vector_search = time.monotonic()
@@ -185,14 +209,14 @@ class RetrievalService:
   ):
     """Get all course materials based on course name.
     Args:
-        course_name (as uploaded on supabase)
+        course_name (as uploaded on database)
     Returns:
         list of dictionaries with distinct s3 path, readable_filename and course_name, url, base_url.
     """
 
     response = self.sqlDb.getAllMaterialsForCourse(course_name)
 
-    data = response.data
+    data = response["data"]
     unique_combinations = set()
     distinct_dicts = []
 
@@ -214,9 +238,10 @@ class RetrievalService:
 
     from ai_ta_backend.utils.email.send_transactional_email import send_email
 
-    client = OllamaClient(os.environ['OLLAMA_SERVER_URL'])
+    client = OllamaClient(os.environ['OLLAMA_SERVER_URL'], api_key=os.environ['NCSA_HOSTED_API_KEY'])
 
-    messages = self.sqlDb.getMessagesFromConvoID(conversation_id).data
+    response = self.sqlDb.getMessagesFromConvoID(conversation_id)
+    messages = response["data"] if isinstance(response, dict) else response.data
 
     llm_monitor_model = 'llama-guard3:8b'
 
@@ -271,7 +296,7 @@ class RetrievalService:
       # Assign tags to unsafe messages and send email when necessary
       if 'unsafe' in response_content.lower() and alert_categories:
         llm_monitor_tags["status"] = "unsafe"
-        llm_monitor_tags["triggered_categories"] = triggered_categories
+        llm_monitor_tags["triggered_categories"] = ", ".join(triggered_categories)
 
         # Prepare alert email only if there are non-excluded categories
         if alert_categories:
@@ -319,18 +344,13 @@ class RetrievalService:
         raise ValueError("S3_BUCKET_NAME environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
-      print(f"Deleting {identifier_value} from S3, Qdrant, and Supabase using {identifier_key}")
+      logging.info(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
 
       # Delete from S3
       if identifier_key == "s3_path":
         self.delete_from_s3(bucket_name, s3_path)
-
-      # Delete from Qdrant
       self.delete_from_qdrant(identifier_key, identifier_value, course_name)
-
-      # Delete from Nomic and Supabase
-      self.delete_from_nomic_and_supabase(course_name, identifier_key, identifier_value)
-
+      self.delete_from_nomic_and_database(course_name, identifier_key, identifier_value)
       return "Success"
 
     except Exception as e:
@@ -459,30 +479,30 @@ class RetrievalService:
     #   sentry_sdk.capture_exception(e)
     #   return err
 
-  def delete_from_nomic_and_supabase(self, course_name: str, identifier_key: str, identifier_value: str):
+  def delete_from_nomic_and_database(self, course_name: str, identifier_key: str, identifier_value: str):
     # try:
     #   print(f"Nomic delete. Course: {course_name} using {identifier_key}: {identifier_value}")
     #   response = self.sqlDb.getMaterialsForCourseAndKeyAndValue(course_name, identifier_key, identifier_value)
-    #   if not response.data:
+    #   if not response["data"]:
     #     raise Exception(f"No materials found for {course_name} using {identifier_key}: {identifier_value}")
-    #   data = response.data[0]  # single record fetched
+    #   data = response["data"][0]  # single record fetched
     #   nomic_ids_to_delete = [str(data['id']) + "_" + str(i) for i in range(1, len(data['contexts']) + 1)]
 
     # delete from Nomic
     # response = self.sqlDb.getProjectsMapForCourse(course_name)
-    # if not response.data:
+    # if not response["data"]:
     #   raise Exception(f"No document map found for this course: {course_name}")
-    # project_id = response.data[0]['doc_map_id']
+    # project_id = response["data"][0]['doc_map_id']
     # self.nomicService.delete_from_document_map(project_id, nomic_ids_to_delete)
     # except Exception as e:
     #   print(f"Nomic Error in deleting. {identifier_key}: {identifier_value}", e)
     #   self.sentry.capture_exception(e)
 
     try:
-      print(f"Supabase Delete. course: {course_name} using {identifier_key}: {identifier_value}")
+      print(f"Database Delete. course: {course_name} using {identifier_key}: {identifier_value}")
       response = self.sqlDb.deleteMaterialsForCourseAndKeyAndValue(course_name, identifier_key, identifier_value)
     except Exception as e:
-      print(f"Supabase Error in delete. {identifier_key}: {identifier_value}", e)
+      print(f"Database Error in delete. {identifier_key}: {identifier_value}", e)
       self.sentry.capture_exception(e)
 
   def vector_search(self,
@@ -572,9 +592,20 @@ class RetrievalService:
           f"Runtime for capture search succeeded event: {time_for_capture_search_succeeded_event:.2f} seconds")
     return found_docs
 
-  def _embed_query_and_measure_latency(self, search_query, embedding_client):
+  def _embed_query_and_measure_latency(self, search_query, embedding_client, query_instruction: str | None = None):
     openai_start_time = time.monotonic()
-    user_query_embedding = embedding_client.embed_query(search_query)
+    text_to_embed = search_query
+
+    # If using a Qwen embedding model via OpenAI-compatible API, prefix the instruction for queries only.
+    try:
+      model_name = getattr(embedding_client, 'model', self.embedding_model)
+    except Exception:
+      model_name = self.embedding_model
+
+    if query_instruction and isinstance(embedding_client, OpenAIEmbeddings) and 'qwen' in str(model_name).lower():
+      text_to_embed = f"Instruct: {query_instruction}\nQuery:{search_query}"
+
+    user_query_embedding = embedding_client.embed_query(text_to_embed)
     self.openai_embedding_latency = time.monotonic() - openai_start_time
     return user_query_embedding
 
@@ -696,10 +727,9 @@ class RetrievalService:
           'heatmap': defaultdict(lambda: defaultdict(int)),
       }
 
-      for record in conversations:
+      for created_at in conversations:
         try:
-          created_at = record['created_at']
-          parsed_date = parser.parse(created_at).astimezone(central_tz)
+          parsed_date = created_at.astimezone(central_tz)
 
           day = parsed_date.date()
           hour = parsed_date.hour
