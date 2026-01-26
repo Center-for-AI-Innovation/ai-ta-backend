@@ -32,3 +32,7 @@
 ## Developers
 
 * [Developer Quickstart](developers/developer-quickstart.md)
+
+## MIGRATION
+
+* [Migrate to Illinois Chat](migration/migrate-to-illinois-chat.md)
