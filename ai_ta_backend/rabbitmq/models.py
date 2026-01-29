@@ -57,6 +57,21 @@ class Document(Base):
         }
 
 
+class ScrapingMetadataRun(Base):
+    __tablename__ = 'scraping_metadata_run'
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    course_name = Column(Text)
+    url = Column(Text)
+    max_urls = Column(BigInteger)
+    scrape_strategy = Column(Text)
+
+
+class ScrapingMetadataDocument(Base):
+    __tablename__ = 'scraping_metadata_document'
+    run_id = Column(BigInteger, ForeignKey('scraping_metadata_run.id', ondelete='CASCADE'))
+    content = Column(Text)
+
+
 class DocumentDocGroup(Base):
     __tablename__ = 'documents_doc_groups'
     document_id = Column(BigInteger, primary_key=True)

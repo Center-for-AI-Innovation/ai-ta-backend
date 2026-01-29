@@ -160,6 +160,7 @@ class Ingest:
             self.initialize_resources()
 
             course_name: List[str] | str = inputs.get('course_name', '')
+            scrape_id: List[str] | str = inputs.get('scrape_id', '')
             s3_paths: List[str] | str = inputs.get('s3_paths', '')
             url: List[str] | str | None = inputs.get('url', None)
             base_url: List[str] | str | None = inputs.get('base_url', None)
@@ -173,16 +174,16 @@ class Ingest:
                 f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
             )
             success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                doc_groups, force_embeddings)
+                                                doc_groups, force_embeddings, scrape_id)
             for retry_num in range(1, 3):
                 if isinstance(success_fail_dict, str):  # TODO: What does this indicate?
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
+                                                        doc_groups,force_embeddings, scrape_id)
                     time.sleep(13 * retry_num)  # max is 65
                 elif success_fail_dict['failure_ingest']:
                     logging.error(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
+                                                        doc_groups, force_embeddings, scrape_id)
                     time.sleep(13 * retry_num)  # max is 65
                 else:
                     break
@@ -211,11 +212,11 @@ class Ingest:
             return json.dumps(success_fail_dict)
 
     def run_ingest(self, course_name, s3_paths, base_url, url, readable_filename, content, document_groups,
-                   force_embeddings=False):
+                   force_embeddings=False, scrape_id=''):
         """Routes ingest jobs based on the input data -> webscrape, url, readable_filename"""
         if content:
             return self.ingest_single_web_text(course_name, base_url, url, content, readable_filename,
-                                               groups=document_groups, force_embeddings=force_embeddings)
+                                               groups=document_groups, force_embeddings=force_embeddings, scrape_id=scrape_id)
         elif readable_filename == '':
             return self.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url,
                                     groups=document_groups, force_embeddings=force_embeddings)
@@ -724,7 +725,7 @@ class Ingest:
             return err
 
     def ingest_single_web_text(self, course_name: str, base_url: str, url: str, content: str, readable_filename: str,
-                               force_embeddings: bool, **kwargs) -> Dict[str, None | str | Dict[str, str]]:
+                               force_embeddings: bool, scrape_id: str, **kwargs) -> Dict[str, None | str | Dict[str, str]]:
         """Crawlee integration"""
         if self.posthog:
             self.posthog.capture('distinct_id_of_the_user', event='ingest_single_web_text_invoked',
@@ -756,6 +757,10 @@ class Ingest:
                                          'url': url,
                                          'title': readable_filename
                                      })
+            self.sql_session.insert_scraping_document({
+                "scrape_id": scrape_id,
+                "content": content
+            })
 
             success_or_failure['success_ingest'] = url
             return success_or_failure

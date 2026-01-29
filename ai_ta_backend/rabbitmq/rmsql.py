@@ -165,6 +165,16 @@ class SQLAlchemyIngestDB:
                 logging.error(f"Insertion failed: {e}")
                 return False  # Insertion failed
 
+    def insert_scraping_document(self, doc_payload: dict) -> bool:
+        with self.get_session() as session:
+            try:
+                insert_stmt = insert(models.ScrapingMetadataDocument).values(doc_payload)
+                session.execute(insert_stmt)
+                return True  # Insertion successful
+            except SQLAlchemyError as e:
+                logging.error(f"Insertion failed: {e}")
+                return False
+
     def add_document_to_group_url(self, contexts, groups):
         params = {
             "p_course_name": contexts[0].metadata.get('course_name'),
