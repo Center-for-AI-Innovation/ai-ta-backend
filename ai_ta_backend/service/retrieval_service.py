@@ -39,7 +39,7 @@ from qdrant_client.http import models
 # Docs are embedded without instruction during ingest; only queries get this prefix.
 DEFAULT_QWEN_QUERY_INSTRUCTION = (
     "Given a user search query, retrieve the most relevant passages from the Illinois Chat knowledge "
-    "base stored in Qdrant to answer the query accurately. Prioritize authoritative course materials, "
+    "base stored in the vector store to answer the query accurately. Prioritize authoritative course materials, "
     "syllabi, FAQs, official documentation, web pages, and other relevant sources. Ignore boilerplate/navigation text."
 )
 
@@ -334,7 +334,7 @@ class RetrievalService:
     return "Success"
 
   def delete_data(self, course_name: str, s3_path: str, source_url: str):
-    """Delete file from S3, Qdrant, and Supabase."""
+    """Delete file from S3, vector store (pgvector), and Supabase."""
     print(f"Deleting data for course {course_name}")
     # add delete from doc map logic here
     try:
@@ -344,7 +344,7 @@ class RetrievalService:
         raise ValueError("S3_BUCKET_NAME environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
-      logging.info(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
+      logging.info(f"Deleting {identifier_value} from S3, vector store, and Database using {identifier_key}")
 
       # Delete from S3
       if identifier_key == "s3_path":
@@ -370,13 +370,13 @@ class RetrievalService:
 
   def delete_from_qdrant(self, identifier_key: str, identifier_value: str, course_name: str):
     try:
-      print("Deleting from Qdrant")
+      print("Deleting from vector store (pgvector / Qdrant cropwizard)")
       if course_name == 'cropwizard-1.5':
         # delete from cw db
         response = self.vdb.delete_data_cropwizard(identifier_key, identifier_value)
       else:
         response = self.vdb.delete_data(os.environ['QDRANT_COLLECTION_NAME'], identifier_key, identifier_value)
-      print(f"Qdrant response: {response}")
+      print(f"Vector store response: {response}")
     except Exception as e:
       if "timed out" in str(e):
         # Timed out is fine. Still deletes.
@@ -1104,19 +1104,12 @@ class RetrievalService:
                 continue
         
         if documents:
-            # Store in Qdrant
-            from qdrant_client.http import models
-            
-            self.vdb.qdrant_client.upsert(
-                collection_name=os.environ.get('QDRANT_COLLECTION_NAME'),
-                points=[
-                    models.PointStruct(
-                        id=doc["id"],
-                        vector=doc["vector"],
-                        payload=doc["payload"]
-                    ) for doc in documents
-                ],
-                wait=True
+            # Store in pgvector (main collection)
+            self.vdb.upsert_main_collection(
+                ids=[doc["id"] for doc in documents],
+                vectors=[doc["vector"] for doc in documents],
+                payloads=[doc["payload"] for doc in documents],
+                wait=True,
             )
             
             return {

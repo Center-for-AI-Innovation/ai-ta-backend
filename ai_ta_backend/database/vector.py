@@ -4,29 +4,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from injector import inject
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores import Qdrant
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import FieldCondition, MatchAny, MatchValue
+
+from ai_ta_backend.database.vector_store import get_vector_store
 
 
 class VectorDatabase():
   """
   Contains all methods for building and using vector databases.
+  Main Illinois Chat collection uses pgvector. Vyriad and cropwizard use Qdrant.
   """
 
   @inject
   def __init__(self):
     """
-    Initialize AWS S3, Qdrant, and Supabase.
+    Initialize pgvector (main collection), Qdrant (Vyriad/cropwizard only), and Supabase.
     """
-    # vector DB
-    self.qdrant_client = QdrantClient(
-        url=os.environ['QDRANT_URL'],
-        api_key=os.environ['QDRANT_API_KEY'],
-        port=os.getenv('QDRANT_PORT') if os.getenv('QDRANT_PORT') else None,
-        timeout=20,  # default is 5 seconds. Getting timeout errors w/ document groups.
-    )
+    self.pgvector_store = get_vector_store()
 
     self.vyriad_qdrant_client = QdrantClient(url=os.environ['VYRIAD_QDRANT_URL'],
                                              port=int(os.environ['VYRIAD_QDRANT_PORT']),
@@ -43,27 +38,17 @@ class VectorDatabase():
       print(f"Error in cropwizard_qdrant_client: {e}")
       self.cropwizard_qdrant_client = None
 
-    # self.openai_api_key = os.getenv('OPENAI_API_KEY') if os.getenv('OPENAI_API_KEY') else os.getenv('NCSA_HOSTED_API_KEY')
-    # self.vectorstore = Qdrant(client=self.qdrant_client,
-    #                           collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-    #                           embeddings=OpenAIEmbeddings(openai_api_key=self.openai_api_key))
-
   def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                     disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
-    Search the vector database for a given query.
+    Search the vector database for a given query (pgvector).
     """
-    # Search the vector database
-    search_results = self.qdrant_client.search(
-        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-        query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
-        with_vectors=False,
+    query_filter = self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups)
+    return self.pgvector_store.search(
         query_vector=user_query_embedding,
-        limit=top_n,  # Return n closest points
-        # In a system with high disk latency, the re-scoring step may become a bottleneck: https://qdrant.tech/documentation/guides/quantization/
-        search_params=models.SearchParams(quantization=models.QuantizationSearchParams(rescore=False)))
-    # print(f"Search results: {search_results}")
-    return search_results
+        query_filter=query_filter,
+        limit=top_n,
+    )
 
   def cropwizard_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                                disabled_doc_groups: List[str], public_doc_groups: List[dict]):
@@ -452,18 +437,12 @@ class VectorDatabase():
 
   def delete_data(self, collection_name: str, key: str, value: str):
     """
-    Delete data from the vector database.
+    Delete data from the vector database. Main collection uses pgvector only.
     """
-    return self.qdrant_client.delete(
-        collection_name=collection_name,
-        wait=True,
-        points_selector=models.Filter(must=[
-            models.FieldCondition(
-                key=key,
-                match=models.MatchValue(value=value),
-            ),
-        ]),
-    )
+    if collection_name != os.environ.get('QDRANT_COLLECTION_NAME'):
+      raise ValueError(f"delete_data only supports main collection, got: {collection_name}")
+    self.pgvector_store.delete_by_filter(key, value)
+    return None
 
   def delete_data_cropwizard(self, key: str, value: str):
     """
@@ -523,21 +502,28 @@ class VectorDatabase():
     
     return models.Filter(must=combined_conditions, must_not=combined_must_not)
 
-  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str], 
-                                 user_query_embedding, top_n, disabled_doc_groups: List[str], 
+  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str],
+                                 user_query_embedding, top_n, disabled_doc_groups: List[str],
                                  public_doc_groups: List[dict], custom_filter: models.Filter):
     """
-    Search the vector database with a custom filter.
+    Search the vector database with a custom filter (pgvector).
     Used for conversation-specific document filtering.
     """
-    search_results = self.qdrant_client.search(
-        collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-        query_filter=custom_filter,
-        with_vectors=False,
+    return self.pgvector_store.search(
         query_vector=user_query_embedding,
+        query_filter=custom_filter,
         limit=top_n,
-        search_params=models.SearchParams(
-            quantization=models.QuantizationSearchParams(rescore=False)
-        )
     )
-    return search_results
+
+  def upsert_main_collection(self, ids: List[str], vectors: List[List[float]], payloads: List[dict], wait: bool = True):
+    """Upsert points into the main Illinois Chat collection (pgvector)."""
+    self.pgvector_store.upsert_batch(ids=ids, vectors=vectors, payloads=payloads, wait=wait)
+
+  def update_doc_groups_main(self, course_name: str, s3_path: str, url: str, doc_groups) -> bool:
+    """Update doc_groups for points matching course_name, s3_path, url (pgvector)."""
+    return self.pgvector_store.update_doc_groups(
+        course_name=course_name,
+        s3_path=s3_path or "",
+        url=url or None,
+        doc_groups=doc_groups,
+    )

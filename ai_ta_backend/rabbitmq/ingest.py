@@ -20,8 +20,6 @@ from botocore.config import Config
 import openai
 import sentry_sdk
 from posthog import Posthog
-from qdrant_client import QdrantClient, models
-from qdrant_client.models import PointStruct
 from langchain.document_loaders import (
       Docx2txtLoader,
       GitLoader,
@@ -36,8 +34,6 @@ from langchain.document_loaders.csv_loader import CSVLoader
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import Qdrant
-
 import fitz
 import pdfplumber
 import pytesseract
@@ -71,9 +67,6 @@ class Ingest:
         self.openai_api_base = os.getenv('EMBEDDING_API_BASE') + "/embeddings" if os.getenv('EMBEDDING_API_BASE') else 'https://api.openai.com/v1/embeddings'
         self.ncsa_hosted_api_key = self.openai_api_key if self.openai_api_key else os.getenv('NCSA_HOSTED_API_KEY')
         self.embedding_model = os.getenv('EMBEDDING_MODEL') if os.getenv('EMBEDDING_MODEL') else 'text-embedding-ada-002'
-        self.qdrant_url = os.getenv('QDRANT_URL')
-        self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
-        self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
         self.minio_url = os.getenv('MINIO_URL')
         self.aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
         self.aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -81,50 +74,20 @@ class Ingest:
         self.posthog_api_key = os.getenv('POSTHOG_API_KEY')
 
         self.posthog = None
-        self.qdrant_client = None
-        self.vectorstore = None
+        self.pgvector_store = None
         self.s3_client = None
         self.sql_session = None
 
-        # Qdrant ingestion tuning
-        # Batch size for upserts during ingestion per guidance from Qdrant team
-        self.qdrant_upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
-        # Temporarily raise indexing threshold during ingestion, then revert
-        self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
-        self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
-        
+        # Batch size for pgvector upserts during ingestion
+        self.upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
+
         # Embedding API retry configuration
         self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
     def initialize_resources(self):
-        # Initialize Qdrant client and create collection if necessary
-        if self.qdrant_api_key and self.qdrant_url:
-            self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
-            if not self.qdrant_client.get_collection(self.qdrant_collection_name):
-                logging.info(f"Creating collection {self.qdrant_collection_name}")
-                self.qdrant_client.create_collection(
-                    collection_name=self.qdrant_collection_name,
-                    vectors_config={"size": 4096, "distance": "Cosine"}
-                )
-
-            if self.embedding_model == 'text-embedding-ada-002':
-                self.vectorstore = Qdrant(
-                    client=self.qdrant_client,
-                    collection_name=self.qdrant_collection_name,
-                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
-                                                openai_api_base=self.openai_api_base, model=self.embedding_model)
-                )
-                print("Vectorstore initialized with text-embedding-ada-002")
-            else:
-                self.vectorstore = Qdrant(
-                    client=self.qdrant_client,
-                    collection_name=self.qdrant_collection_name,
-                    embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key, 
-                                                openai_api_base=self.openai_api_base, model=self.embedding_model, tiktoken_enabled=False)
-                )
-                print("Vectorstore initialized with NCSA_HOSTED model")
-        else:
-            logging.error("QDRANT API KEY OR URL NOT FOUND!")
+        from ai_ta_backend.database.vector_store import get_vector_store
+        self.pgvector_store = get_vector_store()
+        logging.info("Vector store: pgvector (embeddings table)")
 
         # Connect to AWS S3 file store
         if self.aws_access_key_id and self.aws_secret_access_key:
@@ -334,8 +297,8 @@ class Ingest:
 
     def split_and_upload(self, texts: List[str], metadatas: List[Dict[str, Any]], force_embeddings: bool, **kwargs):
         """
-        This is usually the last step of document ingest. Chunk & upload to Qdrant (and Supabase.. todo).
-        Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to Qdrant.
+        This is usually the last step of document ingest. Chunk & upload to pgvector (and Supabase).
+        Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to the vector store.
         """
         logging.info(f"Split and upload invoked with {len(texts)} texts and {len(metadatas)} metadatas")
         if self.posthog:
@@ -398,59 +361,29 @@ class Ingest:
                 item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
             }
 
-            # Batched upload to Qdrant with temporary indexing threshold adjustments
-            collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore
-            # Raise indexing threshold to postpone indexing during bulk upserts
-            try:
-                self.qdrant_client.update_collection(
-                    collection_name=collection_name,
-                    optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_ingest),
-                )
-            except Exception as e:
-                logging.warning("Could not raise Qdrant indexing threshold before ingestion: %s", e)
-
-            try:
-                batch: list[PointStruct] = []
-                for context in contexts:
-                    upload_metadata = {**context.metadata, "page_content": context.page_content}
-                    batch.append(
-                        PointStruct(
-                            id=str(uuid.uuid4()),
-                            vector=embeddings_dict[context.page_content],
-                            payload=upload_metadata,
-                        )
-                    )
-                    if len(batch) >= self.qdrant_upsert_batch_size:
-                        try:
-                            self.qdrant_client.upsert(
-                                collection_name=collection_name,
-                                points=batch,  # type: ignore
-                                wait=False,
-                            )
-                        except Exception as e:
-                            # Timeouts can be acceptable while server processes the request in background
-                            logging.warning("Batch upsert encountered an error (continuing): %s", e)
-                        finally:
-                            batch = []
-
-                if len(batch) > 0:
+            # Batched upload to pgvector
+            ids_batch, vectors_batch, payloads_batch = [], [], []
+            for context in contexts:
+                point_id = str(uuid.uuid4())
+                upload_metadata = {**context.metadata, "page_content": context.page_content}
+                ids_batch.append(point_id)
+                vectors_batch.append(embeddings_dict[context.page_content])
+                payloads_batch.append(upload_metadata)
+                if len(ids_batch) >= self.upsert_batch_size:
                     try:
-                        self.qdrant_client.upsert(
-                            collection_name=collection_name,
-                            points=batch,  # type: ignore
-                            wait=False,
+                        self.pgvector_store.upsert_batch(
+                            ids=ids_batch, vectors=vectors_batch, payloads=payloads_batch, wait=False
                         )
                     except Exception as e:
-                        logging.warning("Final batch upsert encountered an error (continuing): %s", e)
-            finally:
-                # Revert indexing threshold back to online value
+                        logging.warning("pgvector batch upsert error (continuing): %s", e)
+                    ids_batch, vectors_batch, payloads_batch = [], [], []
+            if ids_batch:
                 try:
-                    self.qdrant_client.update_collection(
-                        collection_name=collection_name,
-                        optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_online),
+                    self.pgvector_store.upsert_batch(
+                        ids=ids_batch, vectors=vectors_batch, payloads=payloads_batch, wait=True
                     )
                 except Exception as e:
-                    logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
+                    logging.warning("pgvector final batch upsert error: %s", e)
 
             # Supabase SQL insertion
             # contexts_for_supa = [{
@@ -591,8 +524,8 @@ class Ingest:
             return False
 
     def delete_data(self, course_name: str, s3_path: str, source_url: str):
-        """Delete file from S3, Qdrant, and SQL."""
-        logging.info(f"Deleting {s3_path} from S3, Qdrant, and SQL for course {course_name}")
+        """Delete file from S3, pgvector, and SQL."""
+        logging.info(f"Deleting {s3_path or source_url} from S3, pgvector, and SQL for course {course_name}")
         try:
             if s3_path:
                 try:
@@ -600,59 +533,29 @@ class Ingest:
                 except Exception as e:
                     print("Error in deleting file from s3:", e)
                     sentry_sdk.capture_exception(e)
-                # Delete from Qdrant
-                # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
                 try:
-                    self.qdrant_client.delete(
-                        collection_name=self.qdrant_collection_name,
-                        points_selector=models.Filter(must=[
-                            models.FieldCondition(
-                                key="s3_path",
-                                match=models.MatchValue(value=s3_path),
-                            ),
-                        ]),
-                    )
+                    self.pgvector_store.delete_by_filter("s3_path", s3_path)
                 except Exception as e:
-                    if "timed out" in str(e):
-                        # Timed out still deletes: https://github.com/qdrant/qdrant/issues/3654#issuecomment-1955074525
-                        pass
-                    else:
-                        print("Error in deleting file from Qdrant:", e)
-                        sentry_sdk.capture_exception(e)
-                        raise e
-
+                    print("Error in deleting file from pgvector:", e)
+                    sentry_sdk.capture_exception(e)
+                    raise e
                 try:
                     self.sql_session.delete_document_by_s3_path(course_name=course_name, s3_path=s3_path)
                 except Exception as e:
                     print("Error in deleting file from database:", e)
                     sentry_sdk.capture_exception(e)
-
-            # Delete files by their URL identifier
             elif source_url:
                 try:
-                    self.qdrant_client.delete(
-                        collection_name=self.qdrant_collection_name,
-                        points_selector=models.Filter(must=[
-                            models.FieldCondition(
-                                key="url",
-                                match=models.MatchValue(value=source_url),
-                            ),
-                        ]),
-                    )
+                    self.pgvector_store.delete_by_filter("url", source_url)
                 except Exception as e:
-                    if "timed out" in str(e):
-                        pass
-                    else:
-                        print("Error in deleting file from Qdrant:", e)
-                        sentry_sdk.capture_exception(e)
-                        raise e
-
+                    print("Error in deleting file from pgvector:", e)
+                    sentry_sdk.capture_exception(e)
+                    raise e
                 try:
                     self.sql_session.delete_document_by_url(course_name=course_name, url=source_url)
                 except Exception as e:
                     print("Error in deleting file from database:", e)
                     sentry_sdk.capture_exception(e)
-
             return "Success"
         except Exception as e:
             err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
@@ -660,66 +563,36 @@ class Ingest:
             return err
 
     def delete_vectors(self, course_name: str, s3_path: str, source_url: str):
-        """Delete vector data from Qdrant and SQL."""
-        logging.info(f"Deleting {s3_path} vectors from Qdrant and SQL for course {course_name}")
+        """Delete vector data from pgvector and SQL."""
+        logging.info(f"Deleting {s3_path or source_url} vectors from pgvector and SQL for course {course_name}")
         try:
             if s3_path:
-                # Delete from Qdrant
-                # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
                 try:
-                    self.qdrant_client.delete(
-                        collection_name=self.qdrant_collection_name,
-                        points_selector=models.Filter(must=[
-                            models.FieldCondition(
-                                key="s3_path",
-                                match=models.MatchValue(value=s3_path),
-                            ),
-                        ]),
-                    )
+                    self.pgvector_store.delete_by_filter("s3_path", s3_path)
                 except Exception as e:
-                    if "timed out" in str(e):
-                        # Timed out still deletes: https://github.com/qdrant/qdrant/issues/3654#issuecomment-1955074525
-                        pass
-                    else:
-                        print("Error in deleting file from Qdrant:", e)
-                        sentry_sdk.capture_exception(e)
-                        raise e
-
+                    print("Error in deleting file from pgvector:", e)
+                    sentry_sdk.capture_exception(e)
+                    raise e
                 try:
                     self.sql_session.delete_document_by_s3_path(course_name=course_name, s3_path=s3_path)
                 except Exception as e:
                     print("Error in deleting file from database:", e)
                     sentry_sdk.capture_exception(e)
-
-            # Delete files by their URL identifier
             elif source_url:
                 try:
-                    self.qdrant_client.delete(
-                        collection_name=self.qdrant_collection_name,
-                        points_selector=models.Filter(must=[
-                            models.FieldCondition(
-                                key="url",
-                                match=models.MatchValue(value=source_url),
-                            ),
-                        ]),
-                    )
+                    self.pgvector_store.delete_by_filter("url", source_url)
                 except Exception as e:
-                    if "timed out" in str(e):
-                        pass
-                    else:
-                        print("Error in deleting file from Qdrant:", e)
-                        sentry_sdk.capture_exception(e)
-                        raise e
-
+                    print("Error in deleting file from pgvector:", e)
+                    sentry_sdk.capture_exception(e)
+                    raise e
                 try:
                     self.sql_session.delete_document_by_url(course_name=course_name, url=source_url)
                 except Exception as e:
                     print("Error in deleting file from database:", e)
                     sentry_sdk.capture_exception(e)
-
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN delete_vectors: Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             sentry_sdk.capture_exception(e)
             return err
 

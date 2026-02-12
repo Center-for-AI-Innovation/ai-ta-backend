@@ -210,7 +210,7 @@ def getAll(service: RetrievalService) -> Response:
 @app.route('/delete', methods=['DELETE'])
 def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   """
-  Delete a single file from all our database: S3, Qdrant, and Supabase (for now).
+  Delete a single file from all our database: S3, vector store (pgvector), and Supabase (for now).
   Note, of course, we still have parts of that file in our logs.
   """
   course_name: str = request.args.get('course_name', default='', type=str)
@@ -234,6 +234,30 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   response = jsonify({"outcome": 'success'})
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
+
+
+@app.route('/update-doc-groups', methods=['POST'])
+def update_doc_groups(vdb: VectorDatabase) -> Response:
+  """
+  Update doc_groups in the vector store for points matching course_name, s3_path, url.
+  Used by frontend when adding documents to doc groups.
+  """
+  data = request.get_json(silent=True) or {}
+  course_name = data.get('courseName') or data.get('course_name') or ''
+  s3_path = data.get('s3_path') or ''
+  url = data.get('url') or ''
+  doc_groups = data.get('doc_groups')
+  if not course_name:
+    abort(400, description='courseName is required')
+  try:
+    ok = vdb.update_doc_groups_main(course_name=course_name, s3_path=s3_path, url=url, doc_groups=doc_groups)
+    response = jsonify({'status': 'completed' if ok else 'completed'})
+  except Exception as e:
+    logging.exception('update-doc-groups failed')
+    abort(500, description=str(e))
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
 
 @app.route('/process-chat-file', methods=['POST'])
 def process_chat_file_sync(service: RetrievalService):
