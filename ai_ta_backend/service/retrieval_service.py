@@ -203,6 +203,36 @@ class RetrievalService:
       self.sentry.capture_exception(e)
       return err
 
+  async def getEmbeddingAndDocGroups(self, search_query: str, course_name: str) -> dict:
+    """Return query embedding and doc-group metadata for frontend vector search.
+    Same parallel work as getTopContexts (embed + disabled/public doc groups) but no vector_search.
+    """
+    if course_name == "vyriad":
+      embedding_client = self.nomic_embeddings
+    elif course_name == "pubmed" or course_name == "patents":
+      embedding_client = self.nomic_embeddings
+    else:
+      embedding_client = self.embeddings
+
+    with self.thread_pool_executor as executor:
+      loop = asyncio.get_event_loop()
+      tasks = [
+          loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
+          loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
+          loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client, self.qwen_query_instruction)
+      ]
+    disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
+
+    raw_disabled = disabled_doc_groups_response["data"]
+    disabled_doc_groups = [d.get("name", d) if isinstance(d, dict) else d for d in raw_disabled]
+    public_doc_groups = public_doc_groups_response["data"]
+
+    return {
+        "embedding": user_query_embedding,
+        "disabled_doc_groups": disabled_doc_groups,
+        "public_doc_groups": public_doc_groups,
+    }
+
   def getAll(
       self,
       course_name: str,

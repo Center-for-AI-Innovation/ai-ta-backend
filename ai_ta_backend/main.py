@@ -159,6 +159,25 @@ def getTopContexts(service: RetrievalService) -> Response:
   return response
 
 
+@app.route('/embedAndMetadata', methods=['POST'])
+def embedAndMetadata(service: RetrievalService) -> Response:
+  """Return query embedding and doc-group metadata for frontend vector search.
+  POST body: { "search_query": str, "course_name": str }.
+  Response: { "embedding": number[], "disabled_doc_groups": string[], "public_doc_groups": list }.
+  """
+  data = request.get_json()
+  search_query: str = data.get('search_query', '')
+  course_name: str = data.get('course_name', '')
+
+  if search_query == '' or course_name == '':
+    abort(400, description="Missing required parameters: 'search_query' and 'course_name'")
+
+  result = asyncio.run(service.getEmbeddingAndDocGroups(search_query, course_name))
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
 @app.route('/llm-monitor-message', methods=['POST'])
 def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorInterface) -> Response:
   """
