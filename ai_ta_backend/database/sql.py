@@ -516,7 +516,8 @@ class SQLDatabase:
         )
         with Session(self.engine) as session:
             result = session.execute(query).mappings().all()
-            response = DatabaseResponse(data=result, count=len(result)).to_dict()
+            data = [dict(row) for row in result]
+            response = DatabaseResponse(data=data, count=len(result)).to_dict()
             return response
 
 
