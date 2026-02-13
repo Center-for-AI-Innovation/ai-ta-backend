@@ -38,18 +38,6 @@ class VectorDatabase():
       print(f"Error in cropwizard_qdrant_client: {e}")
       self.cropwizard_qdrant_client = None
 
-  def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                    disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-    """
-    Search the vector database for a given query (pgvector).
-    """
-    query_filter = self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups)
-    return self.pgvector_store.search(
-        query_vector=user_query_embedding,
-        query_filter=query_filter,
-        limit=top_n,
-    )
-
   def cropwizard_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
                                disabled_doc_groups: List[str], public_doc_groups: List[dict]):
     """
@@ -501,19 +489,6 @@ class VectorDatabase():
         combined_must_not.extend(conversation_filter.must_not)
     
     return models.Filter(must=combined_conditions, must_not=combined_must_not)
-
-  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str],
-                                 user_query_embedding, top_n, disabled_doc_groups: List[str],
-                                 public_doc_groups: List[dict], custom_filter: models.Filter):
-    """
-    Search the vector database with a custom filter (pgvector).
-    Used for conversation-specific document filtering.
-    """
-    return self.pgvector_store.search(
-        query_vector=user_query_embedding,
-        query_filter=custom_filter,
-        limit=top_n,
-    )
 
   def upsert_main_collection(self, ids: List[str], vectors: List[List[float]], payloads: List[dict], wait: bool = True):
     """Upsert points into the main Illinois Chat collection (pgvector)."""

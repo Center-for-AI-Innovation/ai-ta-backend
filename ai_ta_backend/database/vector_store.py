@@ -5,25 +5,7 @@ Main collection uses pgvector only (Qdrant removed).
 import json
 import os
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
-
-# Optional Qdrant types for filter conversion (only when using Qdrant filter objects)
-try:
-    from qdrant_client import models as qdrant_models
-    from qdrant_client.http import models as qdrant_http_models
-except ImportError:
-    qdrant_models = None
-    qdrant_http_models = None
-
-
-# Result type compatible with retrieval_service._process_search_results (expects .payload, .score)
-class SearchResult:
-    __slots__ = ("payload", "score")
-
-    def __init__(self, payload: Dict[str, Any], score: float):
-        self.payload = payload
-        self.score = score
-
+from typing import Any, Dict, List, Optional
 
 def _get_pg_connection_params() -> Dict[str, str]:
     return {
@@ -64,80 +46,6 @@ def _payload_to_row(payload: Dict[str, Any], vector: List[float], point_id: Opti
         "timestamp": payload.get("timestamp"),
         "conversation_id": payload.get("conversation_id"),
     }
-
-
-def _row_to_payload(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Build Qdrant-style payload dict from pgvector row for retrieval_service."""
-    payload = {
-        "page_content": row.get("page_content") or "",
-        "course_name": row.get("course_name"),
-        "s3_path": row.get("s3_path"),
-        "readable_filename": row.get("readable_filename"),
-        "url": row.get("url"),
-        "base_url": row.get("base_url"),
-        "doc_groups": row.get("doc_groups") if isinstance(row.get("doc_groups"), (list, str)) else (json.loads(row["doc_groups"]) if row.get("doc_groups") else []),
-        "chunk_index": row.get("chunk_index"),
-        "pagenumber": row.get("pagenumber"),
-        "timestamp": row.get("timestamp"),
-        "conversation_id": row.get("conversation_id"),
-    }
-    return {k: v for k, v in payload.items() if v is not None or k == "page_content"}
-
-
-def _one_condition_to_sql(cond: Any, params: List[Any]) -> str:
-    """Convert a single condition to SQL fragment; append any params to params list."""
-    if cond is None:
-        return "1=1"
-    if hasattr(cond, "key") and hasattr(cond, "match"):
-        key = cond.key
-        match = getattr(cond, "match", None)
-        if match is None:
-            return "1=1"
-        if hasattr(match, "value"):
-            params.append(match.value)
-            return f'"{key}" = %s'
-        if hasattr(match, "any"):
-            any_list = match.any if isinstance(match.any, list) else [match.any]
-            if key == "doc_groups":
-                params.append(json.dumps(any_list))
-                return f'"{key}" && %s::jsonb'
-            params.append(any_list)
-            return f'"{key}" = ANY(%s)'
-        return "1=1"
-    if hasattr(cond, "is_empty") and isinstance(cond.is_empty, dict):
-        key = cond.is_empty.get("key", "conversation_id")
-        return f'("{key}" IS NULL OR "{key}" = \'\')'
-    if hasattr(cond, "must") and cond.must:
-        inner = [_one_condition_to_sql(m, params) for m in cond.must]
-        return "(" + " AND ".join(inner) + ")"
-    return "1=1"
-
-
-def qdrant_filter_to_sql(filter_obj: Any) -> Tuple[str, List[Any]]:
-    """
-    Convert Qdrant models.Filter to (WHERE clause fragment, params list).
-    Handles must, should, must_not; FieldCondition (MatchValue, MatchAny), IsEmptyCondition.
-    """
-    if filter_obj is None:
-        return "1=1", []
-
-    params: List[Any] = []
-    parts = []
-
-    if getattr(filter_obj, "must", None):
-        must_parts = [_one_condition_to_sql(m, params) for m in filter_obj.must]
-        if must_parts:
-            parts.append("(" + " AND ".join(must_parts) + ")")
-    if getattr(filter_obj, "should", None):
-        should_parts = [_one_condition_to_sql(s, params) for s in filter_obj.should]
-        if should_parts:
-            parts.append("(" + " OR ".join(should_parts) + ")")
-    if getattr(filter_obj, "must_not", None):
-        for m in filter_obj.must_not:
-            parts.append("(NOT (" + _one_condition_to_sql(m, params) + "))")
-
-    where = " AND ".join(parts) if parts else "1=1"
-    return where, params
 
 
 class PgVectorStore:
@@ -209,54 +117,6 @@ class PgVectorStore:
         finally:
             conn.close()
 
-    def search(
-        self,
-        query_vector: List[float],
-        query_filter: Any,
-        limit: int,
-    ) -> List[SearchResult]:
-        """Cosine similarity search with filter. Returns list of SearchResult (payload, score)."""
-        where_sql, filter_params = qdrant_filter_to_sql(query_filter)
-        params = [str(query_vector), str(query_vector), limit] + filter_params
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT page_content, course_name, s3_path, readable_filename, url, base_url,
-                           doc_groups, chunk_index, pagenumber, "timestamp", conversation_id,
-                           (1 - (embedding <=> %s::vector)) AS score
-                    FROM {self.TABLE}
-                    WHERE {where_sql}
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    params,
-                )
-                rows = cur.fetchall()
-            conn.close()
-        except Exception:
-            conn.close()
-            raise
-
-        colnames = [
-            "page_content", "course_name", "s3_path", "readable_filename", "url", "base_url",
-            "doc_groups", "chunk_index", "pagenumber", "timestamp", "conversation_id", "score",
-        ]
-        results = []
-        for row in rows:
-            d = dict(zip(colnames, row))
-            score = float(d.pop("score", 0.0))
-            doc_groups = d.get("doc_groups")
-            if isinstance(doc_groups, str):
-                try:
-                    d["doc_groups"] = json.loads(doc_groups)
-                except Exception:
-                    d["doc_groups"] = []
-            payload = _row_to_payload(d)
-            results.append(SearchResult(payload=payload, score=score))
-        return results
-
     def update_doc_groups(
         self,
         course_name: str,
@@ -316,5 +176,4 @@ class PgVectorStore:
 
 
 def get_vector_store() -> PgVectorStore:
-    """Return pgvector store for main Illinois Chat collection (Qdrant removed)."""
     return PgVectorStore()
