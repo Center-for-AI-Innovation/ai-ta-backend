@@ -493,12 +493,3 @@ class VectorDatabase():
   def upsert_main_collection(self, ids: List[str], vectors: List[List[float]], payloads: List[dict], wait: bool = True):
     """Upsert points into the main Illinois Chat collection (pgvector)."""
     self.pgvector_store.upsert_batch(ids=ids, vectors=vectors, payloads=payloads, wait=wait)
-
-  def update_doc_groups_main(self, course_name: str, s3_path: str, url: str, doc_groups) -> bool:
-    """Update doc_groups for points matching course_name, s3_path, url (pgvector)."""
-    return self.pgvector_store.update_doc_groups(
-        course_name=course_name,
-        s3_path=s3_path or "",
-        url=url or None,
-        doc_groups=doc_groups,
-    )

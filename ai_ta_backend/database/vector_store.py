@@ -117,46 +117,6 @@ class PgVectorStore:
         finally:
             conn.close()
 
-    def update_doc_groups(
-        self,
-        course_name: str,
-        s3_path: str,
-        url: Optional[str],
-        doc_groups: Any,
-    ) -> bool:
-        """Update doc_groups for points matching course_name, s3_path, and optional url."""
-        if isinstance(doc_groups, list):
-            doc_groups_json = json.dumps(doc_groups)
-        else:
-            doc_groups_json = json.dumps([doc_groups] if doc_groups else [])
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                if url is not None and url != "":
-                    cur.execute(
-                        """
-                        UPDATE embeddings SET doc_groups = %s::jsonb, updated_at = CURRENT_TIMESTAMP
-                        WHERE course_name = %s AND s3_path = %s AND url = %s
-                        """,
-                        (doc_groups_json, course_name, s3_path, url),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        UPDATE embeddings SET doc_groups = %s::jsonb, updated_at = CURRENT_TIMESTAMP
-                        WHERE course_name = %s AND s3_path = %s AND (url IS NULL OR url = '')
-                        """,
-                        (doc_groups_json, course_name, s3_path),
-                    )
-                n = cur.rowcount
-            conn.commit()
-            conn.close()
-            return n is not None and n > 0
-        except Exception:
-            conn.rollback()
-            conn.close()
-            raise
-
     def delete_by_filter(self, key: str, value: str) -> int:
         """Delete rows where key = value. Returns number of deleted rows."""
         if key not in ("course_name", "s3_path", "url", "conversation_id", "readable_filename"):
