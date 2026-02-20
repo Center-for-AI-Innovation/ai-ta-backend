@@ -89,25 +89,6 @@ def health() -> Response:
   return response
 
 
-@app.route('/embedAndMetadata', methods=['POST'])
-def embedAndMetadata(service: RetrievalService) -> Response:
-  """Return query embedding and doc-group metadata for frontend vector search.
-  POST body: { "search_query": str, "course_name": str }.
-  Response: { "embedding": number[], "disabled_doc_groups": string[], "public_doc_groups": list }.
-  """
-  data = request.get_json()
-  search_query: str = data.get('search_query', '')
-  course_name: str = data.get('course_name', '')
-
-  if search_query == '' or course_name == '':
-    abort(400, description="Missing required parameters: 'search_query' and 'course_name'")
-
-  result = asyncio.run(service.getEmbeddingAndDocGroups(search_query, course_name))
-  response = jsonify(result)
-  response.headers.add('Access-Control-Allow-Origin', '*')
-  return response
-
-
 @app.route('/llm-monitor-message', methods=['POST'])
 def llm_monitor_message_main(service: RetrievalService, flaskExecutor: ExecutorInterface) -> Response:
   """
@@ -181,29 +162,6 @@ def delete(service: RetrievalService, flaskExecutor: ExecutorInterface):
   logging.debug(f"⏰ Runtime of FULL delete func: {(time.monotonic() - start_time):.2f} seconds")
   # we need instant return. Delets are "best effort" assume always successful... sigh :(
   response = jsonify({"outcome": 'success'})
-  response.headers.add('Access-Control-Allow-Origin', '*')
-  return response
-
-
-@app.route('/update-doc-groups', methods=['POST'])
-def update_doc_groups(vdb: VectorDatabase) -> Response:
-  """
-  Update doc_groups in the vector store for points matching course_name, s3_path, url.
-  Used by frontend when adding documents to doc groups.
-  """
-  data = request.get_json(silent=True) or {}
-  course_name = data.get('courseName') or data.get('course_name') or ''
-  s3_path = data.get('s3_path') or ''
-  url = data.get('url') or ''
-  doc_groups = data.get('doc_groups')
-  if not course_name:
-    abort(400, description='courseName is required')
-  try:
-    ok = vdb.update_doc_groups_main(course_name=course_name, s3_path=s3_path, url=url, doc_groups=doc_groups)
-    response = jsonify({'status': 'completed' if ok else 'completed'})
-  except Exception as e:
-    logging.exception('update-doc-groups failed')
-    abort(500, description=str(e))
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
