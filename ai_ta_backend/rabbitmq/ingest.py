@@ -85,7 +85,8 @@ class Ingest:
         self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
     def initialize_resources(self):
-        from ai_ta_backend.database.vector_store import get_vector_store
+        # Standalone worker: no ai_ta_backend; use local pgvector store in rabbitmq
+        from vector_store import get_vector_store
         self.pgvector_store = get_vector_store()
         logging.info("Vector store: pgvector (embeddings table)")
 
