@@ -3,7 +3,7 @@ import os
 from contextlib import contextmanager
 from typing import List, TypedDict, TypeVar, Generic
 
-from sqlalchemy import create_engine, NullPool, func, insert, delete, select, desc, literal, ARRAY
+from sqlalchemy import create_engine, NullPool, func, insert, delete, update, select, desc, literal, ARRAY, Subquery
 from sqlalchemy.orm import sessionmaker, Session, aliased
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
@@ -169,6 +169,24 @@ class SQLDatabase:
         return response
 
     def deleteMaterialsForCourseAndKeyAndValue(self, course_name: str, key: str, value: str):
+        target_doc_ids = models.Document.objects.filter(
+            getattr(models.Document, key) == value,
+            models.Document.course_name == course_name
+        ).only('id').all()
+
+        target_doc_group_ids = models.DocumentDocGroup.objects.filter(
+            course_name == course_name,
+            document_id__in = Subquery(target_doc_ids)
+        ).only('doc_group_id').all()
+
+        models.DocGroup.objects.filter(
+            course_name == course_name,
+            id__in = Subquery(target_doc_group_ids)
+        ).update(
+            doc_count = models.DocGroup.doc_count - 1
+        )
+        target_doc_group_ids.delete()
+
         delete_stmt = (
             delete(models.Document)
             .where(getattr(models.Document, key) == value)
