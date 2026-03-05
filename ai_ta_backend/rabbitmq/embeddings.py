@@ -134,6 +134,11 @@ class OpenAIAPIProcessor:
 
   async def process_api_requests_from_file(self):
     """Processes API requests in parallel, throttling to stay under rate limits."""
+    # Early exit when no requests (e.g. image OCR returned empty)
+    if not self.input_prompts_list:
+      logging.debug("No API requests to process. Returning.")
+      return
+
     # constants
     seconds_to_pause_after_rate_limit_error = 15
     # seconds_to_sleep_each_loop = 0.001  # 1 ms limits max throughput to 1,000 requests per second
@@ -258,8 +263,9 @@ class OpenAIAPIProcessor:
       logging.warning(
           f"{status_tracker.num_rate_limit_errors} rate limit errors received. Consider running at a lower rate.")
 
-    # asyncio wait for task_list
-    await asyncio.wait(task_list)
+    # asyncio wait for task_list (skip when empty - e.g. image OCR with no text)
+    if task_list:
+      await asyncio.wait(task_list)
 
     for task in task_list:
       openai_completion = task.result()

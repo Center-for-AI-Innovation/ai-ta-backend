@@ -174,19 +174,35 @@ class Ingest:
             )
             success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
                                                 doc_groups, force_embeddings)
+            # Skip retries for "no text" errors - retrying won't help
+            failure_error = (
+                success_fail_dict.get('failure_ingest', {}) or {}
+            )
+            if isinstance(failure_error, dict):
+                failure_error = failure_error.get('error', '')
+            else:
+                failure_error = str(failure_error)
+            is_no_text_error = 'No text detected in image' in str(failure_error)
+
             for retry_num in range(1, 3):
                 if isinstance(success_fail_dict, str):  # TODO: What does this indicate?
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
+                                                        doc_groups, force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
-                elif success_fail_dict['failure_ingest']:
+                elif success_fail_dict.get('failure_ingest') and not is_no_text_error:
                     logging.error(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
+                                                        doc_groups, force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
                 else:
                     break
             if success_fail_dict['failure_ingest']:
+                failure = success_fail_dict['failure_ingest']
+                error_msg = (
+                    failure.get('error', str(failure))
+                    if isinstance(failure, dict)
+                    else str(failure)
+                )
                 logging.error(f"INGEST FAILURE -- About to send to database. success_fail_dict: {success_fail_dict}")
                 self.sql_session.insert_failed_document({
                     "s3_path": str(s3_paths),
@@ -195,7 +211,7 @@ class Ingest:
                     "url": url,
                     "base_url": base_url,
                     "doc_groups": doc_groups,
-                    "error": str(success_fail_dict),
+                    "error": error_msg,
                 })
 
             # Remove from documents in progress
@@ -358,6 +374,11 @@ class Ingest:
             )
             contexts: List[Document] = text_splitter.create_documents(texts=texts, metadatas=metadatas)
             input_texts = [{'input': context.page_content, 'model': self.embedding_model} for context in contexts]
+
+            # Skip embedding/upload when no text chunks (e.g. image OCR returned empty)
+            if not input_texts:
+                logging.warning("No text chunks to embed (empty or whitespace-only content). Skipping upload.")
+                return "Success"
 
             # Check for duplicates (will also delete data if duplicate is found)
             is_duplicate = self.check_for_duplicates(input_texts, metadatas, force_embeddings)
@@ -1085,7 +1106,12 @@ class Ingest:
                 """
 
                 res_str = pytesseract.image_to_string(Image.open(tmpfile.name))
-                print("IMAGE PARSING RESULT:", res_str)
+                print("IMAGE PARSING RESULT:", res_str, flush=True)
+                # Reject image ingestion when OCR returns no text
+                if not (res_str and res_str.strip()):
+                    err_msg = "Images without extractable text cannot be ingested."
+                    logging.warning("Image OCR returned no text. Rejecting ingest.")
+                    return err_msg
                 documents = [Document(page_content=res_str)]
 
                 texts = [doc.page_content for doc in documents]
