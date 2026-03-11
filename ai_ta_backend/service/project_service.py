@@ -40,7 +40,7 @@ class ProjectService:
         self.sqlDb.insertProject(sql_row)
 
     def create_project(self, project_name: str, project_description: str | None, project_owner_email: str,
-                       is_private: bool = False) -> str:
+                       is_private: bool = False, allow_logged_in_users: bool = False) -> str:
         """
             This function takes in a project name and description and creates a project in the database.
             1. Generate metadata schema using project_name and project_description
@@ -66,6 +66,7 @@ class ProjectService:
                 "system_prompt": None,
                 "disabled_models": None,
                 "project_description": project_description if project_description else None,
+                "allow_logged_in_users": allow_logged_in_users if allow_logged_in_users else None,
             }
 
             # Set course_metadatas
