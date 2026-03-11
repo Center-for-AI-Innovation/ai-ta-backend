@@ -89,7 +89,7 @@ class Ingest:
         # Qdrant ingestion tuning
         # Batch size for upserts during ingestion per guidance from Qdrant team
         self.qdrant_upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
-        # Temporarily raise indexing threshold during ingestion, then revert
+        # Threshold values retained for reference; worker-side toggling is disabled.
         self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
         self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
         
@@ -398,16 +398,20 @@ class Ingest:
                 item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
             }
 
-            # Batched upload to Qdrant with temporary indexing threshold adjustments
+            # Batched upload to Qdrant. The temporary indexing_threshold toggles are
+            # intentionally disabled because multiple ingest workers can trigger
+            # excess temporary segment growth and disk usage until Qdrant restarts.
             collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore
-            # Raise indexing threshold to postpone indexing during bulk upserts
-            try:
-                self.qdrant_client.update_collection(
-                    collection_name=collection_name,
-                    optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_ingest),
-                )
-            except Exception as e:
-                logging.warning("Could not raise Qdrant indexing threshold before ingestion: %s", e)
+            # Raise indexing threshold to postpone indexing during bulk upserts.
+            # Disabled because concurrent workers can amplify temporary segment and
+            # disk growth until Qdrant is restarted.
+            # try:
+            #     self.qdrant_client.update_collection(
+            #         collection_name=collection_name,
+            #         optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_ingest),
+            #     )
+            # except Exception as e:
+            #     logging.warning("Could not raise Qdrant indexing threshold before ingestion: %s", e)
 
             try:
                 batch: list[PointStruct] = []
@@ -443,14 +447,17 @@ class Ingest:
                     except Exception as e:
                         logging.warning("Final batch upsert encountered an error (continuing): %s", e)
             finally:
-                # Revert indexing threshold back to online value
-                try:
-                    self.qdrant_client.update_collection(
-                        collection_name=collection_name,
-                        optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_online),
-                    )
-                except Exception as e:
-                    logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
+                # Revert indexing threshold back to online value.
+                # Disabled because concurrent workers can amplify temporary segment
+                # and disk growth until Qdrant is restarted.
+                # try:
+                #     self.qdrant_client.update_collection(
+                #         collection_name=collection_name,
+                #         optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_online),
+                #     )
+                # except Exception as e:
+                #     logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
+                pass
 
             # Supabase SQL insertion
             # contexts_for_supa = [{
