@@ -103,8 +103,10 @@ def evaluate(service: EvaluationService) -> Response:
   course_name = data.get("course_name")
   temperature = data.get("temperature")
   model_config = data.get("model_config")
+  doc_groups = data.get("doc_groups", ["All Documents"])
+  langchain_project = data.get("langchain_project")
 
-  result = service.evaluate(dataset, judge, course_name, temperature, model_config)
+  result = service.evaluate(dataset, judge, course_name, temperature, model_config, doc_groups, langchain_project)
   response = jsonify(result)
   response.headers.add("Access-Control-Allow-Origin", "*")
   return response
