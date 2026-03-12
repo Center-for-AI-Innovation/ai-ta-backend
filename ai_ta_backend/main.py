@@ -40,6 +40,8 @@ from ai_ta_backend.service.nomic_service import NomicService
 from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
+from ai_ta_backend.service.evaluation_service import EvaluationService
+from ai_ta_backend.service.sentry_service import SentryService
 from ai_ta_backend.service.workflow_service import WorkflowService
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
@@ -51,7 +53,7 @@ app = Flask(__name__)
 CORS(app)
 executor = Executor(app)
 # app.config['EXECUTOR_MAX_WORKERS'] = 5 nothing == picks defaults for me
-#app.config['SERVER_TIMEOUT'] = 1000  # seconds
+# app.config['SERVER_TIMEOUT'] = 1000  # seconds
 
 # load API keys from globally-availabe .env file
 load_dotenv()
@@ -68,7 +70,7 @@ def index() -> Response:
       JSON: _description_
   """
   response = jsonify(
-      {"hi there, this is a 404": "Welcome to UIUC.chat backend 🚅 Read the docs here: https://docs.uiuc.chat/ "})
+     {"hi there, this is a 404": "Welcome to UIUC.chat backend 🚅 Read the docs here: https://docs.uiuc.chat/ "})
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
@@ -86,6 +88,27 @@ def health() -> Response:
     "timestamp": time.time()
   })
   response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route("/evaluate", methods=["POST"])
+def evaluate(service: EvaluationService) -> Response:
+  """
+  Runs the evaluation service
+  """
+
+  data = request.get_json()
+  dataset = data.get("dataset", "")
+  judge = data.get("judge", ["gpt-4o-mini"])
+  course_name = data.get("course_name")
+  temperature = data.get("temperature")
+  model_config = data.get("model_config")
+  doc_groups = data.get("doc_groups", ["All Documents"])
+  langchain_project = data.get("langchain_project")
+
+  result = service.evaluate(dataset, judge, course_name, temperature, model_config, doc_groups, langchain_project)
+  response = jsonify(result)
+  response.headers.add("Access-Control-Allow-Origin", "*")
   return response
 
 
@@ -976,6 +999,7 @@ def configure(binder: Binder) -> None:
   binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
   binder.bind(PosthogService, to=PosthogService, scope=SingletonScope)
   # binder.bind(SentryService, to=SentryService, scope=SingletonScope)
+  binder.bind(EvaluationService, to=EvaluationService, scope=SingletonScope)
   binder.bind(NomicService, to=NomicService, scope=SingletonScope)
   binder.bind(ExportService, to=ExportService, scope=SingletonScope)
   binder.bind(WorkflowService, to=WorkflowService, scope=SingletonScope)

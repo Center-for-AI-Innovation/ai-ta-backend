@@ -140,13 +140,15 @@ class RetrievalService:
         embedding_client = self.embeddings
 
       # Create tasks for parallel execution
-      with self.thread_pool_executor as executor:
-        loop = asyncio.get_event_loop()
-        tasks = [
-            loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
-            loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
-            loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client, self.qwen_query_instruction)
-        ]
+      # Access the underlying executor directly to avoid the context manager
+      # calling shutdown(), which would permanently destroy the singleton executor.
+      executor = self.thread_pool_executor.executor
+      loop = asyncio.get_event_loop()
+      tasks = [
+          loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
+          loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
+          loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client, self.qwen_query_instruction)
+      ]
 
       disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
 
