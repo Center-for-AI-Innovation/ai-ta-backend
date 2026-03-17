@@ -316,6 +316,8 @@ class Ingest:
                 file_extension = Path(s3_path).suffix
                 with NamedTemporaryFile(suffix=file_extension) as tmpfile:
                     self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
+                    tmpfile.flush()
+                    tmpfile.seek(0)
                     mime_type = str(mimetypes.guess_type(tmpfile.name, strict=False)[0])
                     mime_category = mime_type.split('/')[0] if '/' in mime_type else mime_type
 
@@ -855,6 +857,8 @@ class Ingest:
             with NamedTemporaryFile() as tmpfile:
                 # download from S3 into vtt_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = TextLoader(tmpfile.name)
                 documents = loader.load()
                 texts = [doc.page_content for doc in documents]
@@ -930,7 +934,8 @@ class Ingest:
             with NamedTemporaryFile(suffix=file_ext) as video_tmpfile:
                 # download from S3 into an video tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=video_tmpfile)
-
+                video_tmpfile.flush()
+                video_tmpfile.seek(0)
                 # try with original file first
                 try:
                     mp4_version = AudioSegment.from_file(video_tmpfile.name, file_ext[1:])
@@ -1023,7 +1028,8 @@ class Ingest:
         try:
             with NamedTemporaryFile() as tmpfile:
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = Docx2txtLoader(tmpfile.name)
                 documents = loader.load()
 
@@ -1089,7 +1095,8 @@ class Ingest:
             with NamedTemporaryFile() as tmpfile:
                 # download from S3 into pdf_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = UnstructuredExcelLoader(tmpfile.name, mode="elements")
                 # loader = SRTLoader(tmpfile.name)
                 documents = loader.load()
@@ -1121,6 +1128,8 @@ class Ingest:
             with NamedTemporaryFile(suffix="."+readable_filename.split(".")[-1]) as tmpfile:
                 # download from S3 into pdf_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
+                tmpfile.flush()
+                tmpfile.seek(0)
                 """
                 # Unstructured image loader makes the install too large (700MB --> 6GB. 3min -> 12 min build times). AND nobody uses it.
                 # The "hi_res" strategy will identify the layout of the document using detectron2. "ocr_only" uses pdfminer.six. https://unstructured-io.github.io/unstructured/core/partition.html#partition-image
@@ -1204,6 +1213,8 @@ class Ingest:
             with NamedTemporaryFile() as pdf_tmpfile:
                 # download from S3 into pdf_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=pdf_tmpfile)
+                pdf_tmpfile.flush()
+                pdf_tmpfile.seek(0)
                 ### READ OCR of PDF
                 try:
                     doc = fitz.open(pdf_tmpfile.name)  # type: ignore
@@ -1370,7 +1381,8 @@ class Ingest:
                 # download from S3 into pdf_tmpfile
                 # print("in ingest PPTX")
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = UnstructuredPowerPointLoader(tmpfile.name)
                 documents = loader.load()
 
