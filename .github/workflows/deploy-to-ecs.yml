@@ -2,7 +2,7 @@ name: Redeploy to AWS ECS Fargate
 
 on:
   push:
-    branches: [ illinois-chat ]
+    branches: [ illinois-chat, main ]
     paths:
       - 'ai_ta_backend/**'
       - 'requirements.txt'
