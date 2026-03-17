@@ -6,7 +6,7 @@ import uuid
 import zipfile
 
 import pandas as pd
-import requests
+import redis
 from injector import inject
 
 from ai_ta_backend.database.aws import AWSStorage
@@ -89,7 +89,7 @@ class ExportService:
 
         curr_doc_count = 0
         # create a temporary directory
-        temp_dir = tempfile.mkdtemp(prefix="export_")
+        temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
         filename = course_name + '_' + str(uuid.uuid4()) + '_documents.jsonl'
         file_path = os.path.join(temp_dir, filename)
@@ -160,7 +160,7 @@ class ExportService:
       last_id = response["data"][-1]['id']
       total_count = count
 
-      temp_dir = tempfile.mkdtemp(prefix="export_")
+      temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
       filename = course_name[0:10] + '-convos.jsonl'
       file_path = os.path.join(temp_dir, filename)
@@ -231,7 +231,7 @@ class ExportService:
       last_id = response["data"][-1]['id']
       total_count = count
 
-      temp_dir = tempfile.mkdtemp(prefix="export_")
+      temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
       filename = course_name[0:10] + '-convos.jsonl'
       file_path = os.path.join(temp_dir, filename)
@@ -538,13 +538,15 @@ def export_data_in_bg_extended(response, download_type, course_name, s3_path):
     os.remove(zip_file_path)
     s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
 
-    # Fetch course metadata to get admin emails
-    headers = {"Authorization": f"Bearer {os.environ['VERCEL_READ_ONLY_API_KEY']}", "Content-Type": "application/json"}
-    hget_url = str(os.environ['VERCEL_BASE_URL']) + "course_metadatas/" + course_name
-    response = requests.get(hget_url, headers=headers)
-    course_metadata = response.json()
-    course_metadata = json.loads(course_metadata['result'])
-    admin_emails = course_metadata['course_admins']
+    # get admin email IDs from Redis
+    print("Connecting to Redis... with url: ", os.environ['REDIS_URL'])
+    redis_client = redis.Redis.from_url(os.environ['REDIS_URL'], db=0)
+    course_metadata_json = redis_client.hget('course_metadatas', key=course_name)
+    if not course_metadata_json:
+      raise ValueError(f"No course metadata found in Redis for project '{course_name}'")
+    course_metadata = json.loads(course_metadata_json)
+    admin_emails = course_metadata.get('course_admins', [])
+
     bcc_emails = []
 
     # Handle specific email cases
@@ -584,7 +586,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
 		response (dict): The response from the Supabase query.
 		download_type (str): The type of download - 'documents' or 'conversations'.
 		course_name (str): The name of the course.
-	  s3_path (str): The S3 path where the file will be uploaded.
+	    s3_path (str): The S3 path where the file will be uploaded.
 	"""
   s3 = AWSStorage()
   sql = SQLDatabase()
@@ -595,7 +597,7 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
   print("pre-defined s3_path: ", s3_path)
 
   curr_doc_count = 0
-  temp_dir = tempfile.mkdtemp(prefix="export_")
+  temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
   file_path = os.path.join(temp_dir, filename)
@@ -641,17 +643,18 @@ def export_data_in_bg(response, download_type, course_name, s3_path):
     # generate presigned URL
     s3_url = s3.generatePresignedUrl('get_object', os.environ['S3_BUCKET_NAME'], s3_path, 172800)
 
-    # get admin email IDs
-    headers = {"Authorization": f"Bearer {os.environ['VERCEL_READ_ONLY_API_KEY']}", "Content-Type": "application/json"}
+    # get admin email IDs from Redis
+    print("Connecting to Redis... with url: ", os.environ['REDIS_URL'])
+    redis_client = redis.Redis.from_url(os.environ['REDIS_URL'], db=0)
+    course_metadata_json = redis_client.hget('course_metadatas', key=course_name)
+    if not course_metadata_json:
+      raise ValueError(f"No course metadata found in Redis for project '{course_name}'")
+    course_metadata = json.loads(course_metadata_json)
+    admin_emails = course_metadata.get('course_admins', [])
 
-    hget_url = str(os.environ['VERCEL_BASE_URL']) + "course_metadatas/" + course_name
-    response = requests.get(hget_url, headers=headers)
-    course_metadata = response.json()
-    course_metadata = json.loads(course_metadata['result'])
-    admin_emails = course_metadata['course_admins']
     bcc_emails = []
 
-    # check for Kastan's email and move to bcc
+    # check for dev's email and move to bcc
     if 'rohan13@illinois.edu' in admin_emails:
       admin_emails.remove('rohan13@illinois.edu')
       bcc_emails.append('rohan13@illinois.edu')
@@ -707,7 +710,7 @@ def export_data_in_bg_emails(response, download_type, course_name, s3_path, emai
 
   curr_doc_count = 0
 
-  temp_dir = tempfile.mkdtemp(prefix="export_")
+  temp_dir = tempfile.mkdtemp(prefix="export_", dir=tempfile.gettempdir())
 
   filename = s3_path.split('/')[-1].split('.')[0] + '.jsonl'
   file_path = os.path.join(temp_dir, filename)
