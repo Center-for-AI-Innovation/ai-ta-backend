@@ -354,6 +354,10 @@ class Ingest:
         Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to Qdrant.
         """
         logging.info(f"Split and upload invoked with {len(texts)} texts and {len(metadatas)} metadatas")
+        if not texts or not metadatas:
+            logging.warning("No texts or metadatas to process (e.g. empty CSV or no document content). Skipping upload.")
+            return "Success"
+        assert len(texts) == len(metadatas), f'Text ({len(texts)}) and metadata ({len(metadatas)}) must be equal.'
         if self.posthog:
             self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_invoked',
                                  properties={
@@ -363,7 +367,6 @@ class Ingest:
                                      'url': metadatas[0].get('url', None),
                                      'base_url': metadatas[0].get('base_url', None),
                                  })
-        assert len(texts) == len(metadatas), f'Text ({len(texts)}) and metadata ({len(metadatas)}) must be equal.'
 
         try:
             # try to split on paragraphs... fallback to sentences, then chars, ensure we always fit in context window
@@ -1136,10 +1139,11 @@ class Ingest:
 
     def _ingest_single_csv(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
-            with NamedTemporaryFile() as tmpfile:
-                # download from S3 into pdf_tmpfile
+            with NamedTemporaryFile(suffix='.csv') as tmpfile:
+                # download from S3 into tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = CSVLoader(file_path=tmpfile.name)
                 documents = loader.load()
 
@@ -1154,6 +1158,10 @@ class Ingest:
                     'url': kwargs.get('url', ''),
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
+
+                if not documents:
+                    logging.warning(f"CSV at s3://{self.s3_bucket_name}/{s3_path} produced no documents (empty or header-only). Skipping upload.")
+                    return "Success"
 
                 self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
