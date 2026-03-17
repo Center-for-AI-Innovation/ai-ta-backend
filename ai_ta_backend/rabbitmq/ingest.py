@@ -55,6 +55,26 @@ except ModuleNotFoundError:
     from embeddings import OpenAIAPIProcessor
 
 load_dotenv()
+
+# Ensure NLTK data is available so unstructured (Excel, PPTX, etc.) does not try to download from its URL (403 in many environments)
+def _ensure_nltk_data():
+    try:
+        import nltk
+        nltk_data = os.environ.get("NLTK_DATA")
+        if nltk_data and os.path.isdir(nltk_data):
+            nltk.data.path.insert(0, nltk_data)
+        for package in ("punkt_tab", "averaged_perceptron_tagger_eng"):
+            try:
+                resource = "tokenizers/punkt_tab" if package == "punkt_tab" else f"taggers/{package}"
+                nltk.data.find(resource)
+            except LookupError:
+                nltk.download(package, quiet=True)
+    except Exception as e:
+        logging.warning("Could not ensure NLTK data for unstructured: %s", e)
+
+
+_ensure_nltk_data()
+
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger('pika').setLevel(logging.WARNING)
 logging.getLogger('boto3').setLevel(logging.WARNING)
