@@ -21,6 +21,11 @@ WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download NLTK data so unstructured (Excel, PPTX, etc.) does not fetch at runtime (avoids 403)
+ENV NLTK_DATA=/usr/share/nltk_data
+RUN mkdir -p $NLTK_DATA && chmod -R 755 $NLTK_DATA \
+    && python -m nltk.downloader -d $NLTK_DATA punkt_tab averaged_perceptron_tagger_eng
+
 EXPOSE 8001
 
 CMD ["python", "worker.py"]

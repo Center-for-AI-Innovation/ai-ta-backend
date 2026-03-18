@@ -55,6 +55,26 @@ except ModuleNotFoundError:
     from embeddings import OpenAIAPIProcessor
 
 load_dotenv()
+
+# Ensure NLTK data is available so unstructured (Excel, PPTX, etc.) does not try to download from its URL (403 in many environments)
+def _ensure_nltk_data():
+    try:
+        import nltk
+        nltk_data = os.environ.get("NLTK_DATA")
+        if nltk_data and os.path.isdir(nltk_data):
+            nltk.data.path.insert(0, nltk_data)
+        for package in ("punkt_tab", "averaged_perceptron_tagger_eng"):
+            try:
+                resource = "tokenizers/punkt_tab" if package == "punkt_tab" else f"taggers/{package}"
+                nltk.data.find(resource)
+            except LookupError:
+                nltk.download(package, quiet=True)
+    except Exception as e:
+        logging.warning("Could not ensure NLTK data for unstructured: %s", e)
+
+
+_ensure_nltk_data()
+
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger('pika').setLevel(logging.WARNING)
 logging.getLogger('boto3').setLevel(logging.WARNING)
@@ -174,19 +194,35 @@ class Ingest:
             )
             success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
                                                 doc_groups, force_embeddings)
+            # Skip retries for "no text" errors - retrying won't help
+            failure_error = (
+                success_fail_dict.get('failure_ingest', {}) or {}
+            )
+            if isinstance(failure_error, dict):
+                failure_error = failure_error.get('error', '')
+            else:
+                failure_error = str(failure_error)
+            is_no_text_error = 'No text detected in image' in str(failure_error)
+
             for retry_num in range(1, 3):
                 if isinstance(success_fail_dict, str):  # TODO: What does this indicate?
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
+                                                        doc_groups, force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
-                elif success_fail_dict['failure_ingest']:
+                elif success_fail_dict.get('failure_ingest') and not is_no_text_error:
                     logging.error(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
                     success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
+                                                        doc_groups, force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
                 else:
                     break
             if success_fail_dict['failure_ingest']:
+                failure = success_fail_dict['failure_ingest']
+                error_msg = (
+                    failure.get('error', str(failure))
+                    if isinstance(failure, dict)
+                    else str(failure)
+                )
                 logging.error(f"INGEST FAILURE -- About to send to database. success_fail_dict: {success_fail_dict}")
                 self.sql_session.insert_failed_document({
                     "s3_path": str(s3_paths),
@@ -195,7 +231,7 @@ class Ingest:
                     "url": url,
                     "base_url": base_url,
                     "doc_groups": doc_groups,
-                    "error": str(success_fail_dict),
+                    "error": error_msg,
                 })
 
             # Remove from documents in progress
@@ -280,6 +316,8 @@ class Ingest:
                 file_extension = Path(s3_path).suffix
                 with NamedTemporaryFile(suffix=file_extension) as tmpfile:
                     self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
+                    tmpfile.flush()
+                    tmpfile.seek(0)
                     mime_type = str(mimetypes.guess_type(tmpfile.name, strict=False)[0])
                     mime_category = mime_type.split('/')[0] if '/' in mime_type else mime_type
 
@@ -338,6 +376,10 @@ class Ingest:
         Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to Qdrant.
         """
         logging.info(f"Split and upload invoked with {len(texts)} texts and {len(metadatas)} metadatas")
+        if not texts or not metadatas:
+            logging.warning("No texts or metadatas to process (e.g. empty CSV or no document content). Skipping upload.")
+            return "Success"
+        assert len(texts) == len(metadatas), f'Text ({len(texts)}) and metadata ({len(metadatas)}) must be equal.'
         if self.posthog:
             self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_invoked',
                                  properties={
@@ -347,7 +389,6 @@ class Ingest:
                                      'url': metadatas[0].get('url', None),
                                      'base_url': metadatas[0].get('base_url', None),
                                  })
-        assert len(texts) == len(metadatas), f'Text ({len(texts)}) and metadata ({len(metadatas)}) must be equal.'
 
         try:
             # try to split on paragraphs... fallback to sentences, then chars, ensure we always fit in context window
@@ -358,6 +399,11 @@ class Ingest:
             )
             contexts: List[Document] = text_splitter.create_documents(texts=texts, metadatas=metadatas)
             input_texts = [{'input': context.page_content, 'model': self.embedding_model} for context in contexts]
+
+            # Skip embedding/upload when no text chunks (e.g. image OCR returned empty)
+            if not input_texts:
+                logging.warning("No text chunks to embed (empty or whitespace-only content). Skipping upload.")
+                return "Success"
 
             # Check for duplicates (will also delete data if duplicate is found)
             is_duplicate = self.check_for_duplicates(input_texts, metadatas, force_embeddings)
@@ -818,6 +864,8 @@ class Ingest:
             with NamedTemporaryFile() as tmpfile:
                 # download from S3 into vtt_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = TextLoader(tmpfile.name)
                 documents = loader.load()
                 texts = [doc.page_content for doc in documents]
@@ -893,7 +941,8 @@ class Ingest:
             with NamedTemporaryFile(suffix=file_ext) as video_tmpfile:
                 # download from S3 into an video tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=video_tmpfile)
-
+                video_tmpfile.flush()
+                video_tmpfile.seek(0)
                 # try with original file first
                 try:
                     mp4_version = AudioSegment.from_file(video_tmpfile.name, file_ext[1:])
@@ -986,7 +1035,8 @@ class Ingest:
         try:
             with NamedTemporaryFile() as tmpfile:
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = Docx2txtLoader(tmpfile.name)
                 documents = loader.load()
 
@@ -1052,7 +1102,8 @@ class Ingest:
             with NamedTemporaryFile() as tmpfile:
                 # download from S3 into pdf_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = UnstructuredExcelLoader(tmpfile.name, mode="elements")
                 # loader = SRTLoader(tmpfile.name)
                 documents = loader.load()
@@ -1084,6 +1135,8 @@ class Ingest:
             with NamedTemporaryFile(suffix="."+readable_filename.split(".")[-1]) as tmpfile:
                 # download from S3 into pdf_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
+                tmpfile.flush()
+                tmpfile.seek(0)
                 """
                 # Unstructured image loader makes the install too large (700MB --> 6GB. 3min -> 12 min build times). AND nobody uses it.
                 # The "hi_res" strategy will identify the layout of the document using detectron2. "ocr_only" uses pdfminer.six. https://unstructured-io.github.io/unstructured/core/partition.html#partition-image
@@ -1092,7 +1145,12 @@ class Ingest:
                 """
 
                 res_str = pytesseract.image_to_string(Image.open(tmpfile.name))
-                print("IMAGE PARSING RESULT:", res_str)
+                print("IMAGE PARSING RESULT:", res_str, flush=True)
+                # Reject image ingestion when OCR returns no text
+                if not (res_str and res_str.strip()):
+                    err_msg = "Images without extractable text cannot be ingested."
+                    logging.warning("Image OCR returned no text. Rejecting ingest.")
+                    return err_msg
                 documents = [Document(page_content=res_str)]
 
                 texts = [doc.page_content for doc in documents]
@@ -1117,10 +1175,11 @@ class Ingest:
 
     def _ingest_single_csv(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
-            with NamedTemporaryFile() as tmpfile:
-                # download from S3 into pdf_tmpfile
+            with NamedTemporaryFile(suffix='.csv') as tmpfile:
+                # download from S3 into tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = CSVLoader(file_path=tmpfile.name)
                 documents = loader.load()
 
@@ -1135,6 +1194,10 @@ class Ingest:
                     'url': kwargs.get('url', ''),
                     'base_url': kwargs.get('base_url', ''),
                 } for doc in documents]
+
+                if not documents:
+                    logging.warning(f"CSV at s3://{self.s3_bucket_name}/{s3_path} produced no documents (empty or header-only). Skipping upload.")
+                    return "Success"
 
                 self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 return "Success"
@@ -1157,6 +1220,8 @@ class Ingest:
             with NamedTemporaryFile() as pdf_tmpfile:
                 # download from S3 into pdf_tmpfile
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=pdf_tmpfile)
+                pdf_tmpfile.flush()
+                pdf_tmpfile.seek(0)
                 ### READ OCR of PDF
                 try:
                     doc = fitz.open(pdf_tmpfile.name)  # type: ignore
@@ -1323,7 +1388,8 @@ class Ingest:
                 # download from S3 into pdf_tmpfile
                 # print("in ingest PPTX")
                 self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=tmpfile)
-
+                tmpfile.flush()
+                tmpfile.seek(0)
                 loader = UnstructuredPowerPointLoader(tmpfile.name)
                 documents = loader.load()
 
