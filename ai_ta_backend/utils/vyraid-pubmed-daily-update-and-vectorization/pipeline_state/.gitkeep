@@ -1,0 +1,2 @@
+# This directory holds runtime pipeline state files.
+# The directory is tracked in git but its contents are excluded (.gitignore).

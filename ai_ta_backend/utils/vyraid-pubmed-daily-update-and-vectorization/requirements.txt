@@ -1,0 +1,10 @@
+lxml>=5.2.2
+requests>=2.32.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.1
+minio>=7.2.7
+tqdm>=4.66.4
+tenacity>=9.0.0
+qdrant-client>=1.15.1
+pymupdf>=1.26.4
+langchain
