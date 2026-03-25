@@ -264,9 +264,9 @@ class Ingest:
         """Bulk ingest a list of s3 paths into the vectorstore, and also into the database."""
         print(f"Top of bulk_ingest: ", kwargs)
 
-        def _ingest_single(ingest_method: Callable, s3_path: str, force_embeddings: bool, *args, **kwargs):
+        def _ingest_single(ingest_method: Callable, s3_path: str, course_name: str, force_embeddings: bool, *args, **kwargs):
             """Handle running an arbitrary ingest function for an individual file."""
-            ret = ingest_method(s3_path, force_embeddings, *args, **kwargs)
+            ret = ingest_method(s3_path, course_name, force_embeddings, *args, **kwargs)
             if ret == "Success":
                 success_status['success_ingest'] = str(s3_path)
             else:
