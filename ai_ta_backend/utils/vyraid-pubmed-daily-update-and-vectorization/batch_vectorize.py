@@ -187,11 +187,26 @@ class VectorizeDB:
         self.config = config
         self.conn = psycopg2.connect(config.db_dsn)
         log.info("Connected to PostgreSQL")
+        self._ensure_batch_vectorize_log_entry()
     
     def close(self):
         if self.conn:
             self.conn.close()
-    
+
+    def _ensure_batch_vectorize_log_entry(self):
+        """Ensure a sentinel row exists in xml_processing_log for batch_vectorize failures."""
+        query = f"""
+        INSERT INTO {self.config.db_schema}.xml_processing_log (xml_filename, processed_all_pmcid)
+        VALUES ('batch_vectorize', false)
+        ON CONFLICT (xml_filename) DO NOTHING
+        """
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(query)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
     def get_non_vectorized_articles(self, batch_size: int, offset: int = 0) -> List[dict]:
         """Fetch articles with PDF but no vectorization."""
         query = f"""
@@ -199,6 +214,7 @@ class VectorizeDB:
         FROM {self.config.db_schema}.articles
         WHERE pdf_location IS NOT NULL
           AND COALESCE(vector_indexed, false) = false
+          AND pdf_location NOT LIKE '%%.pdf.gz'
         ORDER BY pmid DESC
         LIMIT %s OFFSET %s
         """
@@ -224,6 +240,11 @@ class VectorizeDB:
     
     def record_vectorization_failure(self, pmid: int, reason: str):
         """Record vectorization failure."""
+        # Reset any aborted transaction before attempting the insert
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
         query = f"""
         INSERT INTO {self.config.db_schema}.xml_failed_downloads
         (failed_pmcid, xml_filename, failure_reason, failure_timestamp)
@@ -351,18 +372,33 @@ def get_embedding(embedding_base_url: str, text: str, config: BatchVectorizeConf
 class OptimizedQdrant:
     def __init__(self, config: BatchVectorizeConfig):
         self.config = config
-        # For local Qdrant, api_key may not be needed (or will be taken from config)
+        # Parse the URL manually to extract host/port/https — QdrantClient does not
+        # infer port 443 from an https:// URL; it defaults to gRPC port 6333.
+        # This mirrors the approach used in main.py's QdrantHelper.
+        raw_url = config.qdrant_url.rstrip("/")
+        if raw_url.startswith("http://") or raw_url.startswith("https://"):
+            from urllib.parse import urlparse as _up
+            u = _up(raw_url)
+            host = u.hostname or "localhost"
+            use_https = (u.scheme == "https")
+            port = u.port or (443 if use_https else 6333)
+        else:
+            host = raw_url or "localhost"
+            use_https = (config.qdrant_port == 443)
+            port = config.qdrant_port or 6333
+
         client_kwargs = {
-            "url": config.qdrant_url,
-            "port": config.qdrant_port,
-            "timeout": 20,
+            "host": host,
+            "port": port,
+            "https": use_https,
+            "timeout": 60,
+            "check_compatibility": False,
         }
-        # Only add API key if provided (for remote Qdrant)
         if config.qdrant_api_key:
             client_kwargs["api_key"] = config.qdrant_api_key
-        
+
         self.client = QdrantClient(**client_kwargs)
-        log.info(f"Qdrant client initialized: {config.qdrant_url}:{config.qdrant_port}")
+        log.info(f"Qdrant client initialized: {raw_url} → {host}:{port} https={use_https}")
     
     def set_bulk_mode(self, enable: bool = True):
         """Set indexing threshold for bulk ingestion (0 = disabled) or normal (1000)."""

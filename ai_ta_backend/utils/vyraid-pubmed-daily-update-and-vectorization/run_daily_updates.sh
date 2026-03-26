@@ -17,7 +17,15 @@ set -a; source /home/dadams/pub-med-daily/.env.production; set +a
 # --skip-vectorization: Let Stage 2 handle embedding (decoupled, can run independently)
 export MAX_WORKERS=16
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting Stage 1: download new articles (MAX_WORKERS=16, skip vectorization)"
-python main.py --source updatefiles --skip-vectorization
+
+# Ensure Ollama is running (needed for Stage 1 vectorization path if skip-vectorization is removed)
+if ! curl -s --max-time 3 http://localhost:11434/ > /dev/null 2>&1; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Ollama not running, starting it..."
+    OLLAMA_HOST=0.0.0.0:11434 nohup ~/bin/ollama serve >> /tmp/ollama.log 2>&1 &
+    sleep 8
+fi
+
+python3 main.py --source updatefiles --skip-vectorization
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Stage 1 complete. Articles downloaded to MinIO."
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Stage 2 (vectorization) will run as background job."

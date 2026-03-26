@@ -16,11 +16,23 @@ set +a
 timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 echo "$timestamp - Starting vectorization (Stage 2)..."
 
+# Guard against concurrent runs: if another instance is already running, exit cleanly
+LOCKFILE="/tmp/pubmed_vectorize.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "$timestamp - Another vectorization run is already in progress. Exiting."; exit 0; }
+
+# Ensure Ollama is running (embedding dependency)
+if ! curl -s --max-time 3 http://localhost:11434/ > /dev/null 2>&1; then
+    echo "$timestamp - Ollama not running, starting it..."
+    OLLAMA_HOST=0.0.0.0:11434 nohup ~/bin/ollama serve >> /tmp/ollama.log 2>&1 &
+    sleep 8
+fi
+
 # Run batch vectorization with aggressive mode
 # --aggressive-mode: Fast retry (5 attempts), low backoff (0.1s), 5000-chunk batching
 # --workers 4: Embedding-bound, 4 workers keep Ollama endpoint loaded without thrashing
 # --limit 0: Process unlimited articles (removes when backlog clears)
-python batch_vectorize.py \
+python3 batch_vectorize.py \
   --workers 4 \
   --aggressive-mode \
   --limit 0 \
