@@ -328,16 +328,35 @@ def check_embedding_health(embedding_base_url: str, timeout: int = 5) -> bool:
 
 
 def get_embedding(embedding_base_url: str, text: str, config: BatchVectorizeConfig) -> Optional[List[float]]:
-    """Get embedding from Ollama endpoint with adaptive retry (handles service recovery)."""
-    url = embedding_base_url
+    """Get embedding from Ollama endpoint with adaptive retry (handles service recovery).
     
+    If Ollama returns 'input length exceeds context length', the chunk is truncated to
+    EMBEDDING_TRUNCATE_CHARS and retried once — no point retrying the original text.
+    """
+    url = embedding_base_url
+    # Truncation fallback: if a chunk exceeds the model's token context window
+    # (nomic-embed-text:v1.5 has 8192 tokens), we truncate and retry once.
+    # 4000 chars is ~2x safe headroom even for dense scientific text.
+    EMBEDDING_TRUNCATE_CHARS = 4000
+    prompt = text
+
     for attempt in range(1, config.embedding_retry_max + 1):
         try:
             resp = requests.post(
                 url,
-                json={"model": "nomic-embed-text:v1.5", "prompt": text},
+                json={"model": "nomic-embed-text:v1.5", "prompt": prompt},
                 timeout=config.embedding_timeout
             )
+            # Detect permanent "context length exceeded" — truncate and retry once.
+            if resp.status_code == 500 and "context length" in resp.text:
+                if len(prompt) > EMBEDDING_TRUNCATE_CHARS:
+                    log.warning(f"Chunk too long ({len(prompt)} chars); truncating to {EMBEDDING_TRUNCATE_CHARS} chars and retrying")
+                    prompt = prompt[:EMBEDDING_TRUNCATE_CHARS]
+                    continue  # retry immediately with shorter text, don't count this as an attempt
+                else:
+                    # Already at truncated length and still failing — give up
+                    log.warning(f"Embedding context-length error even after truncation ({len(prompt)} chars); giving up")
+                    return None
             resp.raise_for_status()
             return resp.json()["embedding"]
         except requests.exceptions.Timeout:
@@ -539,10 +558,8 @@ def vectorize_article(
         if not qdrant.upsert_batch(points):
             return pmid, False, f"qdrant_upsert_fail: {len(points)} points"
         
-        # Mark as vectorized in database
-        if not config.dry_run:
-            db.mark_vectorized(pmid)
-        
+        # Return success — caller (main thread) is responsible for db.mark_vectorized()
+        # to avoid concurrent psycopg2 access from multiple worker threads.
         return pmid, True, f"vectorized: {len(page_chunks)} chunks"
         
     except Exception as e:
@@ -616,6 +633,8 @@ def run_batch_vectorization(config: BatchVectorizeConfig):
                         if success:
                             total_successes += 1
                             log.info(f"✓ PMID {pmid}: {info}")
+                            if not config.dry_run:
+                                db.mark_vectorized(pmid)
                         else:
                             total_failures += 1
                             failure_reasons[info] = failure_reasons.get(info, 0) + 1
