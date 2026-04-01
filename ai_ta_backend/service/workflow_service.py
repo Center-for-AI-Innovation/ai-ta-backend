@@ -149,8 +149,8 @@ class WorkflowService:
         else:
           new_data[data[k]] = v
       return new_data
-    except Exception as e:
-      print("❌ Major error in format_data: ", e)
+    except Exception:
+      pass
 
   def switch_workflow(self, id, api_key: str = "", activate: 'str' = 'True'):
     if not api_key:
@@ -181,9 +181,11 @@ class WorkflowService:
     id = self.latest_execution(api_key)
 
     # Lock the workflow
-    locked = self.sqlDb.check_and_lock_flow(id)
+    locked_raw = self.sqlDb.check_and_lock_flow(id)
+    # check_and_lock_flow returns list from .all(); extract message (e.g. [('Workflow updated',)])
+    locked_msg = locked_raw[0][0] if locked_raw and len(locked_raw) > 0 else None
 
-    if locked.data == 'Workflow updated':
+    if locked_msg == 'Workflow updated':
       print(f"Locked workflow with ID: {id} Name:", name)
       pass
     else:
@@ -191,15 +193,18 @@ class WorkflowService:
       start_time = time.time()
       timeout = 300  # Timeout in seconds
       print("Workflow is already locked, trying again")
-      while locked.data == 'Workflow is locked' or 'id already exists':
+      while locked_msg == 'Workflow is locked' or locked_msg == 'id already exists':
         id = self.latest_execution(api_key)
-        locked = self.sqlDb.check_and_lock_flow(id)
-        if locked.data == 'Workflow updated':
+        locked_raw = self.sqlDb.check_and_lock_flow(id)
+        locked_msg = locked_raw[0][0] if locked_raw and len(locked_raw) > 0 else None
+        if locked_msg == 'Workflow updated':
           print("Break loop")
           break
         if time.time() - start_time > timeout:
           print("Timeout reached, stopping the loop.")
           return None
+      if locked_msg != 'Workflow updated':
+        raise Exception(f"Workflow lock failed: {locked_msg}")
       print(f"Locked workflow with ID: {id} Name:", name)
 
     new_data = self.format_data(data, api_key, name)
