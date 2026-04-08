@@ -7,7 +7,11 @@ from injector import inject
 class AWSStorage:
 
     @inject
-    def __init__(self):
+    def __init__(self, s3_client=None):
+        if s3_client is not None:
+            self.s3_client = s3_client
+            return
+
         s3_config = {}
 
         # If running against local MinIO
@@ -23,115 +27,26 @@ class AWSStorage:
 
         self.s3_client = boto3.client("s3", **s3_config)
 
-        # AWS S3 client (no endpoint override)
-        self.aws_s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-            aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        )
+    def upload_file(self, file_path: str, bucket_name: str, object_name: str):
+        self.s3_client.upload_file(file_path, bucket_name, object_name)
 
-        # CropWizard-specific AWS S3 client
-        self.cropwizard_s3_client = boto3.client(
-            "s3",
-            region_name=os.environ.get("CROPWIZARD_AWS_REGION"),
-            aws_access_key_id=os.environ.get("CROPWIZARD_AWS_KEY"),
-            aws_secret_access_key=os.environ.get("CROPWIZARD_AWS_SECRET"),
-        )
+    def download_file(self, object_name: str, bucket_name: str, file_path: str):
+        self.s3_client.download_file(bucket_name, object_name, file_path)
 
-    def _select_client_for_path(self, object_or_path: str):
-        """
-        Select S3 client based on object path.
-        Any course starting with 'cropwizard' should use CropWizard-specific AWS S3 client.
-        Our convention for exports is 'courses/{course_name}/...'.
-        """
-        try:
-            normalized = (object_or_path or "").lstrip("/")
-            # Expecting paths like: courses/cropwizard.../...
-            if normalized.startswith("courses/cropwizard"):
-                return self.cropwizard_s3_client
-        except Exception:
-            pass
-        return self.s3_client
+    def delete_file(self, bucket_name: str, s3_path: str):
+        return self.s3_client.delete_object(Bucket=bucket_name, Key=s3_path)
 
-    def _select_client_for_course(self, course_name: str):
-        """
-        Select S3 client based on course name.
-        Any course name containing 'cropwizard' should use CropWizard-specific AWS S3 client.
-        """
-        if course_name and "cropwizard" in course_name.lower():
-            return self.cropwizard_s3_client
-        return self.s3_client
+    def upload_fileobj(self, fileobj, bucket_name: str, object_name: str):
+        self.s3_client.upload_fileobj(fileobj, bucket_name, object_name)
 
-    def upload_file(
-        self,
-        file_path: str,
-        bucket_name: str,
-        object_name: str,
-        course_name: str = None,
-    ):
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(object_name)
-        client.upload_file(file_path, bucket_name, object_name)
+    def download_fileobj(self, bucket_name: str, object_name: str, fileobj):
+        self.s3_client.download_fileobj(bucket_name, object_name, fileobj)
 
-    def download_file(
-        self,
-        object_name: str,
-        bucket_name: str,
-        file_path: str,
-        course_name: str = None,
-    ):
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(object_name)
-        client.download_file(bucket_name, object_name, file_path)
+    def get_object(self, bucket_name: str, object_name: str):
+        return self.s3_client.get_object(Bucket=bucket_name, Key=object_name)
 
-    def delete_file(self, bucket_name: str, s3_path: str, course_name: str = None):
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(s3_path)
-        return client.delete_object(Bucket=bucket_name, Key=s3_path)
-
-    def upload_fileobj(
-        self, fileobj, bucket_name: str, object_name: str, course_name: str = None
-    ):
-        """Upload file object using course-specific client."""
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(object_name)
-        client.upload_fileobj(fileobj, bucket_name, object_name)
-
-    def download_fileobj(
-        self, bucket_name: str, object_name: str, fileobj, course_name: str = None
-    ):
-        """Download file object using course-specific client."""
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(object_name)
-        client.download_fileobj(bucket_name, object_name, fileobj)
-
-    def get_object(self, bucket_name: str, object_name: str, course_name: str = None):
-        """Get object using course-specific client."""
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(object_name)
-        return client.get_object(Bucket=bucket_name, Key=object_name)
-
-    def delete_object(
-        self, bucket_name: str, object_name: str, course_name: str = None
-    ):
-        """Delete object using course-specific client."""
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(object_name)
-        return client.delete_object(Bucket=bucket_name, Key=object_name)
+    def delete_object(self, bucket_name: str, object_name: str):
+        return self.s3_client.delete_object(Bucket=bucket_name, Key=object_name)
 
     def generatePresignedUrl(
         self,
@@ -139,14 +54,8 @@ class AWSStorage:
         bucket_name: str,
         s3_path: str,
         expiration: int = 3600,
-        course_name: str = None,
     ):
-        # generate presigned URL
-        if course_name:
-            client = self._select_client_for_course(course_name)
-        else:
-            client = self._select_client_for_path(s3_path)
-        return client.generate_presigned_url(
+        return self.s3_client.generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket_name, "Key": s3_path},
             ExpiresIn=expiration,

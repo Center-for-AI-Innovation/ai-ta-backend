@@ -8,13 +8,6 @@ import xlsxwriter
 from datetime import datetime
 
 
-def get_s3_bucket_for_course(course_name: str) -> str:
-  if course_name and course_name.startswith('cropwizard'):
-    return os.environ['CROPWIZARD_S3_BUCKET_NAME']
-  else:
-    return os.environ['S3_BUCKET_NAME']
-
-
 def _initialize_base_name(course_name):
   return course_name[0:15] + '-conversation-export'
 
@@ -61,7 +54,7 @@ def _initialize_excel(excel_file_path):
   return workbook, worksheet, wrap_format
 
 
-def _process_conversation(s3, convo, course_name, file_paths, worksheet, row_num, error_log, wrap_format):
+def _process_conversation(s3, convo, course_name, file_paths, worksheet, row_num, error_log, wrap_format, bucket_name):
   try:
     convo_id = convo['convo_id']
     convo_data = convo['convo']
@@ -75,7 +68,7 @@ def _process_conversation(s3, convo, course_name, file_paths, worksheet, row_num
     print(f"Processing conversation ID: {convo_id}, User email: {user_email}")
 
     _create_markdown(s3, convo_id, messages, file_paths['markdown_dir'], file_paths['media_dir'], user_email, error_log,
-                     timestamp, convo_name)
+                     timestamp, convo_name, bucket_name)
     # print(f"Created markdown for conversation ID: {convo_id}")
     _write_to_excel(convo_id, course_name, messages, worksheet, row_num, user_email, timestamp, error_log, wrap_format)
     # print(f"Wrote to Excel for conversation ID: {convo_id}")
@@ -87,7 +80,8 @@ def _process_conversation(s3, convo, course_name, file_paths, worksheet, row_num
     error_log.append(f"Error processing conversation ID {convo['convo_id']}: {str(e)}")
 
 
-def _process_conversation_for_user_convo_export(s3, convo, project_name, markdown_dir, media_dir, error_log):
+def _process_conversation_for_user_convo_export(s3, convo, project_name, markdown_dir, media_dir, error_log,
+                                                bucket_name):
   try:
     messages = convo["messages"]
     convo_id = str(convo.get("id")) if convo else None
@@ -96,7 +90,8 @@ def _process_conversation_for_user_convo_export(s3, convo, project_name, markdow
     timestamp = convo.get("created_at")
 
     _create_markdown_for_user_convo_export(
-      s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log, timestamp, name, project_name
+      s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log, timestamp, name, project_name,
+      bucket_name
     )
 
   except Exception as e:
@@ -104,7 +99,8 @@ def _process_conversation_for_user_convo_export(s3, convo, project_name, markdow
     raise
 
 
-def _create_markdown(s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log, timestamp, convo_name):
+def _create_markdown(s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log, timestamp, convo_name,
+                     bucket_name):
   try:
     if isinstance(timestamp, datetime):
       timestamp = timestamp.isoformat()
@@ -117,7 +113,7 @@ def _create_markdown(s3, convo_id, messages, markdown_dir, media_dir, user_email
 
       for message in messages:
         role = "User" if message['role'] == 'user' else "Assistant"
-        content = _process_message_content(s3, message['content'], convo_id, media_dir, error_log)
+        content = _process_message_content(s3, message['content'], convo_id, media_dir, error_log, bucket_name)
         md_file.write(f"### {role}:\n")
         md_file.write(f"{content}\n\n")
         md_file.write("---\n\n")  # Separator for each message for better readability
@@ -129,7 +125,7 @@ def _create_markdown(s3, convo_id, messages, markdown_dir, media_dir, user_email
 
 
 def _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir, media_dir, user_email, error_log,
-                                           timestamp, name, project_name):
+                                           timestamp, name, project_name, bucket_name):
   try:
     print(f"Creating markdown file for conversation ID {convo_id}")
     if isinstance(timestamp, datetime):
@@ -150,7 +146,7 @@ def _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir,
         # content = _process_message_content(s3, message['content'], convo_id, media_dir, error_log)
         content = _process_message_content_for_user_convo_export(s3, message['content_text'],
                                                                  message['content_image_url'], convo_id, media_dir,
-                                                                 error_log, project_name)
+                                                                 error_log, project_name, bucket_name)
         md_file.write(f"### {role}:\n")
         md_file.write(f"{content}\n\n")
         if img_desc:
@@ -164,7 +160,7 @@ def _create_markdown_for_user_convo_export(s3, convo_id, messages, markdown_dir,
     error_log.append(f"Error creating markdown for conversation ID {convo_id}: {str(e)}")
 
 
-def _process_message_content(s3, content, convo_id, media_dir, error_log, course_name=None):
+def _process_message_content(s3, content, convo_id, media_dir, error_log, bucket_name):
   try:
     if isinstance(content, list):
       flattened_content = []
@@ -177,7 +173,6 @@ def _process_message_content(s3, content, convo_id, media_dir, error_log, course
           image_file_path = os.path.join(media_dir, image_filename)
           image_s3_path = _extract_path_from_url(item['image_url']['url'])
           # Save the image to the media directory
-          bucket_name = get_s3_bucket_for_course(course_name) if course_name else os.environ['S3_BUCKET_NAME']
           s3.download_file(image_s3_path, bucket_name, image_file_path)
           # Adjust the path to be relative from the markdown file's perspective
           relative_image_path = os.path.join('..', media_dir.split('/')[-1], image_filename)
@@ -193,14 +188,14 @@ def _process_message_content(s3, content, convo_id, media_dir, error_log, course
 
 
 def _process_message_content_for_user_convo_export(s3, content_text: str, content_image_url: list, convo_id: str,
-                                                   media_dir: str, error_log: list, project_name: str) -> str:
+                                                   media_dir: str, error_log: list, project_name: str,
+                                                   bucket_name: str) -> str:
   try:
     content = content_text
     for url in content_image_url:
       image_filename = f"{url.split('/')[-1].split('?')[0]}"
       image_file_path = os.path.join(media_dir, image_filename)
       image_s3_path = _extract_path_from_url(url)
-      bucket_name = get_s3_bucket_for_course(project_name)
       s3.download_file(image_s3_path, bucket_name, image_file_path)
       relative_image_path = os.path.join('..', media_dir.split('/')[-1], image_filename)
       content += f"\n![Image]({relative_image_path})"

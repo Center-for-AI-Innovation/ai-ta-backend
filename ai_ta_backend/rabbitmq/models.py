@@ -337,6 +337,38 @@ class Messages(Base):
         }
 
 
+class ProjectExternalConnection(Base):
+    """Stores per-project external infrastructure connection configs.
+    Each *_config column holds a Fernet-encrypted JSON blob.
+    None means "use default infrastructure."
+    """
+    __tablename__ = 'project_external_connections'
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    project_name = Column(Text, unique=True, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    s3_config = Column(JSONB, nullable=True)
+    database_config = Column(JSONB, nullable=True)
+    qdrant_config = Column(JSONB, nullable=True)
+    is_active = Column(Boolean, default=True)
+
+    __table_args__ = (
+        Index('pec_project_name_idx', 'project_name', postgresql_using='hash'),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "project_name": self.project_name,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "s3_config": self.s3_config,
+            "database_config": self.database_config,
+            "qdrant_config": self.qdrant_config,
+            "is_active": self.is_active,
+        }
+
+
 class PreAuthAPIKeys(Base):
     __tablename__ = 'pre_authorized_api_keys'
     id = Column(BigInteger, primary_key=True, autoincrement=True)

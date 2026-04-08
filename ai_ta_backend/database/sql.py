@@ -3,7 +3,7 @@ import os
 from contextlib import contextmanager
 from typing import List, TypedDict, TypeVar, Generic
 
-from sqlalchemy import create_engine, NullPool, func, insert, delete, select, update, desc, literal, ARRAY
+from sqlalchemy import create_engine, NullPool, func, insert, delete, select, update, desc, literal, ARRAY, or_
 from sqlalchemy.orm import sessionmaker, Session, aliased
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
@@ -68,14 +68,19 @@ class ModelUsage(TypedDict):
 
 
 class SQLDatabase:
-    def __init__(self) -> None:
-        # Define supported database configurations and their required env vars
+    def __init__(self, engine=None) -> None:
+        if engine is not None:
+            # Use a pre-built engine (for external project databases)
+            self.engine = engine
+            self.Session = sessionmaker(bind=self.engine)
+            return
+
+        # Default: detect from environment variables
         DB_CONFIGS = {
             'sqlite': ['SQLITE_DB_NAME'],
             'postgres': ['POSTGRES_USERNAME', 'POSTGRES_PASSWORD', 'POSTGRES_ENDPOINT']
         }
 
-        # Detect which database configuration is available
         db_type = None
         for db, required_vars in DB_CONFIGS.items():
             if all(os.getenv(var) for var in required_vars):
@@ -85,14 +90,11 @@ class SQLDatabase:
         if not db_type:
             raise ValueError("No valid database configuration found in environment variables")
 
-        # Build the appropriate connection string
         if db_type == 'sqlite':
             db_uri = f"sqlite:///{os.getenv('SQLITE_DB_NAME')}"
         else:
-            # postgres
             db_uri = f"postgresql://{os.getenv('POSTGRES_USERNAME')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_ENDPOINT')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DATABASE')}"
 
-        # Create engine and session
         logging.info("About to connect to DB from IngestSQL.py.")
         self.engine = create_engine(db_uri, poolclass=NullPool)
         self.Session = sessionmaker(bind=self.engine)
@@ -801,3 +803,72 @@ class SQLDatabase:
             response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
         return response
+
+    # ── External Connection Config CRUD ──────────────────────────────
+
+    def getExternalConnection(self, project_name: str):
+        query = (
+            select(models.ProjectExternalConnection)
+            .where(models.ProjectExternalConnection.project_name == project_name)
+            .where(models.ProjectExternalConnection.is_active == True)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().first()
+            return orm_to_dict(result)
+
+    def upsertExternalConnection(self, project_name: str, s3_config=None, database_config=None, qdrant_config=None):
+        with self.get_session() as session:
+            existing = session.execute(
+                select(models.ProjectExternalConnection)
+                .where(models.ProjectExternalConnection.project_name == project_name)
+            ).scalars().first()
+
+            if existing:
+                if s3_config is not None:
+                    existing.s3_config = s3_config
+                if database_config is not None:
+                    existing.database_config = database_config
+                if qdrant_config is not None:
+                    existing.qdrant_config = qdrant_config
+                existing.is_active = True
+                return orm_to_dict(existing)
+            else:
+                new_conn = models.ProjectExternalConnection(
+                    project_name=project_name,
+                    s3_config=s3_config,
+                    database_config=database_config,
+                    qdrant_config=qdrant_config,
+                    is_active=True,
+                )
+                session.add(new_conn)
+                session.flush()
+                return orm_to_dict(new_conn)
+
+    def deleteExternalConnection(self, project_name: str):
+        delete_stmt = (
+            delete(models.ProjectExternalConnection)
+            .where(models.ProjectExternalConnection.project_name == project_name)
+        )
+        with self.get_session() as session:
+            result = session.execute(delete_stmt)
+            return result.rowcount
+
+    @staticmethod
+    def get_session_for_engine(engine):
+        """Create a session context manager for an arbitrary engine."""
+        from contextlib import contextmanager
+        SessionFactory = sessionmaker(bind=engine)
+
+        @contextmanager
+        def _session():
+            session = SessionFactory()
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        return _session()

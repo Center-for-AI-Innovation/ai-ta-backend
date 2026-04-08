@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 import re
 
@@ -86,3 +87,52 @@ def encrypt_if_needed(key: str) -> str:
       print('Failed to encrypt key:', error)
       raise
   return key
+
+
+def _get_connection_encryption_key() -> str:
+  key = os.environ.get('ENCRYPTION_MASTER_KEY', '')
+  if not key:
+    raise ValueError('ENCRYPTION_MASTER_KEY environment variable is not set')
+  return key
+
+
+def encrypt_config(config: dict) -> dict:
+  """Encrypt a config dict for storage in project_external_connections.
+  Returns {"encrypted": "v1.xxx.yyy"} suitable for JSONB column.
+  """
+  if not config:
+    return None
+  plaintext = json.dumps(config)
+  encrypted_str = encrypt(plaintext, _get_connection_encryption_key())
+  return {"encrypted": encrypted_str}
+
+
+def decrypt_config(stored: dict) -> dict:
+  """Decrypt a config dict from project_external_connections.
+  Expects {"encrypted": "v1.xxx.yyy"} as stored in JSONB column.
+  Returns the original config dict.
+  """
+  if not stored:
+    return None
+  encrypted_str = stored.get("encrypted")
+  if not encrypted_str:
+    return None
+  plaintext = decrypt(encrypted_str, _get_connection_encryption_key())
+  return json.loads(plaintext)
+
+
+def mask_config(config: dict) -> dict:
+  """Return a copy of config with sensitive values masked for API responses.
+  Shows only the last 4 characters of each string value.
+  """
+  if not config:
+    return None
+  masked = {}
+  for key, value in config.items():
+    if isinstance(value, str) and len(value) > 4:
+      masked[key] = '****' + value[-4:]
+    elif isinstance(value, str):
+      masked[key] = '****'
+    else:
+      masked[key] = value
+  return masked

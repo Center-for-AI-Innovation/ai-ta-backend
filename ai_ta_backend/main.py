@@ -20,6 +20,7 @@ from flask_injector import FlaskInjector, RequestScope
 from injector import Binder, SingletonScope
 
 from ai_ta_backend.database.aws import AWSStorage
+from ai_ta_backend.database.connection_manager import ConnectionManager
 from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.database.sql import SQLDatabase
 from ai_ta_backend.database.vector import VectorDatabase
@@ -41,6 +42,7 @@ from ai_ta_backend.service.posthog_service import PosthogService
 from ai_ta_backend.service.project_service import ProjectService
 from ai_ta_backend.service.retrieval_service import RetrievalService
 from ai_ta_backend.service.workflow_service import WorkflowService
+from ai_ta_backend.utils.crypto import encrypt_config, decrypt_config, mask_config
 from ai_ta_backend.utils.email.send_transactional_email import send_email
 from ai_ta_backend.utils.pubmed_extraction import extractPubmedData
 from ai_ta_backend.utils.rerun_webcrawl_for_project import webscrape_documents
@@ -970,6 +972,117 @@ def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+# ── External Connection Config API ─────────────────────────────────
+
+@app.route('/api/project-connections', methods=['POST'])
+def upsert_project_connection(sql: SQLDatabase, conn_manager: ConnectionManager) -> Response:
+  """Create or update external connection config for a project."""
+  data = request.get_json()
+  if not data or not data.get('project_name'):
+    abort(400, description="Missing required field: 'project_name'")
+
+  project_name = data['project_name']
+
+  # Encrypt each config if provided
+  s3_config = encrypt_config(data['s3_config']) if data.get('s3_config') else None
+  database_config = encrypt_config(data['database_config']) if data.get('database_config') else None
+  qdrant_config = encrypt_config(data['qdrant_config']) if data.get('qdrant_config') else None
+
+  result = sql.upsertExternalConnection(project_name, s3_config, database_config, qdrant_config)
+
+  # Invalidate cached connections so next request uses the new config
+  conn_manager.invalidate(project_name)
+
+  response = jsonify({"success": True, "project_name": project_name})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/api/project-connections', methods=['GET'])
+def get_project_connection(sql: SQLDatabase) -> Response:
+  """Get external connection config for a project (secrets masked)."""
+  project_name = request.args.get('project_name', default='', type=str)
+  if not project_name:
+    abort(400, description="Missing required parameter: 'project_name'")
+
+  row = sql.getExternalConnection(project_name)
+  if not row:
+    response = jsonify({"found": False, "project_name": project_name})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
+
+  # Decrypt and mask secrets for display
+  result = {
+      "found": True,
+      "project_name": row['project_name'],
+      "is_active": row['is_active'],
+      "created_at": str(row['created_at']) if row.get('created_at') else None,
+      "updated_at": str(row['updated_at']) if row.get('updated_at') else None,
+      "s3_config": mask_config(decrypt_config(row['s3_config'])) if row.get('s3_config') else None,
+      "database_config": mask_config(decrypt_config(row['database_config'])) if row.get('database_config') else None,
+      "qdrant_config": mask_config(decrypt_config(row['qdrant_config'])) if row.get('qdrant_config') else None,
+  }
+
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/api/project-connections', methods=['DELETE'])
+def delete_project_connection(sql: SQLDatabase, conn_manager: ConnectionManager) -> Response:
+  """Delete external connection config for a project."""
+  project_name = request.args.get('project_name', default='', type=str)
+  if not project_name:
+    abort(400, description="Missing required parameter: 'project_name'")
+
+  deleted_count = sql.deleteExternalConnection(project_name)
+  conn_manager.invalidate(project_name)
+
+  response = jsonify({"success": True, "deleted": deleted_count > 0, "project_name": project_name})
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
+@app.route('/api/project-connections/test', methods=['POST'])
+def test_project_connection() -> Response:
+  """Test an external connection without saving it."""
+  data = request.get_json()
+  if not data or not data.get('type'):
+    abort(400, description="Missing required field: 'type' (one of: 's3', 'database', 'qdrant')")
+
+  config = data.get('config', {})
+  conn_type = data['type']
+
+  if conn_type == 'database':
+    if not config.get('connection_uri'):
+      abort(400, description="Missing 'connection_uri' in config")
+    result = ConnectionManager.test_database_connection(config['connection_uri'])
+  elif conn_type == 'qdrant':
+    if not config.get('url'):
+      abort(400, description="Missing 'url' in config")
+    result = ConnectionManager.test_qdrant_connection(
+        url=config['url'],
+        api_key=config.get('api_key'),
+        port=int(config['port']) if config.get('port') else None,
+        https=config.get('https', False),
+    )
+  elif conn_type == 's3':
+    if not config.get('aws_access_key_id') or not config.get('aws_secret_access_key'):
+      abort(400, description="Missing 'aws_access_key_id' or 'aws_secret_access_key' in config")
+    result = ConnectionManager.test_s3_connection(
+        aws_access_key_id=config['aws_access_key_id'],
+        aws_secret_access_key=config['aws_secret_access_key'],
+        region=config.get('region'),
+        bucket_name=config.get('bucket_name'),
+    )
+  else:
+    abort(400, description=f"Invalid type: '{conn_type}'. Must be one of: 's3', 'database', 'qdrant'")
+
+  response = jsonify(result)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  return response
+
+
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(ProcessPoolExecutorInterface, to=ProcessPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
@@ -982,6 +1095,7 @@ def configure(binder: Binder) -> None:
   binder.bind(VectorDatabase, to=VectorDatabase, scope=SingletonScope)
   binder.bind(SQLDatabase, to=SQLDatabase, scope=SingletonScope)
   binder.bind(AWSStorage, to=AWSStorage, scope=SingletonScope)
+  binder.bind(ConnectionManager, to=ConnectionManager, scope=SingletonScope)
   binder.bind(ExecutorInterface, to=FlaskExecutorAdapter(executor), scope=SingletonScope)
   binder.bind(GraphDatabase, to=GraphDatabase, scope=SingletonScope)
 
