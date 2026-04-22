@@ -215,8 +215,6 @@ def _write_to_excel(convo_id, course_name, messages, worksheet, row_num, user_em
     start_row = row_num
     for message_id, message in enumerate(messages):
       if message_id == 0:
-        # if convo_id == '3f1827f5-3d6c-4743-b467-12ef4b2059c5':
-        # print(f"Message: {message}")
         worksheet.write(row_num, 0, convo_id)
       worksheet.write(row_num, 1, user_email)
       worksheet.write(row_num, 2, course_name, wrap_format)
@@ -224,14 +222,15 @@ def _write_to_excel(convo_id, course_name, messages, worksheet, row_num, user_em
       worksheet.write(row_num, 4, timestamp, wrap_format)
       worksheet.write(row_num, 5, message['role'], wrap_format)
       if message['role'] == 'user' and isinstance(message['content'], list):
-        # if convo_id == '3f1827f5-3d6c-4743-b467-12ef4b2059c5':
-        # print(f"Message content: {message['content']}")
         content = ' '.join([item['text'] for item in message['content'] if item['type'] == 'text'])
         contains_image = any(item['type'] == 'image_url' and 'url' in item['image_url'] for item in message['content'])
         if contains_image:
           worksheet.write(row_num, 7, 'Yes')
         else:
           worksheet.write(row_num, 7, 'No')
+      elif isinstance(message['content'], list):
+        content = ' '.join([item['text'] for item in message['content'] if item['type'] == 'text'])
+        # TODO: Also contains_image flag? Why filtered to user above?
       else:
         content = message['content']
       worksheet.write(row_num, 6, content, wrap_format)
