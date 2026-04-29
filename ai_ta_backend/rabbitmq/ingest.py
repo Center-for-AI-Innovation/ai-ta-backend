@@ -42,6 +42,11 @@ from git.repo import Repo
 from bs4 import BeautifulSoup
 from pydub import AudioSegment
 
+if os.environ['VECTOR_ENGINE'] == 'qdrant':
+    from qdrant_client import QdrantClient, models
+    from qdrant_client.models import PointStruct
+    from langchain.vectorstores import Qdrant
+
 try:
     from ai_ta_backend.rabbitmq.rmsql import SQLAlchemyIngestDB
     from ai_ta_backend.rabbitmq.embeddings import OpenAIAPIProcessor
@@ -73,6 +78,20 @@ class Ingest:
         self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
         self.posthog_api_key = os.getenv('POSTHOG_API_KEY')
 
+        if os.environ['VECTOR_ENGINE'] == 'qdrant':
+            self.qdrant_url = os.getenv('QDRANT_URL')
+            self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
+            self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
+            self.qdrant_client = None
+            self.vectorstore = None
+
+            # Qdrant ingestion tuning
+            # Batch size for upserts during ingestion per guidance from Qdrant team
+            self.qdrant_upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
+            # Temporarily raise indexing threshold during ingestion, then revert
+            self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
+            self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
+
         self.posthog = None
         self.pgvector_store = None
         self.s3_client = None
@@ -85,10 +104,41 @@ class Ingest:
         self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
     def initialize_resources(self):
-        # Standalone worker: no ai_ta_backend; use local pgvector store in rabbitmq
-        from vector_store import get_vector_store
-        self.pgvector_store = get_vector_store()
-        logging.info("Vector store: pgvector (embeddings table)")
+        if os.environ['VECTOR_ENGINE'] == 'qdrant':
+            # Initialize Qdrant client and create collection if necessary
+            if self.qdrant_api_key and self.qdrant_url:
+                self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
+                if not self.qdrant_client.get_collection(self.qdrant_collection_name):
+                    logging.info(f"Creating collection {self.qdrant_collection_name}")
+                    self.qdrant_client.create_collection(
+                        collection_name=self.qdrant_collection_name,
+                        vectors_config={"size": 4096, "distance": "Cosine"}
+                    )
+
+                if self.embedding_model == 'text-embedding-ada-002':
+                    self.vectorstore = Qdrant(
+                        client=self.qdrant_client,
+                        collection_name=self.qdrant_collection_name,
+                        embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
+                                                    openai_api_base=self.openai_api_base, model=self.embedding_model)
+                    )
+                    print("Vectorstore initialized with text-embedding-ada-002")
+                else:
+                    self.vectorstore = Qdrant(
+                        client=self.qdrant_client,
+                        collection_name=self.qdrant_collection_name,
+                        embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
+                                                    openai_api_base=self.openai_api_base, model=self.embedding_model,
+                                                    tiktoken_enabled=False)
+                    )
+                    print("Vectorstore initialized with NCSA_HOSTED model")
+            else:
+                logging.error("QDRANT API KEY OR URL NOT FOUND!")
+        else:
+            # Standalone worker: no ai_ta_backend; use local pgvector store in rabbitmq
+            from vector_store import get_vector_store
+            self.pgvector_store = get_vector_store()
+            logging.info("Vector store: pgvector (embeddings table)")
 
         # Connect to AWS S3 file store
         if self.aws_access_key_id and self.aws_secret_access_key:
@@ -362,29 +412,69 @@ class Ingest:
                 item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
             }
 
-            # Batched upload to pgvector
-            ids_batch, vectors_batch, payloads_batch = [], [], []
-            for context in contexts:
-                point_id = str(uuid.uuid4())
-                upload_metadata = {**context.metadata, "page_content": context.page_content}
-                ids_batch.append(point_id)
-                vectors_batch.append(embeddings_dict[context.page_content])
-                payloads_batch.append(upload_metadata)
-                if len(ids_batch) >= self.upsert_batch_size:
+            if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                # Batched upload to Qdrant.
+                collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore
+                try:
+                    batch: list[PointStruct] = []
+                    for context in contexts:
+                        upload_metadata = {**context.metadata, "page_content": context.page_content}
+                        batch.append(
+                            PointStruct(
+                                id=str(uuid.uuid4()),
+                                vector=embeddings_dict[context.page_content],
+                                payload=upload_metadata,
+                            )
+                        )
+                        if len(batch) >= self.qdrant_upsert_batch_size:
+                            try:
+                                self.qdrant_client.upsert(
+                                    collection_name=collection_name,
+                                    points=batch,  # type: ignore
+                                    wait=False,
+                                )
+                            except Exception as e:
+                                # Timeouts can be acceptable while server processes the request in background
+                                logging.warning("Batch upsert encountered an error (continuing): %s", e)
+                            finally:
+                                batch = []
+
+                    if len(batch) > 0:
+                        try:
+                            self.qdrant_client.upsert(
+                                collection_name=collection_name,
+                                points=batch,  # type: ignore
+                                wait=False,
+                            )
+                        except Exception as e:
+                            logging.warning("Final batch upsert encountered an error (continuing): %s", e)
+                finally:
+                    pass
+
+            else:
+                # Batched upload to pgvector
+                ids_batch, vectors_batch, payloads_batch = [], [], []
+                for context in contexts:
+                    point_id = str(uuid.uuid4())
+                    upload_metadata = {**context.metadata, "page_content": context.page_content}
+                    ids_batch.append(point_id)
+                    vectors_batch.append(embeddings_dict[context.page_content])
+                    payloads_batch.append(upload_metadata)
+                    if len(ids_batch) >= self.upsert_batch_size:
+                        try:
+                            self.pgvector_store.upsert_batch(
+                                ids=ids_batch, vectors=vectors_batch, payloads=payloads_batch, wait=False
+                            )
+                        except Exception as e:
+                            logging.warning("pgvector batch upsert error (continuing): %s", e)
+                        ids_batch, vectors_batch, payloads_batch = [], [], []
+                if ids_batch:
                     try:
                         self.pgvector_store.upsert_batch(
-                            ids=ids_batch, vectors=vectors_batch, payloads=payloads_batch, wait=False
+                            ids=ids_batch, vectors=vectors_batch, payloads=payloads_batch, wait=True
                         )
                     except Exception as e:
-                        logging.warning("pgvector batch upsert error (continuing): %s", e)
-                    ids_batch, vectors_batch, payloads_batch = [], [], []
-            if ids_batch:
-                try:
-                    self.pgvector_store.upsert_batch(
-                        ids=ids_batch, vectors=vectors_batch, payloads=payloads_batch, wait=True
-                    )
-                except Exception as e:
-                    logging.warning("pgvector final batch upsert error: %s", e)
+                        logging.warning("pgvector final batch upsert error: %s", e)
 
             # Supabase SQL insertion
             # contexts_for_supa = [{
@@ -535,9 +625,20 @@ class Ingest:
                     print("Error in deleting file from s3:", e)
                     sentry_sdk.capture_exception(e)
                 try:
-                    self.pgvector_store.delete_by_filter("s3_path", s3_path)
+                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                        self.qdrant_client.delete(
+                            collection_name=self.qdrant_collection_name,
+                            points_selector=models.Filter(must=[
+                                models.FieldCondition(
+                                    key="s3_path",
+                                    match=models.MatchValue(value=s3_path),
+                                ),
+                            ]),
+                        )
+                    else:
+                        self.pgvector_store.delete_by_filter("s3_path", s3_path)
                 except Exception as e:
-                    print("Error in deleting file from pgvector:", e)
+                    print("Error in deleting file from vector DB:", e)
                     sentry_sdk.capture_exception(e)
                     raise e
                 try:
@@ -547,9 +648,20 @@ class Ingest:
                     sentry_sdk.capture_exception(e)
             elif source_url:
                 try:
-                    self.pgvector_store.delete_by_filter("url", source_url)
+                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                        self.qdrant_client.delete(
+                            collection_name=self.qdrant_collection_name,
+                            points_selector=models.Filter(must=[
+                                models.FieldCondition(
+                                    key="url",
+                                    match=models.MatchValue(value=source_url),
+                                ),
+                            ]),
+                        )
+                    else:
+                        self.pgvector_store.delete_by_filter("url", source_url)
                 except Exception as e:
-                    print("Error in deleting file from pgvector:", e)
+                    print("Error in deleting file from vector DB:", e)
                     sentry_sdk.capture_exception(e)
                     raise e
                 try:
@@ -569,9 +681,20 @@ class Ingest:
         try:
             if s3_path:
                 try:
-                    self.pgvector_store.delete_by_filter("s3_path", s3_path)
+                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                        self.qdrant_client.delete(
+                            collection_name=self.qdrant_collection_name,
+                            points_selector=models.Filter(must=[
+                                models.FieldCondition(
+                                    key="s3_path",
+                                    match=models.MatchValue(value=s3_path),
+                                ),
+                            ]),
+                        )
+                    else:
+                        self.pgvector_store.delete_by_filter("s3_path", s3_path)
                 except Exception as e:
-                    print("Error in deleting file from pgvector:", e)
+                    print("Error in deleting file from vector DB:", e)
                     sentry_sdk.capture_exception(e)
                     raise e
                 try:
@@ -581,9 +704,20 @@ class Ingest:
                     sentry_sdk.capture_exception(e)
             elif source_url:
                 try:
-                    self.pgvector_store.delete_by_filter("url", source_url)
+                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                        self.qdrant_client.delete(
+                            collection_name=self.qdrant_collection_name,
+                            points_selector=models.Filter(must=[
+                                models.FieldCondition(
+                                    key="url",
+                                    match=models.MatchValue(value=source_url),
+                                ),
+                            ]),
+                        )
+                    else:
+                        self.pgvector_store.delete_by_filter("url", source_url)
                 except Exception as e:
-                    print("Error in deleting file from pgvector:", e)
+                    print("Error in deleting file from vector DB:", e)
                     sentry_sdk.capture_exception(e)
                     raise e
                 try:
