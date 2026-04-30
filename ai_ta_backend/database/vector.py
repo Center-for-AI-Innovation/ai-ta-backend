@@ -405,11 +405,17 @@ class VectorDatabase():
     must_conditions.append(models.IsEmptyCondition(
         is_empty={"key": "conversation_id"}  # Only include chunks where conversation_id field is empty/missing
     ))
-    
+
+    # When the client restricts to specific groups, public-doc branches must intersect that set.
+    # Otherwise OR-ing unrestricted public branches bypasses doc_groups (e.g. pdf chunks while user asked txt-only).
+    restrict_doc_groups = bool(doc_groups) and 'All Documents' not in doc_groups
+
     # Handle public_doc_groups
     if public_doc_groups:
       for public_doc_group in public_doc_groups:
         if public_doc_group['enabled']:
+          if restrict_doc_groups and public_doc_group['name'] not in doc_groups:
+            continue
           # Create a combined condition for each public_doc_group
           combined_condition = models.Filter(must=[
               FieldCondition(key='course_name', match=MatchValue(value=public_doc_group['course_name'])),
@@ -421,7 +427,7 @@ class VectorDatabase():
     own_course_condition = models.Filter(must=[FieldCondition(key='course_name', match=MatchValue(value=course_name))])
 
     # If specific doc_groups are specified
-    if doc_groups and 'All Documents' not in doc_groups:
+    if restrict_doc_groups:
       own_course_condition.must.append(FieldCondition(key='doc_groups', match=MatchAny(any=doc_groups)))
 
     # Add the own_course_condition to should_conditions
