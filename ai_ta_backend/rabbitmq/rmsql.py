@@ -251,3 +251,18 @@ class SQLAlchemyIngestDB:
         with self.get_session() as session:
             result = session.execute(delete_stmt)
             return result.rowcount  # Number of rows deleted
+
+    # ── External Connection Config ────────────────────────────────────
+
+    def getExternalConnection(self, project_name: str):
+        """Look up the active external connection config for a project.
+        Returns the row as a dict, or None if no external config exists.
+        """
+        query = (
+            select(models.ProjectExternalConnection)
+            .where(models.ProjectExternalConnection.project_name == project_name)
+            .where(models.ProjectExternalConnection.is_active == True)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().first()
+            return result.to_dict() if result else None

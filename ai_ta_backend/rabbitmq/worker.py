@@ -10,6 +10,7 @@ import threading
 
 from rmsql import SQLAlchemyIngestDB
 from ingest import Ingest
+from connection_resolver import WorkerConnectionResolver
 from flask import Flask, jsonify
 
 
@@ -37,6 +38,7 @@ class Worker:
         self.connect()
 
         self.sql_session = SQLAlchemyIngestDB()
+        self.resolver = WorkerConnectionResolver(self.sql_session)
 
     # Intended usage is "with Queue() as queue:"
     def __enter__(self):
@@ -117,8 +119,11 @@ class Worker:
                     prog_doc["error"] = 'Attempting ingest'
                     self.sql_session.update_document_in_progress(prog_doc)
 
+                    course_name = inputs.get('course_name', '')
+                    resolved = self.resolver.resolve(course_name)
+
                     ingester = Ingest()
-                    ingester.main_ingest(job_id=job_id, **inputs)
+                    ingester.main_ingest(job_id=job_id, _resolved_connections=resolved, **inputs)
                     channel.basic_ack(delivery_tag=method.delivery_tag)
         except Exception as e:
             if retry_count < MAX_JOB_RETRIES:

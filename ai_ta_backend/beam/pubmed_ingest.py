@@ -1,5 +1,12 @@
 """
-Endpoint for ingesting data from PubMed.
+DEPRECATED: This Beam endpoint chains into the Beam ingest task queue
+(ingest_task_queue) which has been replaced by the RabbitMQ ingest pipeline.
+beam/ingest.py has been removed -- this file's POST to
+https://app.beam.cloud/taskqueue/ingest_task_queue/latest will no longer work.
+
+TODO: Migrate PubMed ingestion to the RabbitMQ pipeline (see rabbitmq/ingest.py).
+
+Original description: Endpoint for ingesting data from PubMed.
 """
 from typing import Any, Callable, Dict, List
 import beam
@@ -34,18 +41,31 @@ volume_path = "./pubmed_ingest"
 
 ourSecrets = [
     "S3_BUCKET_NAME",
+    "CROPWIZARD_S3_BUCKET_NAME",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
+    "CROPWIZARD_AWS_REGION",
+    "CROPWIZARD_AWS_KEY",
+    "CROPWIZARD_AWS_SECRET",
     "BEAM_API_KEY",
 ]
 
 def loader():
     print("Inside loader()")
 
+    # Regular S3 client
     s3_client = boto3.client(
       's3',
       aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
       aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    )
+
+    # CropWizard-specific S3 client
+    cropwizard_s3_client = boto3.client(
+      's3',
+      region_name=os.getenv('CROPWIZARD_AWS_REGION'),
+      aws_access_key_id=os.getenv('CROPWIZARD_AWS_KEY'),
+      aws_secret_access_key=os.getenv('CROPWIZARD_AWS_SECRET'),
     )
 
     sentry_sdk.init(
@@ -57,7 +77,7 @@ def loader():
       profiles_sample_rate=1.0,
       enable_tracing=True)
     
-    return s3_client
+    return s3_client, cropwizard_s3_client
 
 @beam.endpoint(name="pubmed_ingest",
                workers=1,
@@ -77,7 +97,7 @@ def pubmed_ingest(context, **inputs: Dict[str, Any]):
         context: Context object
         inputs: Dict[str, Any]
     """
-    s3_client = context.on_start_value
+    s3_client, cropwizard_s3_client = context.on_start_value
     course_name: str = inputs.get('course_name', '')
     search_query: str = inputs.get('search_query', '')
     journal_name: str = inputs.get('journal_name', '')
@@ -90,14 +110,14 @@ def pubmed_ingest(context, **inputs: Dict[str, Any]):
     # route to 2 functions based on the input - PMC ID or search query
     if pmc_id:
         # use Web Service OA API to fetch articles by PMC ID and date range
-        return fech_articles_by_pmc_id(pmc_id, course_name, s3_client, from_date=from_date, to_date=to_date)
+        return fech_articles_by_pmc_id(pmc_id, course_name, s3_client, cropwizard_s3_client, from_date=from_date, to_date=to_date)
     
     if search_query or journal_name or article_title:
         # use EUtils API to fetch articles by journal, article title, text query, etc.
-        return fetch_articles_by_query(search_query, journal_name, article_title, course_name, s3_client, from_date=from_date, to_date=to_date, journal_abbr=journal_abbr)
+        return fetch_articles_by_query(search_query, journal_name, article_title, course_name, s3_client, cropwizard_s3_client, from_date=from_date, to_date=to_date, journal_abbr=journal_abbr)
 
 
-def fetch_articles_by_query(search_query, journal_name, article_title, course_name, s3_client, **kwargs):
+def fetch_articles_by_query(search_query, journal_name, article_title, course_name, s3_client, cropwizard_s3_client, **kwargs):
     """
     This function downloads articles from PubMed using the EUtils API.
     Args:
@@ -179,7 +199,7 @@ def fetch_articles_by_query(search_query, journal_name, article_title, course_na
         print("Number of PMC IDs returned: ", len(current_pmc_ids))
 
         for pmc_id, doi in current_pmc_ids:
-            status = fech_articles_by_pmc_id(pmc_id, course_name, s3_client, doi=doi, journal_name=journal_name)
+            status = fech_articles_by_pmc_id(pmc_id, course_name, s3_client, cropwizard_s3_client, doi=doi, journal_name=journal_name)
             print("Download status: ", status)
         
         # update current records count
@@ -200,7 +220,7 @@ def fetch_articles_by_query(search_query, journal_name, article_title, course_na
     return "Success"
 
 
-def fech_articles_by_pmc_id(pmci_id, course_name, s3_client, **kwargs):
+def fech_articles_by_pmc_id(pmci_id, course_name, s3_client, cropwizard_s3_client, **kwargs):
     """
     This function downloads articles from PubMed using the OA Web Service API.
     Search is based on PubMed ID, date range, and file format.
@@ -260,7 +280,15 @@ def fech_articles_by_pmc_id(pmci_id, course_name, s3_client, **kwargs):
         local_path = file
         s3_path = "courses/" + course_name + "/" + filename   
         print("S3 Path: ", s3_path)
-        s3_client.upload_file(local_path, os.environ['S3_BUCKET_NAME'], s3_path)
+        # Select appropriate S3 client and bucket based on course name
+        if course_name and 'cropwizard' in course_name.lower():
+            selected_s3_client = cropwizard_s3_client
+            bucket_name = os.environ['CROPWIZARD_S3_BUCKET_NAME']
+        else:
+            selected_s3_client = s3_client
+            bucket_name = os.environ['S3_BUCKET_NAME']
+        
+        selected_s3_client.upload_file(local_path, bucket_name, s3_path)
 
         # send for ingest
         if not doi:
