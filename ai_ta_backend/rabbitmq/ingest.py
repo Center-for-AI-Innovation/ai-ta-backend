@@ -130,45 +130,43 @@ class Ingest:
         # Embedding API retry configuration
         self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
-    def initialize_resources(self):
-        if os.environ['VECTOR_ENGINE'] == 'qdrant':
-            # Initialize Qdrant client and create collection if necessary
-            if self.qdrant_api_key and self.qdrant_url:
-                self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
-                if not self.qdrant_client.get_collection(self.qdrant_collection_name):
-                    logging.info(f"Creating collection {self.qdrant_collection_name}")
-                    self.qdrant_client.create_collection(
-                        collection_name=self.qdrant_collection_name,
-                        vectors_config={"size": 4096, "distance": "Cosine"}
-                    )
+    def initialize_resources(self, qdrant_client=None, qdrant_collection_name=None,
+                             s3_client=None, s3_bucket_name=None):
+        """Initialize external service clients.
 
-                if self.embedding_model == 'text-embedding-ada-002':
-                    self.vectorstore = Qdrant(
-                        client=self.qdrant_client,
-                        collection_name=self.qdrant_collection_name,
-                        embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
-                                                    openai_api_base=self.openai_api_base, model=self.embedding_model)
-                    )
-                    print("Vectorstore initialized with text-embedding-ada-002")
-                else:
-                    self.vectorstore = Qdrant(
-                        client=self.qdrant_client,
-                        collection_name=self.qdrant_collection_name,
-                        embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
-                                                    openai_api_base=self.openai_api_base, model=self.embedding_model,
-                                                    tiktoken_enabled=False)
-                    )
-                    print("Vectorstore initialized with NCSA_HOSTED model")
-            else:
-                logging.error("QDRANT API KEY OR URL NOT FOUND!")
+        Engine selection (per request):
+          1. Per-project qdrant_client override (from WorkerConnectionResolver)
+          2. Global VECTOR_ENGINE=qdrant env  → shared Qdrant
+          3. Otherwise                         → pgvector (handled by the else branch)
+        """
+        # ── Qdrant: per-project override wins ──
+        if qdrant_client is not None:
+            self.qdrant_client = qdrant_client
+            if qdrant_collection_name:
+                self.qdrant_collection_name = qdrant_collection_name
+            self._init_vectorstore()
+        # ── Qdrant: shared default when VECTOR_ENGINE=qdrant ──
+        elif os.environ.get('VECTOR_ENGINE') == 'qdrant' and self.qdrant_api_key and self.qdrant_url:
+            self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
+            if not self.qdrant_client.get_collection(self.qdrant_collection_name):
+                logging.info(f"Creating collection {self.qdrant_collection_name}")
+                self.qdrant_client.create_collection(
+                    collection_name=self.qdrant_collection_name,
+                    vectors_config={"size": 4096, "distance": "Cosine"}
+                )
+            self._init_vectorstore()
         else:
             # Standalone worker: no ai_ta_backend; use local pgvector store in rabbitmq
             from vector_store import get_vector_store
             self.pgvector_store = get_vector_store()
             logging.info("Vector store: pgvector (embeddings table)")
 
-        # Connect to AWS S3 file store
-        if self.aws_access_key_id and self.aws_secret_access_key:
+        # ── S3 ──
+        if s3_client is not None:
+            self.s3_client = s3_client
+            if s3_bucket_name:
+                self.s3_bucket_name = s3_bucket_name
+        elif self.aws_access_key_id and self.aws_secret_access_key:
             self.s3_client = boto3.client(
                 's3',
                 endpoint_url=self.minio_url,
@@ -184,6 +182,7 @@ class Ingest:
                 config=Config(s3={'addressing_style': 'path'})
             )
 
+        # ── PostHog ──
         if self.posthog_api_key:
             self.posthog = Posthog(sync_mode=False, project_api_key=self.posthog_api_key,
                                    host='https://app.posthog.com')
@@ -193,12 +192,37 @@ class Ingest:
 
         self.sql_session = SQLAlchemyIngestDB()
 
-    def main_ingest(self, job_id: str, **inputs: Dict[str | List[str], Any]):
+    def _init_vectorstore(self):
+        """Build the LangChain Qdrant vectorstore wrapper from the current qdrant_client."""
+        if self.embedding_model == 'text-embedding-ada-002':
+            self.vectorstore = Qdrant(
+                client=self.qdrant_client,
+                collection_name=self.qdrant_collection_name,
+                embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
+                                            openai_api_base=self.openai_api_base, model=self.embedding_model)
+            )
+        else:
+            self.vectorstore = Qdrant(
+                client=self.qdrant_client,
+                collection_name=self.qdrant_collection_name,
+                embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
+                                            openai_api_base=self.openai_api_base, model=self.embedding_model,
+                                            tiktoken_enabled=False)
+            )
+
+    def main_ingest(self, job_id: str, _resolved_connections=None, **inputs: Dict[str | List[str], Any]):
         """
         Main ingest function.
+        _resolved_connections: optional ResolvedConnections from WorkerConnectionResolver.
         """
         try:
-            self.initialize_resources()
+            rc = _resolved_connections
+            self.initialize_resources(
+                qdrant_client=getattr(rc, 'qdrant_client', None) if rc else None,
+                qdrant_collection_name=getattr(rc, 'qdrant_collection_name', None) if rc else None,
+                s3_client=getattr(rc, 's3_client', None) if rc else None,
+                s3_bucket_name=getattr(rc, 's3_bucket_name', None) if rc else None,
+            )
 
             course_name: List[str] | str = inputs.get('course_name', '')
             s3_paths: List[str] | str = inputs.get('s3_paths', '')
