@@ -221,6 +221,7 @@ class RetrievalService:
     unique_combinations = set()
     distinct_dicts = []
 
+    logging.info(f"Parsing {data}")
     for item in data:
       combination = (item['s3_path'], item['readable_filename'], item['course_name'], item['url'], item['base_url'])
       if combination not in unique_combinations:
