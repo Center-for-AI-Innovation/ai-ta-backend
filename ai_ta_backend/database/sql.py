@@ -3,7 +3,7 @@ import os
 from contextlib import contextmanager
 from typing import List, TypedDict, TypeVar, Generic
 
-from sqlalchemy import create_engine, NullPool, func, insert, delete, select, desc, literal, ARRAY
+from sqlalchemy import create_engine, NullPool, func, insert, delete, select, update, desc, literal, ARRAY
 from sqlalchemy.orm import sessionmaker, Session, aliased
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
@@ -465,9 +465,9 @@ class SQLDatabase:
 
     def unlockWorkflow(self, id: int):
         query = (
-            select(models.N8nWorkflows)
+            update(models.N8nWorkflows)
             .where(models.N8nWorkflows.latest_workflow_id == id)
-            .update({"is_locked": False})
+            .values(is_locked=False)
         )
         with self.get_session() as session:
             result = session.execute(query)

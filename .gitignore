@@ -171,3 +171,5 @@ pip-selfcheck.json
 
 # Cursor workspace files
 *.code-workspace
+# cursor
+*.workspace
