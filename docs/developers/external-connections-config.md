@@ -20,6 +20,10 @@ layout:
 
 This page documents the exact JSON config format for each connection type. All configs are encrypted at rest and stored as JSONB in the `project_external_connections` table.
 
+{% hint style="info" %}
+**Who writes these rows:** the Next.js frontend (`uiuc-chat-frontend` `src/pages/api/UIUC-api/projectConnections*`) is the sole writer. This backend reads the rows at runtime for per-project dispatch. The Zod validation schemas in `uiuc-chat-frontend/src/utils/projectConnections/validation.ts` are the source of truth for required fields and accepted shapes; the descriptions on this page must stay aligned with those schemas.
+{% endhint %}
+
 For a higher-level overview, see [External Connections](../features/external-connections.md).
 
 ## Bucket Storage Config (S3 / MinIO)

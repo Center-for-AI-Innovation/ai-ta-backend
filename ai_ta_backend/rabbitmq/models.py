@@ -341,9 +341,17 @@ class Messages(Base):
 
 
 class ProjectExternalConnection(Base):
-    """Stores per-project external infrastructure connection configs.
-    Each *_config column holds a Fernet-encrypted JSON blob.
-    None means "use default infrastructure."
+    """Read-only mirror of the `project_external_connections` table.
+
+    The Next.js frontend is the sole writer (uiuc-chat-frontend
+    `src/pages/api/UIUC-api/projectConnections*`). The Drizzle schema in
+    that repo is the source of truth for the column set and constraints;
+    this SQLAlchemy class exists so the backend's read path
+    (`ConnectionManager`, `WorkerConnectionResolver`) can use ORM queries.
+
+    Each *_config column holds an AES-256-GCM-encrypted JSON blob shaped
+    as ``{"encrypted": "v1.<ct+tag>.<iv>"}``. None means "use default
+    infrastructure".
     """
     __tablename__ = 'project_external_connections'
     id = Column(BigInteger, primary_key=True, autoincrement=True)

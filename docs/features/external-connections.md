@@ -32,6 +32,17 @@ This is useful when you need:
 * **Multi-collection search** -- query multiple Qdrant collections (e.g., PubMed, Patents, NCBI Books) in parallel and merge results.
 * **Custom embedding models** -- use a different embedding provider (OpenAI-compatible or Ollama) per project.
 
+## Where CRUD lives
+
+{% hint style="warning" %}
+**CRUD for external connections is owned by the Next.js frontend, not this backend.** The endpoints documented in earlier revisions of this page (`POST/GET/DELETE/PATCH /api/project-connections*`) have been removed. The frontend is the sole writer to the `project_external_connections` table; this backend is a **read-only consumer**.
+
+* Frontend repo: `uiuc-chat-frontend`
+* Source: `src/pages/api/UIUC-api/projectConnections*`
+* Operator docs: `uiuc-chat-frontend/docs/EXTERNAL_CONNECTIONS.md`
+* Authorization: super-admin-only (see frontend docs).
+{% endhint %}
+
 ## Supported Connection Types
 
 ### S3 / MinIO
@@ -52,100 +63,20 @@ Controls where vector embeddings live and how retrieval works. Every Qdrant conf
 
 Optionally, add a `collections` array to fan out searches across additional collections in parallel. Each entry can apply a post-processor that normalizes results from specialized data sources (PubMed, Patents, NCBI Books, Clinical Trials). `default_collection` is searched alongside the listed collections automatically -- you don't need to list it twice.
 
-## How It Works
+## How It Works (read path)
 
-1. **Create or update** a connection config via the API (`POST /api/project-connections`). You can configure any combination of S3, PostgreSQL, and Qdrant -- only the configs you provide will override the defaults.
-2. **Platform resolves connections at runtime.** On every query or ingest job, the system checks if the project has external configs and routes traffic to the right infrastructure. Only rows where `is_active = true` are loaded -- this is enforced in both the web backend and the ingest worker, so toggling `is_active` flips behavior everywhere. Configs are cached (5 min TTL) and connections are cached (30 min TTL) to avoid per-request overhead.
-3. **Secrets are encrypted at rest** using AES-256-GCM before being stored in the database.
-4. **Retrieving a config via GET** returns masked secrets -- only the last 4 characters are shown (e.g., `****MPLE`), so credentials are never exposed in API responses.
-5. **Deleting individual configs** is supported by passing a `type` query param (`s3`, `database`, or `qdrant`) to `DELETE /api/project-connections`. Omit `type` to delete the entire row as before.
-6. **Toggling without deleting** is supported via `PATCH /api/project-connections/active` -- this flips `is_active` so the project temporarily falls back to the shared defaults while keeping the stored configs for later reactivation.
-7. **Cache is automatically invalidated** whenever you create, update, delete, or toggle a connection config.
-
-{% hint style="warning" %}
-Always **test your connection** using the `POST /api/project-connections/test` endpoint before saving. Invalid configs can prevent retrieval and ingest from working for that project.
-{% endhint %}
+1. **Configs are created and updated by the frontend** (see "Where CRUD lives" above). Each config block is encrypted with AES-256-GCM before being stored in JSONB.
+2. **This backend resolves connections at runtime.** On every query or ingest job, `ConnectionManager` reads the project's row from `project_external_connections` and routes traffic to the right infrastructure. Only rows where `is_active = true` are honored -- this is enforced in both the web backend and the ingest worker, so toggling `is_active` flips behavior everywhere. Configs are cached (5 min TTL) and connections are cached (30 min TTL).
+3. **Decryption** uses the same `ENCRYPTION_MASTER_KEY` env var the frontend used to encrypt. The two services MUST share this key.
+4. **Cache invalidation across services** is the frontend's responsibility for its own caches; this backend's `ConnectionManager` currently relies on its 5-minute TTL for changes the frontend writes. A cross-service Redis pub/sub channel is on the roadmap (frontend issue).
 
 ## Security
 
 * All config values (API keys, access keys, connection URIs) are **encrypted at rest** with AES-256-GCM.
-* The `GET` endpoint returns **masked values** (e.g., `****MPLE`) so secrets are never exposed through the API.
-* The backend requires the `ENCRYPTION_MASTER_KEY` environment variable to be set for encryption/decryption.
-* Cached connections are automatically invalidated when configs change.
-
-## Quick Start
-
-### Step 1: Test the Connection
-
-Before saving, verify that your credentials work:
-
-```python
-import requests
-
-url = "https://uiuc.chat/api/project-connections/test"
-headers = {"Content-Type": "application/json"}
-
-# Test a Qdrant connection
-data = {
-    "type": "qdrant",
-    "config": {
-        "url": "https://your-qdrant-instance.com",
-        "api_key": "your-qdrant-api-key",
-        "port": 6333
-    }
-}
-
-response = requests.post(url, headers=headers, json=data)
-print(response.json())
-# {"success": true}
-```
-
-### Step 2: Save the Connection Config
-
-```python
-url = "https://uiuc.chat/api/project-connections"
-
-data = {
-    "project_name": "my-project",
-    "qdrant_config": {
-        "url": "https://your-qdrant-instance.com",
-        "api_key": "your-qdrant-api-key",
-        "port": 6333,
-        "https": True,
-        "default_collection": "my-collection"
-    },
-    "s3_config": {
-        "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
-        "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        "bucket_name": "my-project-bucket"
-        # Add "endpoint_url" only if using MinIO or an S3-compatible service
-    }
-}
-
-response = requests.post(url, headers=headers, json=data)
-print(response.json())
-# {"success": true, "project_name": "my-project", "project_id": 42}
-```
-
-### Step 3: Verify It Was Saved
-
-```python
-url = "https://uiuc.chat/api/project-connections"
-params = {"project_name": "my-project"}
-
-response = requests.get(url, params=params)
-print(response.json())
-# Secrets are masked -- only last 4 characters shown
-# {
-#   "found": true,
-#   "project_name": "my-project",
-#   "is_active": true,
-#   "s3_config": {"aws_access_key_id": "****MPLE", "bucket_name": "****cket", ...},
-#   "qdrant_config": {"url": "****com", "api_key": "****-key", ...}
-# }
-```
+* This backend requires the `ENCRYPTION_MASTER_KEY` environment variable to be set in order to decrypt configs at runtime.
+* The frontend GET endpoint returns **masked values** (`****MPLE`) so secrets are never exposed through any API.
 
 ## Next Steps
 
-* [Full API Reference](../api/endpoints.md#external-connections-api) -- detailed endpoint documentation with all request/response shapes.
+* [Frontend API reference](../../../uiuc-chat-frontend/docs/EXTERNAL_CONNECTIONS.md) -- where to actually call CRUD.
 * [Configuration Reference](../developers/external-connections-config.md) -- complete field-by-field config schemas, post-processors, embedding providers, and environment variables.

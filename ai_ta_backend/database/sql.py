@@ -897,6 +897,9 @@ class SQLDatabase:
 
     # ── External Connection Config CRUD ──────────────────────────────
 
+    # NOTE: external-connection writes (upsert / delete / set_active) live in
+    # the Next.js frontend (uiuc-chat-frontend
+    # src/pages/api/UIUC-api/projectConnections*). The backend only reads.
     @_host_only
     def getExternalConnection(self, project_name: str):
         query = (
@@ -907,89 +910,6 @@ class SQLDatabase:
         with self.get_session() as session:
             result = session.execute(query).scalars().first()
             return orm_to_dict(result)
-
-    @_host_only
-    def upsertExternalConnection(self, project_id: int, project_name: str, s3_config=None, database_config=None, qdrant_config=None):
-        with self.get_session() as session:
-            existing = session.execute(
-                select(models.ProjectExternalConnection)
-                .where(models.ProjectExternalConnection.project_name == project_name)
-            ).scalars().first()
-
-            if existing:
-                if s3_config is not None:
-                    existing.s3_config = s3_config
-                if database_config is not None:
-                    existing.database_config = database_config
-                if qdrant_config is not None:
-                    existing.qdrant_config = qdrant_config
-                existing.is_active = True
-                return orm_to_dict(existing)
-            else:
-                new_conn = models.ProjectExternalConnection(
-                    project_id=project_id,
-                    project_name=project_name,
-                    s3_config=s3_config,
-                    database_config=database_config,
-                    qdrant_config=qdrant_config,
-                    is_active=True,
-                )
-                session.add(new_conn)
-                session.flush()
-                return orm_to_dict(new_conn)
-
-    # Column name on ProjectExternalConnection for each public "type" value.
-    _CONN_TYPE_COLUMNS = {
-        "s3": "s3_config",
-        "database": "database_config",
-        "qdrant": "qdrant_config",
-    }
-
-    @_host_only
-    def deleteExternalConnection(self, project_name: str, conn_type: str | None = None):
-        """Delete an external connection row, or clear a single config field on it.
-
-        - conn_type=None  -> delete the entire row (legacy behavior).
-        - conn_type in {"s3","database","qdrant"} -> set that single *_config
-          column to NULL and leave the row (and other configs) in place.
-
-        Returns a dict: {"deleted": bool, "found": bool, "cleared": str | None}.
-        """
-        if conn_type is None:
-            delete_stmt = (
-                delete(models.ProjectExternalConnection)
-                .where(models.ProjectExternalConnection.project_name == project_name)
-            )
-            with self.get_session() as session:
-                result = session.execute(delete_stmt)
-                return {"deleted": result.rowcount > 0, "found": result.rowcount > 0, "cleared": None}
-
-        column_name = self._CONN_TYPE_COLUMNS[conn_type]
-        with self.get_session() as session:
-            existing = session.execute(
-                select(models.ProjectExternalConnection)
-                .where(models.ProjectExternalConnection.project_name == project_name)
-            ).scalars().first()
-            if not existing:
-                return {"deleted": False, "found": False, "cleared": None}
-            setattr(existing, column_name, None)
-            return {"deleted": True, "found": True, "cleared": conn_type}
-
-    @_host_only
-    def setExternalConnectionActive(self, project_name: str, is_active: bool):
-        """Toggle the is_active flag on a project's external connection row.
-
-        Returns a dict: {"found": bool, "is_active": bool | None}.
-        """
-        with self.get_session() as session:
-            existing = session.execute(
-                select(models.ProjectExternalConnection)
-                .where(models.ProjectExternalConnection.project_name == project_name)
-            ).scalars().first()
-            if not existing:
-                return {"found": False, "is_active": None}
-            existing.is_active = bool(is_active)
-            return {"found": True, "is_active": existing.is_active}
 
     @staticmethod
     def get_session_for_engine(engine):

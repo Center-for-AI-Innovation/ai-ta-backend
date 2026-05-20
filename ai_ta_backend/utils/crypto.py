@@ -96,20 +96,15 @@ def _get_connection_encryption_key() -> str:
   return key
 
 
-def encrypt_config(config: dict) -> dict:
-  """Encrypt a config dict for storage in project_external_connections.
-  Returns {"encrypted": "v1.xxx.yyy"} suitable for JSONB column.
-  """
-  if not config:
-    return None
-  plaintext = json.dumps(config)
-  encrypted_str = encrypt(plaintext, _get_connection_encryption_key())
-  return {"encrypted": encrypted_str}
-
-
 def decrypt_config(stored: dict) -> dict:
   """Decrypt a config dict from project_external_connections.
-  Expects {"encrypted": "v1.xxx.yyy"} as stored in JSONB column.
+
+  This is the only entry point the backend needs into the
+  project-connection encryption envelope — the Next.js frontend is the
+  sole writer (see uiuc-chat-frontend
+  src/pages/api/UIUC-api/projectConnections*).
+
+  Expects {"encrypted": "v1.xxx.yyy"} as stored in the JSONB column.
   Returns the original config dict.
   """
   if not stored:
@@ -119,34 +114,3 @@ def decrypt_config(stored: dict) -> dict:
     return None
   plaintext = decrypt(encrypted_str, _get_connection_encryption_key())
   return json.loads(plaintext)
-
-
-# Substrings that mark a field as secret-bearing. Matched case-insensitively
-# against config keys. Non-matching fields (bucket_name, endpoint_url, region,
-# url, port, default_collection, model, provider, ...) are returned in plaintext
-# so the UI can display them.
-_SECRET_FIELD_PATTERNS = ('key', 'secret', 'password', 'passwd', 'token', 'connection_uri')
-
-
-def _is_secret_field(field_name: str) -> bool:
-  lower = field_name.lower()
-  return any(pat in lower for pat in _SECRET_FIELD_PATTERNS)
-
-
-def mask_config(config: dict) -> dict:
-  """Return a copy of config with secret-bearing values masked for API responses.
-  Only fields whose names match `_SECRET_FIELD_PATTERNS` are masked
-  (e.g. api_key, aws_secret_access_key, connection_uri); identifiers like
-  bucket_name, endpoint_url, region, url, port, model, provider pass through
-  unchanged so the frontend can render them.
-  Masked values show only the last 4 characters.
-  """
-  if not config:
-    return None
-  masked = {}
-  for key, value in config.items():
-    if isinstance(value, str) and _is_secret_field(key):
-      masked[key] = '****' + value[-4:] if len(value) > 4 else '****'
-    else:
-      masked[key] = value
-  return masked
