@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `ALLOWED_EMBEDDING_PROVIDERS` env var (default `openai,ollama`) — comma-separated allow-list enforced by `_resolve_embedding_client`. Disallowed providers now raise `ValueError("Unsupported embedding provider …")` instead of silently routing to the OpenAI client. Mirrored on the frontend by `validation.ts`, which uses the env var to narrow the Zod `provider` enum.
 - Dual-engine vector dispatch in `ConnectionManager` and `VectorDatabase`: pgvector is the default; Qdrant is used only when a project has an active `qdrant_config`.
 - `embedding_config` column on `project_external_connections` for per-project embedding-provider overrides (works for both Qdrant and pgvector projects). Top-level location replaces the legacy nested `qdrant_config.embedding` (still honored as fallback).
 - `PgVectorStore.search()` — vector search with the same filter semantics as the frontend's `vectorSearchWithDrizzle` (cosine `<=>`, JSONB `@>` doc-group filters, conversation-id handling).

@@ -13,9 +13,17 @@ Coverage:
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock
 
-from ai_ta_backend.service.retrieval_service import RetrievalService
+import pytest
+
+from ai_ta_backend.service import retrieval_service
+from ai_ta_backend.service.retrieval_service import (
+    ALLOWED_EMBEDDING_PROVIDERS,
+    RetrievalService,
+    _parse_allowed_embedding_providers,
+)
 
 
 def _build_service(embedding_client) -> RetrievalService:
@@ -80,3 +88,77 @@ def test_embed_document_helper_passes_text_through_unchanged():
     assert out == [0.42]
     client.embed_documents.assert_called_once_with(["raw document text"])
     assert not client.embed_query.called
+
+
+# ---------------------------------------------------------------------------
+# Provider whitelist (ALLOWED_EMBEDDING_PROVIDERS)
+# ---------------------------------------------------------------------------
+
+
+def test_default_allowed_providers_contains_openai_and_ollama():
+    # Unset env at module load → default tuple.
+    assert "openai" in ALLOWED_EMBEDDING_PROVIDERS
+    assert "ollama" in ALLOWED_EMBEDDING_PROVIDERS
+
+
+def test_parser_respects_comma_separated_env(monkeypatch):
+    monkeypatch.setenv("ALLOWED_EMBEDDING_PROVIDERS", "openai, ollama, custom")
+    assert _parse_allowed_embedding_providers() == ("openai", "ollama", "custom")
+
+
+def test_parser_rejects_empty_env(monkeypatch):
+    monkeypatch.setenv("ALLOWED_EMBEDDING_PROVIDERS", " , ,, ")
+    with pytest.raises(ValueError, match="empty list"):
+        _parse_allowed_embedding_providers()
+
+
+def test_resolve_embedding_client_rejects_unknown_provider(monkeypatch):
+    # Patch the module-level constant to simulate a tightened whitelist
+    # without having to reload the module.
+    monkeypatch.setattr(
+        retrieval_service, "ALLOWED_EMBEDDING_PROVIDERS", ("openai",)
+    )
+
+    svc = object.__new__(RetrievalService)
+    svc.embedding_model = "text-embedding-3-small"
+    svc.openai_api_key = "sk-test"
+    svc.openai_api_base = "https://api.openai.com/v1"
+    svc.qwen_query_instruction = "test"
+
+    conn_manager = MagicMock()
+    # Simulate a row with a disallowed provider in embedding_config.
+    def _get_field(project, field):
+        if field == "embedding_config":
+            return {"provider": "anthropic", "model": "voyage-3"}
+        return None
+
+    conn_manager._get_decrypted_field.side_effect = _get_field
+    svc.conn_manager = conn_manager
+
+    with pytest.raises(ValueError, match="Unsupported embedding provider"):
+        svc._resolve_embedding_client("demo")
+
+
+def test_resolve_embedding_client_accepts_allowed_provider(monkeypatch):
+    """Whitelist enforcement does not reject in-list providers."""
+    monkeypatch.setattr(
+        retrieval_service, "ALLOWED_EMBEDDING_PROVIDERS", ("openai", "ollama")
+    )
+
+    svc = object.__new__(RetrievalService)
+    svc.embedding_model = "text-embedding-3-small"
+    svc.openai_api_key = "sk-test"
+    svc.openai_api_base = "https://api.openai.com/v1"
+    svc.qwen_query_instruction = "test"
+
+    conn_manager = MagicMock()
+    conn_manager._get_decrypted_field.side_effect = lambda p, f: (
+        {"provider": "openai", "model": "text-embedding-3-small"}
+        if f == "embedding_config"
+        else None
+    )
+    svc.conn_manager = conn_manager
+
+    client, instr = svc._resolve_embedding_client("demo")
+    assert client is not None
+    assert instr == "test"

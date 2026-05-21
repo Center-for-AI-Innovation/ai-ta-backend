@@ -42,6 +42,30 @@ DEFAULT_QWEN_QUERY_INSTRUCTION = (
 )
 
 
+def _parse_allowed_embedding_providers() -> tuple[str, ...]:
+    """Parse ``ALLOWED_EMBEDDING_PROVIDERS`` (comma-separated, lowercased).
+
+    Mirrors the frontend parser in ``validation.ts``. Empty / unset → default
+    ``('openai', 'ollama')`` — the two providers ``_resolve_embedding_client``
+    actually knows how to build clients for.
+    """
+    raw = os.getenv("ALLOWED_EMBEDDING_PROVIDERS")
+    if not raw:
+        return ("openai", "ollama")
+    parsed = tuple(
+        p for p in (s.strip().lower() for s in raw.split(",")) if p
+    )
+    if not parsed:
+        raise ValueError(
+            "ALLOWED_EMBEDDING_PROVIDERS is set but parses to an empty list. "
+            "Unset it or supply at least one provider."
+        )
+    return parsed
+
+
+ALLOWED_EMBEDDING_PROVIDERS: tuple[str, ...] = _parse_allowed_embedding_providers()
+
+
 class RetrievalService:
     """
     Contains all methods for business logic of the retrieval service.
@@ -683,6 +707,11 @@ class RetrievalService:
             return self.embeddings, self.qwen_query_instruction
 
         provider = embedding_cfg.get("provider", "openai")
+        if provider not in ALLOWED_EMBEDDING_PROVIDERS:
+            raise ValueError(
+                f"Unsupported embedding provider {provider!r}. "
+                f"Allowed: {ALLOWED_EMBEDDING_PROVIDERS}"
+            )
         model = embedding_cfg.get("model", self.embedding_model)
         query_instruction = embedding_cfg.get(
             "query_instruction", self.qwen_query_instruction
