@@ -51,7 +51,11 @@ Controls where uploaded documents and exported files are stored. Configure this 
 
 ### PostgreSQL Database
 
-Controls where **document metadata** is stored: the `documents`, `documents_in_progress`, `documents_failed`, `doc_groups`, and `documents_doc_groups` tables. Configure this when you want a project's document inventory to live in your own Postgres alongside your S3 and Qdrant.
+Controls where **document metadata + embeddings** are stored: the `documents`, `documents_in_progress`, `documents_failed`, `doc_groups`, `documents_doc_groups`, **and `embeddings`** tables. Configure this when you want a project's document inventory and its vectors to live in your own Postgres.
+
+{% hint style="info" %}
+**Embeddings follow the documents DB.** When `database_config` is set and `qdrant_config` is NOT, the same external Postgres holds both documents and embeddings — the platform's pgvector extension is used. Operators must install `pgvector` and apply the platform's migrations on the external pg before activating the row. See the developer guide for the exact migrations.
+{% endhint %}
 
 {% hint style="info" %}
 **The external SQL connection is document-scoped.** Conversations, messages, project metadata, analytics, API keys, and workflow state always remain on the host platform's main database — they are never written to a project's external Postgres, even when `database_config` is set. See [Scope of the External SQL Connection](../developers/external-connections-config.md#scope-of-the-external-sql-connection) for the full table-level breakdown.
@@ -59,9 +63,21 @@ Controls where **document metadata** is stored: the `documents`, `documents_in_p
 
 ### Qdrant Vector Database
 
-Controls where vector embeddings live and how retrieval works. Every Qdrant config must set `default_collection` -- this is the project's primary collection, where all ingest writes go and which is always included in search.
+Controls where vector embeddings live and how retrieval works. When `qdrant_config` is set, embeddings live in Qdrant — overriding the pgvector default. Every Qdrant config must set `default_collection` -- this is the project's primary collection, where all ingest writes go and which is always included in search.
 
 Optionally, add a `collections` array to fan out searches across additional collections in parallel. Each entry can apply a post-processor that normalizes results from specialized data sources (PubMed, Patents, NCBI Books, Clinical Trials). `default_collection` is searched alongside the listed collections automatically -- you don't need to list it twice.
+
+### Embedding Model (per project)
+
+`embedding_config` is a top-level column for per-project embedding-model overrides. It works regardless of which vector engine the project uses (Qdrant or pgvector). When omitted, the platform falls back to the env-driven default. See the developer guide for the plaintext shape.
+
+### Routing precedence (resolved per request)
+
+1. `qdrant_config` present → vector lives in external Qdrant.
+2. Else → vector lives in pgvector. If `database_config` is present, the **same external Postgres** stores both documents and embeddings.
+3. No overrides → host Postgres (with pgvector) for both.
+
+There is no `VECTOR_ENGINE` environment switch — the row alone decides.
 
 ## How It Works (read path)
 

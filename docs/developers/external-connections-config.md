@@ -84,6 +84,8 @@ The `s3_config` block supports either AWS S3 or any S3-compatible storage such a
 
 An external `database_config` is **document-scoped**. Only the tables that participate in document ingestion and retrieval-side filtering are routed to the project's external Postgres. Conversation, project, analytics, auth, and workflow data always live on the host platform's main DB regardless of whether `database_config` is set.
 
+When `qdrant_config` is **not** set, embeddings also live on the external DB (the platform's pgvector path uses the documents engine). When `qdrant_config` **is** set, the external DB stores documents only; embeddings go to Qdrant.
+
 | Lives in external DB (when `database_config` is set) | Always lives on host main DB |
 | ---------------------------------------------------- | ---------------------------- |
 | `documents`                                          | `conversations`              |
@@ -91,11 +93,24 @@ An external `database_config` is **document-scoped**. Only the tables that parti
 | `documents_failed`                                   | `projects`                   |
 | `doc_groups`                                         | `project_stats`              |
 | `documents_doc_groups`                               | `llm-convo-monitor`          |
-|                                                      | `pre_authorized_api_keys`    |
+| `embeddings` *(when `qdrant_config` is not set)*     | `pre_authorized_api_keys`    |
 |                                                      | `n8n_workflows`              |
 |                                                      | `project_external_connections` (the routing table itself) |
 
-The external DB schema must therefore provide just the five document-side tables. Conversation history, project metadata, stats dashboards, API key resolution, and workflow locks all read/write the host DB.
+The external DB schema must therefore provide the six document-side tables (five plus `embeddings` when running on pgvector). Conversation history, project metadata, stats dashboards, API key resolution, and workflow locks all read/write the host DB.
+
+### External Postgres provisioning (pgvector projects)
+
+Before activating a `database_config` row, the operator must apply the platform's migrations on the external Postgres. The required objects are:
+
+* `pgvector` extension (`CREATE EXTENSION IF NOT EXISTS vector;`)
+* Tables:
+  * `embeddings` — vectorized chunks (4096-dim by default; see migration 0007).
+  * `documents`, `documents_in_progress`, `documents_failed`
+  * `doc_groups`, `documents_doc_groups`
+* Stored procedures: `add_document_to_group`, `add_document_to_group_url` (frontend migrations `0001_custom_functions.sql` / `0007_embeddings_table.sql`).
+
+The frontend ships these as Drizzle migrations under `uiuc-chat-frontend/src/db/migrations/`. Apply migrations 0006 / 0007 (pgvector + embeddings) and the migrations that create the document tables on the external pg before flipping `is_active = true`.
 
 In code, the routing rule is enforced by two `ConnectionManager` accessors:
 
@@ -117,13 +132,7 @@ Every Qdrant config has one required collection (`default_collection`). All inge
   "port": 6333,
   "https": true,
   "default_collection": "my-project-collection",
-  "skip_quantization_rescore": true,
-  "embedding": {
-    "provider": "openai",
-    "model": "text-embedding-3-small",
-    "api_key": "sk-your-openai-key",
-    "api_base": "https://api.openai.com/v1"
-  }
+  "skip_quantization_rescore": true
 }
 ```
 
@@ -136,7 +145,7 @@ Every Qdrant config has one required collection (`default_collection`). All inge
 | `https`                      | boolean | No       | Whether to use HTTPS. Default: `false`.                                                                         |
 | `collections`                | array   | No       | Additional collections to fan out searches across. See [Optional `collections`](#optional-collections-fan-out-search) below. |
 | `skip_quantization_rescore`  | boolean | No       | Skip quantization rescore during search. Default: `true`.                                                       |
-| `embedding`                  | object  | No       | Per-project embedding provider config. See [Embedding Provider Config](#embedding-provider-config) below.       |
+| `embedding`                  | object  | No       | **Deprecated.** Use the top-level `embedding_config` column instead. Still honored as a fallback when no top-level config is present. See [Embedding Provider Config](#embedding-provider-config) below. |
 
 ### Optional: `collections` (fan-out search)
 
@@ -197,19 +206,21 @@ Add `collections` when your project needs to search across multiple Qdrant colle
 
 ## Embedding Provider Config
 
-The optional `embedding` key inside `qdrant_config` lets you override the embedding model on a per-project basis. If omitted, the platform uses the default embedding model from environment variables.
+The platform reads embedding overrides from the top-level **`embedding_config`** column on `project_external_connections`. The shape below applies to both vector engines (Qdrant and pgvector). If omitted, the platform uses the default embedding model from environment variables.
+
+> **Backward compatibility:** an `embedding` key nested inside `qdrant_config` is still honored as a fallback so existing Qdrant projects keep working. New projects should set `embedding_config` directly.
 
 ### OpenAI-Compatible Provider
 
+`embedding_config` (new top-level column) plaintext shape:
+
 ```json
 {
-  "embedding": {
-    "provider": "openai",
-    "model": "text-embedding-3-small",
-    "api_key": "sk-your-openai-key",
-    "api_base": "https://api.openai.com/v1",
-    "query_instruction": "Represent the query for retrieval:"
-  }
+  "provider": "openai",
+  "model": "text-embedding-3-small",
+  "api_key": "sk-your-openai-key",
+  "api_base": "https://api.openai.com/v1",
+  "query_instruction": "Represent the query for retrieval:"
 }
 ```
 
@@ -217,17 +228,15 @@ The optional `embedding` key inside `qdrant_config` lets you override the embedd
 
 ```json
 {
-  "embedding": {
-    "provider": "ollama",
-    "model": "nomic-embed-text",
-    "base_url": "http://localhost:11434"
-  }
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "base_url": "http://localhost:11434"
 }
 ```
 
 | Field               | Type   | Required       | Description                                                                                                   |
 | ------------------- | ------ | -------------- | ------------------------------------------------------------------------------------------------------------- |
-| `provider`          | string | No             | `"openai"` (default) or `"ollama"`                                                                            |
+| `provider`          | string | **Yes**        | `"openai"` or `"ollama"`. The Zod validator rejects other values.                                             |
 | `model`             | string | No             | Embedding model name. Falls back to env `EMBEDDING_MODEL`.                                                    |
 | `api_key`           | string | No             | OpenAI API key. Only for `openai` provider. Falls back to env `OPENAI_API_KEY`.                               |
 | `api_base`          | string | No             | OpenAI-compatible API base URL. Only for `openai` provider. Falls back to env `EMBEDDING_API_BASE`.           |

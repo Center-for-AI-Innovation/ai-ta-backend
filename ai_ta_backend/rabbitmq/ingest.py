@@ -42,10 +42,12 @@ from git.repo import Repo
 from bs4 import BeautifulSoup
 from pydub import AudioSegment
 
-if os.environ['VECTOR_ENGINE'] == 'qdrant':
-    from qdrant_client import QdrantClient, models
-    from qdrant_client.models import PointStruct
-    from langchain.vectorstores import Qdrant
+# Qdrant client is imported unconditionally — the per-project resolver
+# decides whether to actually use it. `langchain.vectorstores.Qdrant` is
+# tied to the same path and only constructed when a Qdrant client is bound.
+from qdrant_client import QdrantClient, models
+from qdrant_client.models import PointStruct
+from langchain.vectorstores import Qdrant
 
 try:
     from ai_ta_backend.rabbitmq.rmsql import SQLAlchemyIngestDB
@@ -98,19 +100,14 @@ class Ingest:
         self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
         self.posthog_api_key = os.getenv('POSTHOG_API_KEY')
 
-        if os.environ['VECTOR_ENGINE'] == 'qdrant':
-            self.qdrant_url = os.getenv('QDRANT_URL')
-            self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
-            self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
-            self.qdrant_client = None
-            self.vectorstore = None
-
-            # Qdrant ingestion tuning
-            # Batch size for upserts during ingestion per guidance from Qdrant team
-            self.qdrant_upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
-            # Temporarily raise indexing threshold during ingestion, then revert
-            self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
-            self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
+        # Qdrant fields are always defined so engine-agnostic code paths can
+        # inspect them without raising. They're populated only when a
+        # per-project Qdrant client is bound via `initialize_resources`.
+        self.qdrant_url = os.getenv('QDRANT_URL')
+        self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
+        self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
+        self.qdrant_client = None
+        self.vectorstore = None
 
         self.posthog = None
         self.pgvector_store = None
@@ -131,34 +128,33 @@ class Ingest:
         self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
     def initialize_resources(self, qdrant_client=None, qdrant_collection_name=None,
-                             s3_client=None, s3_bucket_name=None):
+                             s3_client=None, s3_bucket_name=None,
+                             pgvector_store=None, documents_sql_engine=None):
         """Initialize external service clients.
 
-        Engine selection (per request):
-          1. Per-project qdrant_client override (from WorkerConnectionResolver)
-          2. Global VECTOR_ENGINE=qdrant env  → shared Qdrant
-          3. Otherwise                         → pgvector (handled by the else branch)
+        Engine selection (per request, driven by WorkerConnectionResolver):
+          1. Per-project ``qdrant_client``       → external Qdrant
+          2. Otherwise                            → pgvector
+             (per-project external pg via ``pgvector_store`` when the project
+              has ``database_config``, else the host pgvector store)
         """
-        # ── Qdrant: per-project override wins ──
         if qdrant_client is not None:
             self.qdrant_client = qdrant_client
             if qdrant_collection_name:
                 self.qdrant_collection_name = qdrant_collection_name
             self._init_vectorstore()
-        # ── Qdrant: shared default when VECTOR_ENGINE=qdrant ──
-        elif os.environ.get('VECTOR_ENGINE') == 'qdrant' and self.qdrant_api_key and self.qdrant_url:
-            self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
-            if not self.qdrant_client.get_collection(self.qdrant_collection_name):
-                logging.info(f"Creating collection {self.qdrant_collection_name}")
-                self.qdrant_client.create_collection(
-                    collection_name=self.qdrant_collection_name,
-                    vectors_config={"size": 4096, "distance": "Cosine"}
-                )
-            self._init_vectorstore()
         else:
-            # Standalone worker: no ai_ta_backend; use local pgvector store in rabbitmq
-            from vector_store import get_vector_store
-            self.pgvector_store = get_vector_store()
+            # pgvector: prefer the per-project store from the resolver; fall
+            # back to the host pgvector store.
+            if pgvector_store is not None:
+                self.pgvector_store = pgvector_store
+            else:
+                try:
+                    from ai_ta_backend.rabbitmq.vector_store import get_vector_store
+                except ImportError:
+                    # Standalone worker: no ai_ta_backend on sys.path.
+                    from vector_store import get_vector_store
+                self.pgvector_store = get_vector_store()
             logging.info("Vector store: pgvector (embeddings table)")
 
         # ── S3 ──
@@ -190,7 +186,7 @@ class Ingest:
             self.posthog = None
             print("POSTHOG API KEY NOT FOUND!")
 
-        self.sql_session = SQLAlchemyIngestDB()
+        self.sql_session = SQLAlchemyIngestDB(engine=documents_sql_engine)
 
     def _init_vectorstore(self):
         """Build the LangChain Qdrant vectorstore wrapper from the current qdrant_client."""
@@ -222,6 +218,8 @@ class Ingest:
                 qdrant_collection_name=getattr(rc, 'qdrant_collection_name', None) if rc else None,
                 s3_client=getattr(rc, 's3_client', None) if rc else None,
                 s3_bucket_name=getattr(rc, 's3_bucket_name', None) if rc else None,
+                pgvector_store=getattr(rc, 'pgvector_store', None) if rc else None,
+                documents_sql_engine=getattr(rc, 'documents_sql_engine', None) if rc else None,
             )
 
             course_name: List[str] | str = inputs.get('course_name', '')
@@ -489,11 +487,11 @@ class Ingest:
                 item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
             }
 
-            if os.environ['VECTOR_ENGINE'] == 'qdrant':
+            if self.qdrant_client is not None:
                 # Batched upload to Qdrant. The temporary indexing_threshold toggles are
                 # intentionally disabled because multiple ingest workers can trigger
                 # excess temporary segment growth and disk usage until Qdrant restarts.
-                collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore
+                collection_name = self.qdrant_collection_name or os.environ.get('QDRANT_COLLECTION_NAME', '')  # type: ignore
                 # Raise indexing threshold to postpone indexing during bulk upserts.
                 # Disabled because concurrent workers can amplify temporary segment and
                 # disk growth until Qdrant is restarted.
@@ -505,41 +503,39 @@ class Ingest:
                 # except Exception as e:
                 #     logging.warning("Could not raise Qdrant indexing threshold before ingestion: %s", e)
 
-                try:
-                    batch: list[PointStruct] = []
-                    for context in contexts:
-                        upload_metadata = {**context.metadata, "page_content": context.page_content}
-                        batch.append(
-                            PointStruct(
-                                id=str(uuid.uuid4()),
-                                vector=embeddings_dict[context.page_content],
-                                payload=upload_metadata,
-                            )
+                batch: list[PointStruct] = []
+                for context in contexts:
+                    upload_metadata = {**context.metadata, "page_content": context.page_content}
+                    batch.append(
+                        PointStruct(
+                            id=str(uuid.uuid4()),
+                            vector=embeddings_dict[context.page_content],
+                            payload=upload_metadata,
                         )
-                        if len(batch) >= self.qdrant_upsert_batch_size:
-                            try:
-                                self.qdrant_client.upsert(
-                                    collection_name=collection_name,
-                                    points=batch,  # type: ignore
-                                    wait=False,
-                                )
-                            except Exception as e:
-                                # Timeouts can be acceptable while server processes the request in background
-                                logging.warning("Batch upsert encountered an error (continuing): %s", e)
-                            finally:
-                                batch = []
+                    )
+                    if len(batch) >= self.qdrant_upsert_batch_size:
+                        try:
+                            self.qdrant_client.upsert(
+                                collection_name=collection_name,
+                                points=batch,  # type: ignore
+                                wait=False,
+                            )
+                        except Exception as e:
+                            # Timeouts can be acceptable while server processes the request in background
+                            logging.warning("Batch upsert encountered an error (continuing): %s", e)
+                        finally:
+                            batch = []
 
-                        if len(batch) > 0:
-                            try:
-                                self.qdrant_client.upsert(
-                                    collection_name=collection_name,
-                                    points=batch,  # type: ignore
-                                    wait=False,
-                                )
-                            except Exception as e:
-                                logging.warning("Final batch upsert encountered an error (continuing): %s", e)
-                finally:
-                    pass
+                # Flush the residual final batch after the loop completes.
+                if len(batch) > 0:
+                    try:
+                        self.qdrant_client.upsert(
+                            collection_name=collection_name,
+                            points=batch,  # type: ignore
+                            wait=False,
+                        )
+                    except Exception as e:
+                        logging.warning("Final batch upsert encountered an error (continuing): %s", e)
 
             else:
                 # Batched upload to pgvector
@@ -565,18 +561,6 @@ class Ingest:
                         )
                     except Exception as e:
                         logging.warning("Final batch upsert encountered an error (continuing): %s", e)
-                    finally:
-                        # Revert indexing threshold back to online value.
-                        # Disabled because concurrent workers can amplify temporary segment
-                        # and disk growth until Qdrant is restarted.
-                        # try:
-                        #     self.qdrant_client.update_collection(
-                        #         collection_name=collection_name,
-                        #         optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_online),
-                        #     )
-                        # except Exception as e:
-                        #     logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
-                        pass
 
             # Supabase SQL insertion
             # contexts_for_supa = [{
@@ -728,7 +712,7 @@ class Ingest:
                     print("Error in deleting file from s3:", e)
                     sentry_sdk.capture_exception(e)
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[
@@ -751,7 +735,7 @@ class Ingest:
                     sentry_sdk.capture_exception(e)
             elif source_url:
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[
@@ -784,7 +768,7 @@ class Ingest:
         try:
             if s3_path:
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[
@@ -807,7 +791,7 @@ class Ingest:
                     sentry_sdk.capture_exception(e)
             elif source_url:
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[

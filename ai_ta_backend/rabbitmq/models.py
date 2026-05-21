@@ -362,6 +362,7 @@ class ProjectExternalConnection(Base):
     s3_config = Column(JSONB, nullable=True)
     database_config = Column(JSONB, nullable=True)
     qdrant_config = Column(JSONB, nullable=True)
+    embedding_config = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True)
 
     project = relationship('Project', back_populates='external_connection')
@@ -380,6 +381,7 @@ class ProjectExternalConnection(Base):
             "s3_config": self.s3_config,
             "database_config": self.database_config,
             "qdrant_config": self.qdrant_config,
+            "embedding_config": self.embedding_config,
             "is_active": self.is_active,
         }
 

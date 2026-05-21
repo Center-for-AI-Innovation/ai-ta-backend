@@ -51,13 +51,18 @@ class ConnectionManager:
         self._vector_db = vector_db
         self._aws = aws
 
-        # Caches: project_name -> value
+        # Caches: project_name -> value. Each resource has its own cache so
+        # eviction of one (e.g. an S3 client) never affects another type.
         self._config_cache = TTLCache(maxsize=256, ttl=_CONFIG_TTL)
         self._engine_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
         self._sql_db_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
         self._qdrant_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
         self._vdb_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
         self._s3_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
+        # Dedicated caches for pgvector handles so they share no key
+        # space with the SQLDatabase / Qdrant wrappers above.
+        self._pgvector_store_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
+        self._pgvector_vdb_cache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
 
         # Per-project locks to prevent duplicate connection creation
         self._locks: dict[str, threading.Lock] = {}
@@ -182,64 +187,100 @@ class ConnectionManager:
     #
     # Engine selection rule (resolved per request):
     #   1. Project has an active non-null qdrant_config  → external Qdrant
-    #   2. Else VECTOR_ENGINE === 'qdrant' env           → shared Qdrant
-    #   3. Else                                          → host pgvector
+    #   2. Else                                          → pgvector
+    #      (host pgvector by default; per-project external pg when the
+    #       project has a `database_config` — embeddings follow docs.)
     #
-    # ``get_vector_db(project_name)`` returns a Qdrant-backed VectorDatabase
-    # for cases (1) and (2); for case (3) callers should branch off
-    # ``get_vector_engine_kind`` and use ``get_pgvector_store`` for writes
-    # (pgvector search is wired through retrieval_service, not via this
-    # accessor).
+    # ``get_vector_db(project_name)`` returns a VectorDatabase that always
+    # knows which engine to use: Qdrant-backed when `qdrant_config` is set,
+    # pgvector-backed (bound to per-project or host pg) otherwise. Callers
+    # do not need to branch on engine kind.
 
     def get_vector_engine_kind(self, project_name: str) -> str:
         """Return 'qdrant' or 'pgvector' for the given project.
 
         Pure decision; never builds a client. Use this to branch ingest /
         doc_groups payload writes between Qdrant setPayload and pgvector
-        Drizzle UPDATE.
+        UPDATE.
         """
         if self._get_decrypted_field(project_name, "qdrant_config"):
             return "qdrant"
-        if os.environ.get("VECTOR_ENGINE") == "qdrant":
-            return "qdrant"
         return "pgvector"
 
-    def get_pgvector_store(self):
-        """Return the singleton PgVectorStore for host-pgvector writes.
+    def get_pgvector_store(self, project_name: str | None = None):
+        """Return the PgVectorStore for the project's documents pg.
 
-        Imported lazily so deployments running pure-Qdrant don't pay the
-        psycopg2 import cost.
+        When ``project_name`` has a ``database_config`` set, the store is
+        bound to the per-project external Postgres engine; otherwise the
+        host singleton is returned. Imported lazily so deployments running
+        pure-Qdrant don't pay the psycopg2 import cost.
         """
-        if not hasattr(self, "_pgvector_store") or self._pgvector_store is None:
-            from ai_ta_backend.database.vector_store import get_vector_store
-            self._pgvector_store = get_vector_store()
+        if project_name is not None:
+            db_config = self._get_decrypted_field(project_name, "database_config")
+            if db_config:
+                cached = self._pgvector_store_cache.get(project_name)
+                if cached is not None:
+                    return cached
+                # Double-checked locking — matches `_get_or_create_engine`
+                # style so concurrent first-time callers don't construct
+                # two stores against the same engine.
+                lock = self._get_lock(f"pgvector:{project_name}")
+                with lock:
+                    cached = self._pgvector_store_cache.get(project_name)
+                    if cached is not None:
+                        return cached
+                    from ai_ta_backend.database.vector_store import PgVectorStore
+
+                    engine = self._get_or_create_engine(project_name, db_config)
+                    store = PgVectorStore(engine=engine)
+                    self._pgvector_store_cache[project_name] = store
+                    return store
+
+        # Host pgvector singleton — synchronized to avoid concurrent
+        # construction creating two stores on the first hit.
+        with self._master_lock:
+            if not hasattr(self, "_pgvector_store") or self._pgvector_store is None:
+                from ai_ta_backend.database.vector_store import get_vector_store
+                self._pgvector_store = get_vector_store()
         return self._pgvector_store
 
     def get_vector_db(self, project_name: str) -> "VectorDatabase":
-        """Get a Qdrant-backed VectorDatabase instance for the given project.
+        """Return a VectorDatabase for the project.
 
-        Returns a project-specific VectorDatabase bound to the external Qdrant
-        client when ``qdrant_config`` is set; otherwise the default VectorDatabase
-        (env-configured shared Qdrant). All existing VectorDatabase methods
-        (execute_search, delete, upsert, etc.) work unchanged -- they just run
-        against the right Qdrant instance.
-
-        Note: when ``get_vector_engine_kind(project_name) == 'pgvector'``, the
-        default VectorDatabase still resolves but its ``qdrant_client`` is
-        ``None``. Callers that intend to actually search/upsert via Qdrant
-        should check the engine kind first.
+        - ``qdrant_config`` present → VectorDatabase wired to that Qdrant.
+        - Otherwise → VectorDatabase wired to pgvector (per-project pg when
+          ``database_config`` is present, else host pg). All existing
+          VectorDatabase methods (execute_search, delete, upsert, etc.)
+          dispatch internally.
         """
         qdrant_config = self._get_decrypted_field(project_name, "qdrant_config")
-        if not qdrant_config:
-            return self._vector_db
+        if qdrant_config:
+            if project_name in self._vdb_cache:
+                return self._vdb_cache[project_name]
+            lock = self._get_lock(f"qdrant-vdb:{project_name}")
+            with lock:
+                if project_name in self._vdb_cache:
+                    return self._vdb_cache[project_name]
+                client = self._get_or_create_qdrant(project_name, qdrant_config)
+                vdb = VectorDatabase(
+                    qdrant_client=client, qdrant_config=qdrant_config
+                )
+                self._vdb_cache[project_name] = vdb
+                return vdb
 
-        if project_name in self._vdb_cache:
-            return self._vdb_cache[project_name]
-
-        client = self._get_or_create_qdrant(project_name, qdrant_config)
-        vdb = VectorDatabase(qdrant_client=client, qdrant_config=qdrant_config)
-        self._vdb_cache[project_name] = vdb
-        return vdb
+        # pgvector path — bind to per-project pg if database_config is set,
+        # otherwise the host singleton. Double-checked locking mirrors the
+        # Qdrant path so concurrent first-time callers share one VectorDatabase.
+        if project_name in self._pgvector_vdb_cache:
+            return self._pgvector_vdb_cache[project_name]
+        lock = self._get_lock(f"pgvector-vdb:{project_name}")
+        with lock:
+            if project_name in self._pgvector_vdb_cache:
+                return self._pgvector_vdb_cache[project_name]
+            store = self.get_pgvector_store(project_name)
+            vdb = VectorDatabase(pgvector_store=store)
+            self._pgvector_vdb_cache[project_name] = vdb
+            return vdb
 
     def _get_or_create_qdrant(
         self, project_name: str, qdrant_config: dict
@@ -311,6 +352,7 @@ class ConnectionManager:
         """
         self._config_cache.pop(project_name, None)
         self._sql_db_cache.pop(project_name, None)
+        self._pgvector_store_cache.pop(project_name, None)
 
         # Dispose engine if cached (releases pooled connections)
         engine = self._engine_cache.pop(project_name, None)
@@ -322,6 +364,7 @@ class ConnectionManager:
 
         self._qdrant_cache.pop(project_name, None)
         self._vdb_cache.pop(project_name, None)
+        self._pgvector_vdb_cache.pop(project_name, None)
         self._s3_cache.pop(project_name, None)
 
         logger.info(f"Invalidated all cached connections for project: {project_name}")

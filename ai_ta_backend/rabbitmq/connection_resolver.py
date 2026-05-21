@@ -15,12 +15,19 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import boto3
 from botocore.config import Config
 from cachetools import TTLCache
 from qdrant_client import QdrantClient
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine as SAEngine
+
+try:
+    from vector_store import PgVectorStore
+except ModuleNotFoundError:
+    from ai_ta_backend.rabbitmq.vector_store import PgVectorStore
 
 try:
     from rmsql import SQLAlchemyIngestDB
@@ -77,15 +84,29 @@ def _decrypt_config(stored: dict) -> Optional[dict]:
 
 @dataclass
 class ResolvedConnections:
-    """Holds per-project overrides. None fields mean 'use defaults'."""
+    """Holds per-project overrides. None fields mean 'use defaults'.
+
+    ``engine_kind`` is always populated:
+      - 'qdrant'  → external Qdrant; ``qdrant_client`` and
+        ``qdrant_collection_name`` are set.
+      - 'pgvector' → pgvector engine; ``pgvector_store`` is set (bound to
+        the per-project external pg when ``database_config`` is present,
+        else None so the worker falls back to its host pgvector store).
+    """
     qdrant_client: Optional[QdrantClient] = None
     qdrant_collection_name: Optional[str] = None
     s3_client: Optional[object] = None
     s3_bucket_name: Optional[str] = None
+    engine_kind: Literal['qdrant', 'pgvector'] = 'pgvector'
+    documents_sql_engine: Optional[SAEngine] = None
+    pgvector_store: Optional[PgVectorStore] = None
 
     @property
     def has_overrides(self) -> bool:
-        return any([self.qdrant_client, self.s3_client])
+        return any(
+            [self.qdrant_client, self.s3_client,
+             self.documents_sql_engine, self.pgvector_store]
+        )
 
 
 # ── WorkerConnectionResolver ─────────────────────────────────────────────
@@ -99,6 +120,8 @@ class WorkerConnectionResolver:
         self._config_cache: TTLCache = TTLCache(maxsize=256, ttl=_CONFIG_TTL)
         self._qdrant_cache: TTLCache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
         self._s3_cache: TTLCache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
+        self._engine_cache: TTLCache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
+        self._pgvector_cache: TTLCache = TTLCache(maxsize=64, ttl=_CONNECTION_TTL)
 
         self._locks: dict[str, threading.Lock] = {}
         self._master_lock = threading.Lock()
@@ -140,9 +163,12 @@ class WorkerConnectionResolver:
     # ── Public API ──
 
     def resolve(self, project_name: str) -> ResolvedConnections:
-        """Resolve Qdrant and S3 overrides for a project.
-        Returns a ResolvedConnections with None fields for anything that
-        should use env-based defaults.
+        """Resolve per-project Qdrant / pgvector / SQL / S3 overrides.
+
+        Returns a ResolvedConnections with engine_kind set:
+          - 'qdrant'  when ``qdrant_config`` is present
+          - 'pgvector' otherwise; ``database_config`` (if present) binds
+            ``documents_sql_engine`` and ``pgvector_store`` to the external pg.
         """
         if not project_name:
             return ResolvedConnections()
@@ -151,8 +177,20 @@ class WorkerConnectionResolver:
 
         qdrant_config = self._get_decrypted_field(project_name, "qdrant_config")
         if qdrant_config:
+            result.engine_kind = 'qdrant'
             result.qdrant_client = self._get_or_create_qdrant(project_name, qdrant_config)
-            result.qdrant_collection_name = qdrant_config["default_collection"]
+            result.qdrant_collection_name = qdrant_config.get("default_collection")
+
+        # database_config can coexist with qdrant_config (SQL stays on the
+        # external pg even when vector lives in Qdrant).
+        db_config = self._get_decrypted_field(project_name, "database_config")
+        if db_config:
+            engine = self._get_or_create_engine(project_name, db_config)
+            result.documents_sql_engine = engine
+            if result.engine_kind == 'pgvector':
+                result.pgvector_store = self._get_or_create_pgvector_store(
+                    project_name, engine
+                )
 
         s3_config = self._get_decrypted_field(project_name, "s3_config")
         if s3_config:
@@ -160,7 +198,10 @@ class WorkerConnectionResolver:
             result.s3_bucket_name = s3_config.get("bucket_name")
 
         if result.has_overrides:
-            logger.info("Resolved external connections for project: %s", project_name)
+            logger.info(
+                "Resolved external connections for project: %s (engine=%s)",
+                project_name, result.engine_kind,
+            )
 
         return result
 
@@ -185,6 +226,45 @@ class WorkerConnectionResolver:
             )
             self._qdrant_cache[project_name] = client
             return client
+
+    # ── Documents SQL engine + per-project PgVectorStore ──
+
+    def _get_or_create_engine(self, project_name: str, db_config: dict) -> SAEngine:
+        if project_name in self._engine_cache:
+            return self._engine_cache[project_name]
+
+        lock = self._get_lock(f"engine:{project_name}")
+        with lock:
+            if project_name in self._engine_cache:
+                return self._engine_cache[project_name]
+
+            connection_uri = db_config["connection_uri"]
+            logger.info(
+                "Creating external SQL engine for project: %s", project_name
+            )
+            engine = create_engine(
+                connection_uri,
+                pool_size=5,
+                max_overflow=10,
+                pool_recycle=1800,
+                pool_pre_ping=True,
+            )
+            self._engine_cache[project_name] = engine
+            return engine
+
+    def _get_or_create_pgvector_store(
+        self, project_name: str, engine: SAEngine
+    ) -> PgVectorStore:
+        if project_name in self._pgvector_cache:
+            return self._pgvector_cache[project_name]
+
+        lock = self._get_lock(f"pgvector:{project_name}")
+        with lock:
+            if project_name in self._pgvector_cache:
+                return self._pgvector_cache[project_name]
+            store = PgVectorStore(engine=engine)
+            self._pgvector_cache[project_name] = store
+            return store
 
     # ── S3 ──
 
@@ -219,4 +299,11 @@ class WorkerConnectionResolver:
         self._config_cache.pop(project_name, None)
         self._qdrant_cache.pop(project_name, None)
         self._s3_cache.pop(project_name, None)
+        engine = self._engine_cache.pop(project_name, None)
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception as e:
+                logger.warning("Failed to dispose engine for %s: %s", project_name, e)
+        self._pgvector_cache.pop(project_name, None)
         logger.info("Invalidated cached connections for project: %s", project_name)

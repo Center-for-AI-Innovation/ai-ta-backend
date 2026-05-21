@@ -3,15 +3,14 @@ VectorDatabase: per-project vector store wrapper supporting Qdrant and pgvector.
 
 Routing rule (resolved by ``ConnectionManager.get_vector_db``):
     1. Project has an active non-null ``qdrant_config``  -> external Qdrant
-    2. Else ``VECTOR_ENGINE == 'qdrant'`` env             -> shared Qdrant
-    3. Else                                                -> host pgvector
+    2. Else                                              -> pgvector
+       (host pgvector by default; per-project external pg when the project
+       has a ``database_config``)
 
 When this instance is constructed with an explicit ``qdrant_client`` (case 1
 above) it behaves as a project-specific Qdrant wrapper. When constructed with
-no explicit client (the default-injected instance held by ``ConnectionManager``)
-it tries to bring up a shared Qdrant client from env vars; if those aren't
-present, ``qdrant_client`` stays ``None`` and the pgvector store is used for
-upsert/delete via ``pgvector_store``.
+an explicit ``pgvector_store`` (or with no args for the default-injected
+instance) the pgvector path is used; ``qdrant_client`` stays ``None``.
 
 The legacy direct-client special cases from main (cropwizard, vyriad, pubmed,
 patents) are no longer hardcoded against ad-hoc clients -- per-project Qdrant
@@ -20,6 +19,7 @@ backward compatibility but now operate on ``self.qdrant_client`` so the right
 client is used automatically.
 """
 
+import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -118,56 +118,100 @@ RESULT_PROCESSORS = {
 }
 
 
+class _PgvectorScoredPoint:
+    """Qdrant-shaped wrapper around a pgvector row.
+
+    ``execute_search`` returns these so downstream ``_process_search_results``
+    in retrieval_service can treat Qdrant and pgvector results uniformly via
+    ``.payload`` and ``.score``.
+    """
+
+    __slots__ = ("score", "payload")
+
+    def __init__(self, score: float, payload: dict):
+        self.score = score
+        self.payload = payload
+
+
+def _pgvector_rows_to_scored_points(rows: list[dict]) -> list[_PgvectorScoredPoint]:
+    points: list[_PgvectorScoredPoint] = []
+    for row in rows:
+        raw_score = row.get("score")
+        score = 0.0 if raw_score is None else float(raw_score)
+        # `doc_groups` is JSONB; psycopg2 normally returns a Python list,
+        # but deployments with a custom adapter (or an older driver) may
+        # hand back a JSON string. Coerce defensively so downstream code
+        # always sees a list.
+        doc_groups = row.get("doc_groups")
+        if doc_groups is None:
+            doc_groups = []
+        elif isinstance(doc_groups, str):
+            try:
+                parsed = json.loads(doc_groups)
+                doc_groups = parsed if isinstance(parsed, list) else []
+            except Exception:
+                doc_groups = []
+        payload = {
+            "page_content": row.get("page_content") or "",
+            "readable_filename": row.get("readable_filename") or "",
+            "course_name": row.get("course_name") or "",
+            "s3_path": row.get("s3_path") or "",
+            "pagenumber": row.get("pagenumber") or "",
+            "url": row.get("url") or "",
+            "base_url": row.get("base_url") or "",
+            "doc_groups": doc_groups,
+            "conversation_id": row.get("conversation_id") or "",
+        }
+        points.append(_PgvectorScoredPoint(score, payload))
+    return points
+
+
 class VectorDatabase:
     """
     Contains all methods for building and using vector databases.
 
-    May be constructed two ways:
-      * Default injection (no args): brings up the shared Qdrant from env if
-        QDRANT_URL/QDRANT_API_KEY are set; otherwise leaves ``qdrant_client = None``
-        and prepares a pgvector store for upsert/delete.
-      * Explicit per-project: ``VectorDatabase(qdrant_client=..., qdrant_config=...)``
-        produced by ``ConnectionManager.get_vector_db`` for projects with an
+    May be constructed three ways:
+      * Default injection (no args): a pgvector-default instance with no
+        Qdrant client and no eagerly-bound pgvector store. The store is
+        resolved lazily via ``ConnectionManager.get_pgvector_store`` on
+        first use, or injected explicitly via the constructor.
+      * Explicit per-project Qdrant:
+        ``VectorDatabase(qdrant_client=..., qdrant_config=...)`` — produced
+        by ``ConnectionManager.get_vector_db`` for projects with an
         external Qdrant override.
+      * Explicit pgvector binding:
+        ``VectorDatabase(pgvector_store=...)`` — produced by
+        ``ConnectionManager.get_vector_db`` for pgvector projects;
+        ``pgvector_store`` may target host or per-project Postgres.
     """
 
     @inject
-    def __init__(self, qdrant_client: QdrantClient = None, qdrant_config: dict = None):
-        """Initialize with an explicit client/config or create defaults from env vars.
+    def __init__(
+        self,
+        qdrant_client: QdrantClient = None,
+        qdrant_config: dict = None,
+        pgvector_store=None,
+    ):
+        """Initialize with an explicit client/config or leave defaults blank.
 
         Engine selection precedence handled here:
-          * Explicit ``qdrant_client`` (per-project override)  -> use it.
-          * env ``QDRANT_URL`` + ``QDRANT_API_KEY`` present     -> build shared Qdrant.
-          * Otherwise                                           -> ``qdrant_client``
-            stays ``None``; pgvector is the default. The pgvector store is
-            lazily resolved on first use to avoid forcing the psycopg2 import
-            on pure-Qdrant deployments.
+          * Explicit ``qdrant_client``  -> Qdrant path.
+          * Explicit ``pgvector_store`` -> pgvector path bound to that store.
+          * Otherwise                   -> pgvector-default; the host
+            pgvector store is resolved lazily on first use.
+
+        Env-driven shared-Qdrant fallback has been removed — pure-Qdrant
+        deployments now go through per-project ``qdrant_config``.
         """
-        # Lazily-resolved pgvector handle (only built for engine=pgvector path).
-        self._pgvector_store = None
+        self._pgvector_store = pgvector_store
 
         if qdrant_client is not None:
             self.qdrant_client = qdrant_client
             self.qdrant_config = qdrant_config or {}
             return
 
-        url = os.environ.get("QDRANT_URL")
-        api_key = os.environ.get("QDRANT_API_KEY")
-        if not url or not api_key:
-            # No Qdrant credentials -> pgvector-default deployment.
-            self.qdrant_client = None
-            self.qdrant_config = {
-                "default_collection": os.environ.get("QDRANT_COLLECTION_NAME", ""),
-                "skip_quantization_rescore": True,
-            }
-            return
-
-        self.qdrant_client = QdrantClient(
-            url=url,
-            api_key=api_key,
-            port=int(port_str) if (port_str := os.getenv("QDRANT_PORT")) else None,
-            timeout=20,
-        )
+        # pgvector-default. No env-based Qdrant construction.
+        self.qdrant_client = None
         self.qdrant_config = {
             "default_collection": os.environ.get("QDRANT_COLLECTION_NAME", ""),
             "skip_quantization_rescore": True,
@@ -179,10 +223,11 @@ class VectorDatabase:
 
     @property
     def pgvector_store(self):
-        """Lazy accessor for the host pgvector store.
+        """Accessor for the pgvector store.
 
-        Imported on first access so deployments running pure-Qdrant don't pay
-        the psycopg2 import cost at startup.
+        Falls back to the host singleton when no per-project store was
+        injected. Imported on first access so pure-Qdrant deployments don't
+        pay the psycopg2 import cost at startup.
         """
         if self._pgvector_store is None:
             from ai_ta_backend.database.vector_store import get_vector_store
@@ -197,24 +242,38 @@ class VectorDatabase:
     # Search (Qdrant-backed; the config drives single- vs multi-collection)
     # ------------------------------------------------------------------
 
-    def execute_search(self, query_filter, query_vector, course_name: str, top_n: int = 100):
-        """Config-driven search entry point.
+    def execute_search(
+        self,
+        query_filter,
+        query_vector,
+        course_name: str,
+        top_n: int = 100,
+        *,
+        pgvector_args: dict | None = None,
+    ):
+        """Config-driven search entry point. Dispatches by engine.
 
-        Always searches ``default_collection``. If ``collections`` is also set,
-        searches every entry too -- ``default_collection`` is auto-prepended if
-        its name is not already listed there. With one effective collection
-        the single-collection path runs; with more, the multi-collection path
-        runs.
+        Qdrant path: always searches ``default_collection``. If ``collections``
+        is also set, searches every entry too -- ``default_collection`` is
+        auto-prepended if its name is not already listed there.
 
-        Requires a Qdrant client; on a pgvector-default instance this raises so
-        callers branch on ``ConnectionManager.get_vector_engine_kind`` first.
+        Pgvector path: uses ``pgvector_args`` (doc_groups / disabled /
+        public / conversation_id) for filtering. ``query_filter`` is ignored
+        because pgvector builds filter SQL from the raw lists, not the
+        Qdrant ``models.Filter`` shape.
         """
         if self._using_pgvector():
-            raise RuntimeError(
-                "execute_search called on a pgvector-default VectorDatabase. "
-                "Resolve a Qdrant-backed VectorDatabase via ConnectionManager, "
-                "or branch on ConnectionManager.get_vector_engine_kind first."
+            args = pgvector_args or {}
+            rows = self.pgvector_store.search(
+                query_embedding=query_vector,
+                course_name=course_name,
+                doc_groups=args.get("doc_groups") or [],
+                disabled_doc_groups=args.get("disabled_doc_groups") or [],
+                public_doc_groups=args.get("public_doc_groups") or [],
+                conversation_id=args.get("conversation_id"),
+                top_n=top_n,
             )
+            return _pgvector_rows_to_scored_points(rows)
 
         default_name = self.qdrant_config.get("default_collection", "")
         extras = self.qdrant_config.get("collections") or []
@@ -463,7 +522,13 @@ class VectorDatabase:
     def vector_search(self, search_query, course_name, doc_groups: List[str],
                       user_query_embedding, top_n, disabled_doc_groups: List[str],
                       public_doc_groups: List[dict]):
-        """Standard course search against the default collection."""
+        """Standard course search against the default collection (Qdrant only)."""
+        if self._using_pgvector():
+            raise RuntimeError(
+                "vector_search() is Qdrant-only. Use execute_search(...) on a "
+                "pgvector VectorDatabase, or route via retrieval_service which "
+                "branches on engine."
+            )
         return self.qdrant_client.search(
             collection_name=self.qdrant_config.get(
                 "default_collection", os.environ.get("QDRANT_COLLECTION_NAME", "")
@@ -482,7 +547,12 @@ class VectorDatabase:
     def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str],
                                   user_query_embedding, top_n, disabled_doc_groups: List[str],
                                   public_doc_groups: List[dict], custom_filter: models.Filter):
-        """Search the default collection with a caller-supplied filter."""
+        """Search the default collection with a caller-supplied filter (Qdrant only)."""
+        if self._using_pgvector():
+            raise RuntimeError(
+                "vector_search_with_filter() is Qdrant-only. Use execute_search(...) "
+                "with pgvector_args on a pgvector VectorDatabase."
+            )
         return self.qdrant_client.search(
             collection_name=self.qdrant_config.get(
                 "default_collection", os.environ.get("QDRANT_COLLECTION_NAME", "")
