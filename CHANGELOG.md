@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - `VECTOR_ENGINE` environment switch — engine is decided per project by the row in `project_external_connections`. Removes the `os.environ['VECTOR_ENGINE']` KeyError that previously broke imports when the env var was unset.
 - Env-driven shared-Qdrant fallback in the frontend `ConnectionManager` and in the backend `VectorDatabase` default constructor.
+- Dead `.env` keys in both repos that no code references: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `LINTRULE_SECRET`, `NUMEXPR_MAX_THREADS`, `MATERIALS_SUPABASE_TABLE`, `REFACTORED_MATERIALS_SUPABASE_TABLE`, `SUPABASE_DOCUMENTS_TABLE`, `SUPABASE_JWT_SECRET`, `SUPABASE_READ_ONLY`, `VYRIAD_QDRANT_*`, `TRACEMALLOC_ENABLED`, `VECTOR_ENGINE`, all `TEST_PC_*` keys, `NEXT_PUBLIC_ILLINOIS_CHAT_BANNER_CONTENT`. Each repo's `.env` / `.env.template` is now a subset of `/Users/rmp6/Documents/cropwizard/cleaned.env` (the single source-of-truth dev-secrets file).
 
 ### Fixed
 - Qwen `Instruct:` query prefix is no longer mis-applied to document chunks in `_store_conversation_content`. Chat-file ingest now goes through a new `_embed_document` helper that calls `embedding_client.embed_documents([text])[0]`, so Qwen-model projects no longer pollute stored vectors with the query-only instruction prefix.
