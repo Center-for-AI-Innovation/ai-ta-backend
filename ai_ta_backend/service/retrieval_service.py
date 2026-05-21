@@ -143,14 +143,22 @@ class RetrievalService:
             start_time_overall = time.monotonic()
 
             # Resolve per-project connections and embedding client.
-            # Both Qdrant-backed (per-project or shared) and pgvector-default
-            # cases return a VectorDatabase; embedding config is read from its
-            # qdrant_config blob (which is populated for both cases).
-            vdb = self.conn_manager.get_vector_db(course_name)
+            # Both Qdrant-backed and pgvector cases return a VectorDatabase;
+            # embedding config now lives on its own column so it works for
+            # pgvector-only projects too.
             project_sql_db = self.conn_manager.get_documents_sql_db(course_name)
-            embedding_client, query_instruction = self._resolve_embedding_client(
-                vdb.qdrant_config
-            )
+            try:
+                embedding_client, query_instruction = self._resolve_embedding_client(
+                    course_name
+                )
+            except ValueError as e:
+                # Misconfigured embedding_config (e.g. provider=ollama with
+                # no base_url). Surface a clean user-actionable message
+                # instead of a 500 with a raw traceback.
+                msg = f"Embedding configuration error for course '{course_name}': {e}"
+                print(msg)
+                self.sentry.capture_exception(e)
+                return msg
 
             # Create tasks for parallel execution
             with self.thread_pool_executor as executor:
@@ -531,19 +539,17 @@ class RetrievalService:
         Includes optional conversation-specific filtering.
 
         Engine routing (resolved per call by ConnectionManager):
-          * Project with explicit ``qdrant_config``        -> external Qdrant
-          * env ``VECTOR_ENGINE='qdrant'``                  -> shared Qdrant
-          * Otherwise                                       -> pgvector
+          * Project with active ``qdrant_config``  -> external Qdrant
+          * Otherwise                              -> pgvector
+            (host pgvector by default; per-project external pg when the
+            project has ``database_config``)
 
-        The Qdrant search path uses ``VectorDatabase.execute_search`` which is
-        config-driven (single- vs multi-collection) -- the resolver-supplied
+        The Qdrant path uses ``VectorDatabase.execute_search`` which is
+        config-driven (single- vs multi-collection) — the resolver-supplied
         ``qdrant_config`` is what makes vyriad/cropwizard/pubmed/patents-style
-        multi-collection setups work without hardcoded branches.
-
-        For the pgvector default, search through this layer is not supported
-        (the host pgvector store has no vector-search method yet); callers
-        will receive an empty result list. Ingest and delete remain fully
-        operational via pgvector.
+        multi-collection setups work without hardcoded branches. The pgvector
+        path goes through ``PgVectorStore.search`` with the same filter
+        semantics as the frontend ``vectorSearchWithDrizzle``.
         """
         if doc_groups is None:
             doc_groups = []
@@ -564,25 +570,11 @@ class RetrievalService:
         vdb = self.conn_manager.get_vector_db(course_name)
         engine_kind = self.conn_manager.get_vector_engine_kind(course_name)
 
-        if engine_kind != "qdrant":
-            # pgvector default: search at this layer isn't wired yet. Return
-            # an empty result list and record latencies so callers degrade
-            # gracefully rather than raise.
-            print(
-                f"vector_search: pgvector engine for course '{course_name}' -- "
-                "no pgvector search path implemented; returning empty results."
-            )
-            self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
-            search_results = []
-        else:
-            # Build search filter via the (Qdrant-shape) helpers on vdb.
+        if engine_kind == "qdrant":
             search_filter = vdb._create_search_filter(
                 course_name, doc_groups, disabled_doc_groups, public_doc_groups
             )
-
             if conversation_id:
-                # For chat conversations: get BOTH regular course documents
-                # AND conversation-specific documents.
                 chat_filter = vdb._create_conversation_search_filter(conversation_id)
                 combined_filter = models.Filter(should=[search_filter, chat_filter])
                 search_results = vdb.execute_search(
@@ -592,7 +584,22 @@ class RetrievalService:
                 search_results = vdb.execute_search(
                     search_filter, user_query_embedding, course_name, top_n
                 )
-            self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
+        else:
+            # pgvector: filter shape is built inside PgVectorStore.search.
+            search_results = vdb.execute_search(
+                None,
+                user_query_embedding,
+                course_name,
+                top_n,
+                pgvector_args={
+                    "doc_groups": doc_groups,
+                    "disabled_doc_groups": disabled_doc_groups,
+                    "public_doc_groups": public_doc_groups,
+                    "conversation_id": conversation_id or None,
+                },
+            )
+
+        self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
 
         # Process the search results by extracting the page content and metadata
         start_time_process_search_results = time.monotonic()
@@ -639,17 +646,39 @@ class RetrievalService:
         self.openai_embedding_latency = time.monotonic() - openai_start_time
         return user_query_embedding
 
-    def _resolve_embedding_client(self, qdrant_config: dict):
-        """Resolve the embedding client and query instruction from qdrant_config.
+    def _embed_document(self, text: str, embedding_client) -> list[float]:
+        """Embed a document chunk without applying any query-instruction prefix.
 
-        Reads the optional ``embedding`` key to determine provider, model, and
-        API endpoint. Falls back to the default (env-based) embedding client
-        when no per-project embedding config is present.
+        Why: Qwen embedding models require the ``Instruct: …\\nQuery:`` prefix
+        for queries only. Documents must be embedded raw, otherwise retrieval
+        quality degrades silently.
+        """
+        return embedding_client.embed_documents([text])[0]
+
+    def _resolve_embedding_client(self, project_name: str):
+        """Resolve the embedding client and query instruction for a project.
+
+        Reads the top-level ``embedding_config`` column on
+        ``project_external_connections`` (decrypted via ConnectionManager).
+        Backward-compat: also honors a legacy ``embedding`` key nested inside
+        ``qdrant_config`` so existing Qdrant projects keep working until they
+        migrate to the new column.
+
+        Falls back to the default (env-based) embedding client when no
+        per-project embedding config is present.
 
         Returns:
             (embedding_client, query_instruction)
         """
-        embedding_cfg = (qdrant_config or {}).get("embedding") if qdrant_config else None
+        embedding_cfg = self.conn_manager._get_decrypted_field(
+            project_name, "embedding_config"
+        )
+        if not embedding_cfg:
+            qdrant_cfg = self.conn_manager._get_decrypted_field(
+                project_name, "qdrant_config"
+            )
+            embedding_cfg = (qdrant_cfg or {}).get("embedding") if qdrant_cfg else None
+
         if not embedding_cfg:
             return self.embeddings, self.qwen_query_instruction
 
@@ -660,8 +689,18 @@ class RetrievalService:
         )
 
         if provider == "ollama":
+            base_url = (
+                embedding_cfg.get("base_url")
+                or os.environ.get("OLLAMA_BASE_URL")
+                or os.environ.get("OLLAMA_SERVER_URL")
+            )
+            if not base_url:
+                raise ValueError(
+                    "embedding_config provider='ollama' requires base_url "
+                    "(or set OLLAMA_BASE_URL / OLLAMA_SERVER_URL)"
+                )
             client = OllamaEmbeddings(
-                base_url=embedding_cfg["base_url"],
+                base_url=base_url,
                 model=model,
             )
         else:
@@ -1245,9 +1284,7 @@ class RetrievalService:
 
             # Resolve per-project vector DB and embedding client
             vdb = self.conn_manager.get_vector_db(course_name)
-            embedding_client, query_instruction = self._resolve_embedding_client(
-                vdb.qdrant_config
-            )
+            embedding_client, _ = self._resolve_embedding_client(course_name)
 
             ids: List[str] = []
             vectors: List[List[float]] = []
@@ -1257,9 +1294,7 @@ class RetrievalService:
                 try:
                     import uuid
 
-                    embedding = self._embed_query_and_measure_latency(
-                        chunk, embedding_client, query_instruction
-                    )
+                    embedding = self._embed_document(chunk, embedding_client)
                     payload = {
                         "course_name": course_name,
                         "conversation_id": conversation_id,
