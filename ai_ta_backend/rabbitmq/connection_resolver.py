@@ -43,6 +43,28 @@ _CONFIG_TTL = 300       # 5 min for decrypted configs
 _CONNECTION_TTL = 1800  # 30 min for live connections
 
 
+def _parse_allowed_embedding_providers() -> tuple:
+    """Parse ``ALLOWED_EMBEDDING_PROVIDERS`` (comma-separated, lowercased).
+
+    Mirrors ``retrieval_service._parse_allowed_embedding_providers`` and the
+    frontend ``validation.ts`` parser. Empty / unset → default
+    ``('openai', 'ollama')`` — the providers ingest knows how to embed with.
+    """
+    raw = os.getenv("ALLOWED_EMBEDDING_PROVIDERS")
+    if not raw:
+        return ("openai", "ollama")
+    parsed = tuple(p for p in (s.strip().lower() for s in raw.split(",")) if p)
+    if not parsed:
+        raise ValueError(
+            "ALLOWED_EMBEDDING_PROVIDERS is set but parses to an empty list. "
+            "Unset it or supply at least one provider."
+        )
+    return parsed
+
+
+ALLOWED_EMBEDDING_PROVIDERS: tuple = _parse_allowed_embedding_providers()
+
+
 # ── Embedded Decryption (mirrors ai_ta_backend/utils/crypto.py) ──────────
 
 def _decrypt(encrypted_text: str, key: str) -> str:
@@ -101,11 +123,21 @@ class ResolvedConnections:
     documents_sql_engine: Optional[SAEngine] = None
     pgvector_store: Optional[PgVectorStore] = None
 
+    # Per-project embedding override. None fields mean "use env defaults".
+    # ``query_instruction`` is deliberately absent: it is a query-time prefix
+    # and must not be applied to ingested document chunks (commit 1a8c2e9).
+    embedding_provider: Optional[str] = None       # 'openai' | 'ollama'
+    embedding_model: Optional[str] = None
+    embedding_api_key: Optional[str] = None         # openai
+    embedding_api_base: Optional[str] = None        # openai (base URL)
+    embedding_base_url: Optional[str] = None        # ollama server root
+
     @property
     def has_overrides(self) -> bool:
         return any(
             [self.qdrant_client, self.s3_client,
-             self.documents_sql_engine, self.pgvector_store]
+             self.documents_sql_engine, self.pgvector_store,
+             self.embedding_provider]
         )
 
 
@@ -197,6 +229,15 @@ class WorkerConnectionResolver:
             result.s3_client = self._get_or_create_s3(project_name, s3_config)
             result.s3_bucket_name = s3_config.get("bucket_name")
 
+        # Embedding override. Mirrors retrieval_service._resolve_embedding_client
+        # (ingest-only: no query_instruction). Legacy fallback: an ``embedding``
+        # block nested in qdrant_config, used by projects predating the column.
+        emb_cfg = self._get_decrypted_field(project_name, "embedding_config")
+        if not emb_cfg and qdrant_config:
+            emb_cfg = qdrant_config.get("embedding")
+        if emb_cfg:
+            self._resolve_embedding(result, project_name, emb_cfg)
+
         if result.has_overrides:
             logger.info(
                 "Resolved external connections for project: %s (engine=%s)",
@@ -204,6 +245,41 @@ class WorkerConnectionResolver:
             )
 
         return result
+
+    # ── Embedding ──
+
+    def _resolve_embedding(self, result: ResolvedConnections,
+                           project_name: str, emb_cfg: dict) -> None:
+        """Populate the embedding fields on ``result`` from a decrypted
+        embedding config. On a disallowed/misconfigured provider, log and leave
+        the fields unset so ingest falls back to env defaults — one bad project
+        must not crash the worker loop (diverges from the request-time reference,
+        which raises)."""
+        provider = emb_cfg.get("provider", "openai")
+        if provider not in ALLOWED_EMBEDDING_PROVIDERS:
+            logger.error(
+                "Disallowed embedding provider %r for project %s (allowed: %s); "
+                "falling back to env default embedding",
+                provider, project_name, ALLOWED_EMBEDDING_PROVIDERS,
+            )
+            return
+
+        if provider == "ollama":
+            base_url = emb_cfg.get("base_url") or os.environ.get("OLLAMA_SERVER_URL")
+            if not base_url:
+                logger.error(
+                    "embedding_config provider='ollama' for project %s has no "
+                    "base_url and OLLAMA_SERVER_URL is unset; falling back to env "
+                    "default embedding", project_name,
+                )
+                return
+            result.embedding_base_url = base_url
+        else:  # openai (or any future OpenAI-compatible provider)
+            result.embedding_api_key = emb_cfg.get("api_key")
+            result.embedding_api_base = emb_cfg.get("api_base")
+
+        result.embedding_provider = provider
+        result.embedding_model = emb_cfg.get("model")
 
     # ── Qdrant ──
 

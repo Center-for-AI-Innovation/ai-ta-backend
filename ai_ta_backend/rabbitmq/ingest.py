@@ -114,6 +114,12 @@ class Ingest:
         self.s3_client = None
         self.sql_session = None
 
+        # Per-project embedding override (set via initialize_resources from the
+        # resolver). When None, the env-based defaults above are used. model /
+        # openai_api_base / ncsa_hosted_api_key may be overridden in place.
+        self.embedding_provider = None
+        self.embedding_base_url = None
+
         # Batch size for pgvector upserts during ingestion
         self.upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
 
@@ -129,7 +135,10 @@ class Ingest:
 
     def initialize_resources(self, qdrant_client=None, qdrant_collection_name=None,
                              s3_client=None, s3_bucket_name=None,
-                             pgvector_store=None, documents_sql_engine=None):
+                             pgvector_store=None, documents_sql_engine=None,
+                             embedding_provider=None, embedding_model=None,
+                             embedding_api_key=None, embedding_api_base=None,
+                             embedding_base_url=None):
         """Initialize external service clients.
 
         Engine selection (per request, driven by WorkerConnectionResolver):
@@ -137,7 +146,30 @@ class Ingest:
           2. Otherwise                            → pgvector
              (per-project external pg via ``pgvector_store`` when the project
               has ``database_config``, else the host pgvector store)
+
+        Embedding selection (also from the resolver, mirroring
+        retrieval_service._resolve_embedding_client):
+          - provider 'ollama' → native OllamaEmbeddings in split_and_upload.
+          - provider 'openai'/None → existing OpenAIAPIProcessor against the
+            (optionally overridden) model / api_base / api_key.
         """
+        # ── Embedding override ──
+        # When the resolver supplies a per-project embedding, override the
+        # env-derived attributes the embedding paths read. Leave them untouched
+        # otherwise (env defaults).
+        self.embedding_provider = embedding_provider
+        self.embedding_base_url = embedding_base_url
+        if embedding_model:
+            self.embedding_model = embedding_model
+        if embedding_provider != "ollama":
+            if embedding_api_base:
+                # The OpenAIAPIProcessor needs a URL ending in /embeddings; the
+                # resolved api_base is a base URL.
+                base = embedding_api_base.rstrip("/")
+                self.openai_api_base = base if base.endswith("/embeddings") else base + "/embeddings"
+            if embedding_api_key:
+                self.ncsa_hosted_api_key = embedding_api_key
+
         if qdrant_client is not None:
             self.qdrant_client = qdrant_client
             if qdrant_collection_name:
@@ -220,6 +252,11 @@ class Ingest:
                 s3_bucket_name=getattr(rc, 's3_bucket_name', None) if rc else None,
                 pgvector_store=getattr(rc, 'pgvector_store', None) if rc else None,
                 documents_sql_engine=getattr(rc, 'documents_sql_engine', None) if rc else None,
+                embedding_provider=getattr(rc, 'embedding_provider', None) if rc else None,
+                embedding_model=getattr(rc, 'embedding_model', None) if rc else None,
+                embedding_api_key=getattr(rc, 'embedding_api_key', None) if rc else None,
+                embedding_api_base=getattr(rc, 'embedding_api_base', None) if rc else None,
+                embedding_base_url=getattr(rc, 'embedding_base_url', None) if rc else None,
             )
 
             course_name: List[str] | str = inputs.get('course_name', '')
@@ -468,24 +505,37 @@ class Ingest:
                 context.metadata['chunk_index'] = i
                 context.metadata['doc_groups'] = kwargs.get('groups', [])
 
-            # Generate embeddings from OpenAI
+            # Generate embeddings, keyed by page_content so the upsert below can
+            # look up each chunk's vector. The provider is resolved per project;
+            # ollama uses the native LangChain client (matching retrieval's
+            # /api/embeddings shape for bit-identical vectors), everything else
+            # uses the OpenAI-compatible batch processor.
             logging.info(f"Generating embeddings for {len(input_texts)} texts")
             embeddings_start_time = time.monotonic()
-            oai = OpenAIAPIProcessor(
-                input_prompts_list=input_texts,
-                request_url=self.openai_api_base,
-                api_key=self.ncsa_hosted_api_key,
-                max_requests_per_minute=10_000,
-                max_tokens_per_minute=10_000_000,
-                token_encoding_name='cl100k_base',
-                max_attempts=self.embedding_max_attempts,
-                logging_level=logging.INFO,
-                model=self.embedding_model)
-            asyncio.run(oai.process_api_requests_from_file())
+            if self.embedding_provider == "ollama":
+                from langchain.embeddings.ollama import OllamaEmbeddings
+                ollama = OllamaEmbeddings(base_url=self.embedding_base_url, model=self.embedding_model)
+                texts_to_embed = [item['input'] for item in input_texts]
+                vectors = ollama.embed_documents(texts_to_embed)
+                embeddings_dict: dict[str, List[float]] = {
+                    text: vector for text, vector in zip(texts_to_embed, vectors)
+                }
+            else:
+                oai = OpenAIAPIProcessor(
+                    input_prompts_list=input_texts,
+                    request_url=self.openai_api_base,
+                    api_key=self.ncsa_hosted_api_key,
+                    max_requests_per_minute=10_000,
+                    max_tokens_per_minute=10_000_000,
+                    token_encoding_name='cl100k_base',
+                    max_attempts=self.embedding_max_attempts,
+                    logging_level=logging.INFO,
+                    model=self.embedding_model)
+                asyncio.run(oai.process_api_requests_from_file())
+                embeddings_dict: dict[str, List[float]] = {
+                    item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
+                }
             print(f"⏰ embeddings runtime: {(time.monotonic() - embeddings_start_time):.2f} seconds")
-            embeddings_dict: dict[str, List[float]] = {
-                item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
-            }
 
             if self.qdrant_client is not None:
                 # Batched upload to Qdrant. The temporary indexing_threshold toggles are

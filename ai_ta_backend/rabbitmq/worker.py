@@ -96,15 +96,27 @@ class Worker:
         retry_count = content['retry_count'] if 'retry_count' in content else 0
 
         try:
+            # Resolve the project's connections once. Ingest status tables live
+            # on the project documents DB (external when configured, else host) --
+            # the same DB the producer inserted this job's in-progress row into
+            # and the frontend reads from. self.sql_session stays host-bound for
+            # the resolver's project_external_connections lookup.
+            course_name = inputs.get('course_name', '')
+            resolved = self.resolver.resolve(course_name)
+            status_db = (
+                SQLAlchemyIngestDB(engine=resolved.documents_sql_engine)
+                if resolved.documents_sql_engine else self.sql_session
+            )
+
             # flag this message as "processing started" so we can ack it later if memory runs out
 
-            prog_doc = self.sql_session.fetch_document_in_progress(job_id)
+            prog_doc = status_db.fetch_document_in_progress(job_id)
             if not prog_doc:
                 logging.error(f"Job ID {job_id} not found in DocumentsInProgress table.")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
             else:
                 if "error" in prog_doc and prog_doc["error"] == 'Attempting ingest':
-                    self.sql_session.insert_failed_document({
+                    status_db.insert_failed_document({
                         "s3_path": str(prog_doc["s3_path"]),
                         "readable_filename": prog_doc["readable_filename"],
                         "course_name": prog_doc["course_name"],
@@ -113,14 +125,11 @@ class Worker:
                         "doc_groups": prog_doc["doc_groups"],
                         "error": "Ingest could not resolve successfully, worker crashed (e.g. ran out of memory)",
                     })
-                    self.sql_session.delete_document_in_progress(job_id)
+                    status_db.delete_document_in_progress(job_id)
                     channel.basic_ack(delivery_tag=method.delivery_tag)
                 else:
                     prog_doc["error"] = 'Attempting ingest'
-                    self.sql_session.update_document_in_progress(prog_doc)
-
-                    course_name = inputs.get('course_name', '')
-                    resolved = self.resolver.resolve(course_name)
+                    status_db.update_document_in_progress(prog_doc)
 
                     ingester = Ingest()
                     ingester.main_ingest(job_id=job_id, _resolved_connections=resolved, **inputs)
