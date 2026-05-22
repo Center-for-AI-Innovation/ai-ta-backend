@@ -52,9 +52,7 @@ def _parse_allowed_embedding_providers() -> tuple[str, ...]:
     raw = os.getenv("ALLOWED_EMBEDDING_PROVIDERS")
     if not raw:
         return ("openai", "ollama")
-    parsed = tuple(
-        p for p in (s.strip().lower() for s in raw.split(",")) if p
-    )
+    parsed = tuple(p for p in (s.strip().lower() for s in raw.split(",")) if p)
     if not parsed:
         raise ValueError(
             "ALLOWED_EMBEDDING_PROVIDERS is set but parses to an empty list. "
@@ -718,10 +716,8 @@ class RetrievalService:
         )
 
         if provider == "ollama":
-            base_url = (
-                embedding_cfg.get("base_url")
-                or os.environ.get("OLLAMA_BASE_URL")
-                or os.environ.get("OLLAMA_SERVER_URL")
+            base_url = embedding_cfg.get("base_url") or os.environ.get(
+                "OLLAMA_SERVER_URL"
             )
             if not base_url:
                 raise ValueError(
