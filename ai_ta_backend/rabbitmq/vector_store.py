@@ -6,7 +6,7 @@ without importing from the main backend service.
 import json
 import os
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 
 def _get_pg_connection_params() -> Dict[str, str]:
@@ -50,18 +50,43 @@ def _payload_to_row(payload: Dict[str, Any], vector: List[float], point_id: Opti
     }
 
 
+def _vector_literal(vec: Sequence[float]) -> str:
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
 class PgVectorStore:
-    """pgvector implementation for embeddings table. Same schema as main backend."""
+    """pgvector implementation for the embeddings table.
+
+    Defaults to host POSTGRES_* env vars; pass ``engine=`` or
+    ``connection_uri=`` to bind to a per-project external Postgres.
+    """
 
     TABLE = "embeddings"
 
-    def __init__(self):
+    def __init__(
+        self,
+        engine: Optional[Any] = None,
+        connection_uri: Optional[str] = None,
+    ):
         import psycopg2
-        self._conn_params = _get_pg_connection_params()
+
         self._psycopg2 = psycopg2
+        self._engine = None
+        self._conn_params: Optional[Dict[str, str]] = None
+
+        if connection_uri:
+            from sqlalchemy import create_engine
+
+            self._engine = create_engine(connection_uri, pool_pre_ping=True)
+        elif engine is not None:
+            self._engine = engine
+        else:
+            self._conn_params = _get_pg_connection_params()
 
     def _conn(self):
-        return self._psycopg2.connect(**self._conn_params)
+        if self._engine is not None:
+            return self._engine.raw_connection()
+        return self._psycopg2.connect(**self._conn_params)  # type: ignore[arg-type]
 
     def upsert_batch(
         self,
@@ -120,21 +145,29 @@ class PgVectorStore:
             conn.close()
 
     def delete_by_filter(self, key: str, value: str) -> int:
-        """Delete rows where key = value. Returns number of deleted rows."""
+        """Delete rows where key = value. Returns number of deleted rows.
+
+        Raises ValueError if ``key`` is not one of the supported filter
+        columns — silently rewriting unknown keys would delete unrelated rows.
+        """
         if key not in ("course_name", "s3_path", "url", "conversation_id", "readable_filename"):
-            key = "s3_path"
+            raise ValueError(
+                f"PgVectorStore.delete_by_filter: unsupported key {key!r}. "
+                "Allowed: course_name, s3_path, url, conversation_id, readable_filename."
+            )
         conn = self._conn()
         try:
-            with conn.cursor() as cur:
-                cur.execute(f'DELETE FROM {self.TABLE} WHERE "{key}" = %s', (value,))
-                n = cur.rowcount
-            conn.commit()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f'DELETE FROM {self.TABLE} WHERE "{key}" = %s', (value,))
+                    n = cur.rowcount
+                conn.commit()
+                return n or 0
+            except Exception:
+                conn.rollback()
+                raise
+        finally:
             conn.close()
-            return n or 0
-        except Exception:
-            conn.rollback()
-            conn.close()
-            raise
 
 
 def get_vector_store() -> PgVectorStore:

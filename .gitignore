@@ -173,3 +173,6 @@ pip-selfcheck.json
 *.code-workspace
 # cursor
 *.workspace
+
+# Local Claude Code workflow state (per-developer; never share)
+.claude/

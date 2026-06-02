@@ -11,6 +11,7 @@
 * [Web Crawling Details](features/web-crawling-details.md)
 * [Bulk Export Documents or Conversation History](features/bulk-export-documents-or-conversation-history.md)
 * [Duplication in Ingested Documents](features/duplication-in-ingested-documents.md)
+* [External Connections](features/external-connections.md)
 
 ***
 
@@ -32,6 +33,7 @@
 ## Developers
 
 * [Developer Quickstart](developers/developer-quickstart.md)
+* [External Connections Config](developers/external-connections-config.md)
 
 ## MIGRATION
 

@@ -280,3 +280,14 @@ Note: Available tools can be viewed under settings on the chat page.
 #### Coming soon
 
 Document ingest via API. Currently only supported via the website GUI.
+
+***
+
+## External Connections API
+
+{% hint style="warning" %}
+**External Connections CRUD has moved to the Next.js frontend.** This backend no longer exposes any `/api/project-connections*` endpoints. Use the frontend routes documented in `uiuc-chat-frontend/docs/EXTERNAL_CONNECTIONS.md` instead.
+
+The backend still **reads** these rows at runtime for per-project dispatch — see [External Connections (feature doc)](../features/external-connections.md) and [Configuration Reference](../developers/external-connections-config.md).
+{% endhint %}
+

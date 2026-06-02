@@ -42,10 +42,12 @@ from git.repo import Repo
 from bs4 import BeautifulSoup
 from pydub import AudioSegment
 
-if os.environ['VECTOR_ENGINE'] == 'qdrant':
-    from qdrant_client import QdrantClient, models
-    from qdrant_client.models import PointStruct
-    from langchain.vectorstores import Qdrant
+# Qdrant client is imported unconditionally — the per-project resolver
+# decides whether to actually use it. `langchain.vectorstores.Qdrant` is
+# tied to the same path and only constructed when a Qdrant client is bound.
+from qdrant_client import QdrantClient, models
+from qdrant_client.models import PointStruct
+from langchain.vectorstores import Qdrant
 
 try:
     from ai_ta_backend.rabbitmq.rmsql import SQLAlchemyIngestDB
@@ -98,24 +100,25 @@ class Ingest:
         self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
         self.posthog_api_key = os.getenv('POSTHOG_API_KEY')
 
-        if os.environ['VECTOR_ENGINE'] == 'qdrant':
-            self.qdrant_url = os.getenv('QDRANT_URL')
-            self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
-            self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
-            self.qdrant_client = None
-            self.vectorstore = None
-
-            # Qdrant ingestion tuning
-            # Batch size for upserts during ingestion per guidance from Qdrant team
-            self.qdrant_upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
-            # Temporarily raise indexing threshold during ingestion, then revert
-            self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
-            self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
+        # Qdrant fields are always defined so engine-agnostic code paths can
+        # inspect them without raising. They're populated only when a
+        # per-project Qdrant client is bound via `initialize_resources`.
+        self.qdrant_url = os.getenv('QDRANT_URL')
+        self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
+        self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME')
+        self.qdrant_client = None
+        self.vectorstore = None
 
         self.posthog = None
         self.pgvector_store = None
         self.s3_client = None
         self.sql_session = None
+
+        # Per-project embedding override (set via initialize_resources from the
+        # resolver). When None, the env-based defaults above are used. model /
+        # openai_api_base / ncsa_hosted_api_key may be overridden in place.
+        self.embedding_provider = None
+        self.embedding_base_url = None
 
         # Batch size for pgvector upserts during ingestion
         self.upsert_batch_size = int(os.getenv('QDRANT_UPSERT_BATCH_SIZE', '100'))
@@ -130,45 +133,68 @@ class Ingest:
         # Embedding API retry configuration
         self.embedding_max_attempts = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '10'))
 
-    def initialize_resources(self):
-        if os.environ['VECTOR_ENGINE'] == 'qdrant':
-            # Initialize Qdrant client and create collection if necessary
-            if self.qdrant_api_key and self.qdrant_url:
-                self.qdrant_client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
-                if not self.qdrant_client.get_collection(self.qdrant_collection_name):
-                    logging.info(f"Creating collection {self.qdrant_collection_name}")
-                    self.qdrant_client.create_collection(
-                        collection_name=self.qdrant_collection_name,
-                        vectors_config={"size": 4096, "distance": "Cosine"}
-                    )
+    def initialize_resources(self, qdrant_client=None, qdrant_collection_name=None,
+                             s3_client=None, s3_bucket_name=None,
+                             pgvector_store=None, documents_sql_engine=None,
+                             embedding_provider=None, embedding_model=None,
+                             embedding_api_key=None, embedding_api_base=None,
+                             embedding_base_url=None):
+        """Initialize external service clients.
 
-                if self.embedding_model == 'text-embedding-ada-002':
-                    self.vectorstore = Qdrant(
-                        client=self.qdrant_client,
-                        collection_name=self.qdrant_collection_name,
-                        embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
-                                                    openai_api_base=self.openai_api_base, model=self.embedding_model)
-                    )
-                    print("Vectorstore initialized with text-embedding-ada-002")
-                else:
-                    self.vectorstore = Qdrant(
-                        client=self.qdrant_client,
-                        collection_name=self.qdrant_collection_name,
-                        embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
-                                                    openai_api_base=self.openai_api_base, model=self.embedding_model,
-                                                    tiktoken_enabled=False)
-                    )
-                    print("Vectorstore initialized with NCSA_HOSTED model")
-            else:
-                logging.error("QDRANT API KEY OR URL NOT FOUND!")
+        Engine selection (per request, driven by WorkerConnectionResolver):
+          1. Per-project ``qdrant_client``       → external Qdrant
+          2. Otherwise                            → pgvector
+             (per-project external pg via ``pgvector_store`` when the project
+              has ``database_config``, else the host pgvector store)
+
+        Embedding selection (also from the resolver, mirroring
+        retrieval_service._resolve_embedding_client):
+          - provider 'ollama' → native OllamaEmbeddings in split_and_upload.
+          - provider 'openai'/None → existing OpenAIAPIProcessor against the
+            (optionally overridden) model / api_base / api_key.
+        """
+        # ── Embedding override ──
+        # When the resolver supplies a per-project embedding, override the
+        # env-derived attributes the embedding paths read. Leave them untouched
+        # otherwise (env defaults).
+        self.embedding_provider = embedding_provider
+        self.embedding_base_url = embedding_base_url
+        if embedding_model:
+            self.embedding_model = embedding_model
+        if embedding_provider != "ollama":
+            if embedding_api_base:
+                # The OpenAIAPIProcessor needs a URL ending in /embeddings; the
+                # resolved api_base is a base URL.
+                base = embedding_api_base.rstrip("/")
+                self.openai_api_base = base if base.endswith("/embeddings") else base + "/embeddings"
+            if embedding_api_key:
+                self.ncsa_hosted_api_key = embedding_api_key
+
+        if qdrant_client is not None:
+            self.qdrant_client = qdrant_client
+            if qdrant_collection_name:
+                self.qdrant_collection_name = qdrant_collection_name
+            self._init_vectorstore()
         else:
-            # Standalone worker: no ai_ta_backend; use local pgvector store in rabbitmq
-            from vector_store import get_vector_store
-            self.pgvector_store = get_vector_store()
+            # pgvector: prefer the per-project store from the resolver; fall
+            # back to the host pgvector store.
+            if pgvector_store is not None:
+                self.pgvector_store = pgvector_store
+            else:
+                try:
+                    from ai_ta_backend.rabbitmq.vector_store import get_vector_store
+                except ImportError:
+                    # Standalone worker: no ai_ta_backend on sys.path.
+                    from vector_store import get_vector_store
+                self.pgvector_store = get_vector_store()
             logging.info("Vector store: pgvector (embeddings table)")
 
-        # Connect to AWS S3 file store
-        if self.aws_access_key_id and self.aws_secret_access_key:
+        # ── S3 ──
+        if s3_client is not None:
+            self.s3_client = s3_client
+            if s3_bucket_name:
+                self.s3_bucket_name = s3_bucket_name
+        elif self.aws_access_key_id and self.aws_secret_access_key:
             self.s3_client = boto3.client(
                 's3',
                 endpoint_url=self.minio_url,
@@ -184,6 +210,7 @@ class Ingest:
                 config=Config(s3={'addressing_style': 'path'})
             )
 
+        # ── PostHog ──
         if self.posthog_api_key:
             self.posthog = Posthog(sync_mode=False, project_api_key=self.posthog_api_key,
                                    host='https://app.posthog.com')
@@ -191,14 +218,46 @@ class Ingest:
             self.posthog = None
             print("POSTHOG API KEY NOT FOUND!")
 
-        self.sql_session = SQLAlchemyIngestDB()
+        self.sql_session = SQLAlchemyIngestDB(engine=documents_sql_engine)
 
-    def main_ingest(self, job_id: str, **inputs: Dict[str | List[str], Any]):
+    def _init_vectorstore(self):
+        """Build the LangChain Qdrant vectorstore wrapper from the current qdrant_client."""
+        if self.embedding_model == 'text-embedding-ada-002':
+            self.vectorstore = Qdrant(
+                client=self.qdrant_client,
+                collection_name=self.qdrant_collection_name,
+                embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
+                                            openai_api_base=self.openai_api_base, model=self.embedding_model)
+            )
+        else:
+            self.vectorstore = Qdrant(
+                client=self.qdrant_client,
+                collection_name=self.qdrant_collection_name,
+                embeddings=OpenAIEmbeddings(openai_api_type='openai', openai_api_key=self.ncsa_hosted_api_key,
+                                            openai_api_base=self.openai_api_base, model=self.embedding_model,
+                                            tiktoken_enabled=False)
+            )
+
+    def main_ingest(self, job_id: str, _resolved_connections=None, **inputs: Dict[str | List[str], Any]):
         """
         Main ingest function.
+        _resolved_connections: optional ResolvedConnections from WorkerConnectionResolver.
         """
         try:
-            self.initialize_resources()
+            rc = _resolved_connections
+            self.initialize_resources(
+                qdrant_client=getattr(rc, 'qdrant_client', None) if rc else None,
+                qdrant_collection_name=getattr(rc, 'qdrant_collection_name', None) if rc else None,
+                s3_client=getattr(rc, 's3_client', None) if rc else None,
+                s3_bucket_name=getattr(rc, 's3_bucket_name', None) if rc else None,
+                pgvector_store=getattr(rc, 'pgvector_store', None) if rc else None,
+                documents_sql_engine=getattr(rc, 'documents_sql_engine', None) if rc else None,
+                embedding_provider=getattr(rc, 'embedding_provider', None) if rc else None,
+                embedding_model=getattr(rc, 'embedding_model', None) if rc else None,
+                embedding_api_key=getattr(rc, 'embedding_api_key', None) if rc else None,
+                embedding_api_base=getattr(rc, 'embedding_api_base', None) if rc else None,
+                embedding_base_url=getattr(rc, 'embedding_base_url', None) if rc else None,
+            )
 
             course_name: List[str] | str = inputs.get('course_name', '')
             s3_paths: List[str] | str = inputs.get('s3_paths', '')
@@ -446,30 +505,43 @@ class Ingest:
                 context.metadata['chunk_index'] = i
                 context.metadata['doc_groups'] = kwargs.get('groups', [])
 
-            # Generate embeddings from OpenAI
+            # Generate embeddings, keyed by page_content so the upsert below can
+            # look up each chunk's vector. The provider is resolved per project;
+            # ollama uses the native LangChain client (matching retrieval's
+            # /api/embeddings shape for bit-identical vectors), everything else
+            # uses the OpenAI-compatible batch processor.
             logging.info(f"Generating embeddings for {len(input_texts)} texts")
             embeddings_start_time = time.monotonic()
-            oai = OpenAIAPIProcessor(
-                input_prompts_list=input_texts,
-                request_url=self.openai_api_base,
-                api_key=self.ncsa_hosted_api_key,
-                max_requests_per_minute=10_000,
-                max_tokens_per_minute=10_000_000,
-                token_encoding_name='cl100k_base',
-                max_attempts=self.embedding_max_attempts,
-                logging_level=logging.INFO,
-                model=self.embedding_model)
-            asyncio.run(oai.process_api_requests_from_file())
+            if self.embedding_provider == "ollama":
+                from langchain.embeddings.ollama import OllamaEmbeddings
+                ollama = OllamaEmbeddings(base_url=self.embedding_base_url, model=self.embedding_model)
+                texts_to_embed = [item['input'] for item in input_texts]
+                vectors = ollama.embed_documents(texts_to_embed)
+                embeddings_dict: dict[str, List[float]] = {
+                    text: vector for text, vector in zip(texts_to_embed, vectors)
+                }
+            else:
+                oai = OpenAIAPIProcessor(
+                    input_prompts_list=input_texts,
+                    request_url=self.openai_api_base,
+                    api_key=self.ncsa_hosted_api_key,
+                    max_requests_per_minute=10_000,
+                    max_tokens_per_minute=10_000_000,
+                    token_encoding_name='cl100k_base',
+                    max_attempts=self.embedding_max_attempts,
+                    logging_level=logging.INFO,
+                    model=self.embedding_model)
+                asyncio.run(oai.process_api_requests_from_file())
+                embeddings_dict: dict[str, List[float]] = {
+                    item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
+                }
             print(f"⏰ embeddings runtime: {(time.monotonic() - embeddings_start_time):.2f} seconds")
-            embeddings_dict: dict[str, List[float]] = {
-                item[0]['input']: item[1]['data'][0]['embedding'] for item in oai.results
-            }
 
-            if os.environ['VECTOR_ENGINE'] == 'qdrant':
+            if self.qdrant_client is not None:
                 # Batched upload to Qdrant. The temporary indexing_threshold toggles are
                 # intentionally disabled because multiple ingest workers can trigger
                 # excess temporary segment growth and disk usage until Qdrant restarts.
-                collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore
+                collection_name = self.qdrant_collection_name or os.environ.get('QDRANT_COLLECTION_NAME', '')  # type: ignore
                 # Raise indexing threshold to postpone indexing during bulk upserts.
                 # Disabled because concurrent workers can amplify temporary segment and
                 # disk growth until Qdrant is restarted.
@@ -481,41 +553,39 @@ class Ingest:
                 # except Exception as e:
                 #     logging.warning("Could not raise Qdrant indexing threshold before ingestion: %s", e)
 
-                try:
-                    batch: list[PointStruct] = []
-                    for context in contexts:
-                        upload_metadata = {**context.metadata, "page_content": context.page_content}
-                        batch.append(
-                            PointStruct(
-                                id=str(uuid.uuid4()),
-                                vector=embeddings_dict[context.page_content],
-                                payload=upload_metadata,
-                            )
+                batch: list[PointStruct] = []
+                for context in contexts:
+                    upload_metadata = {**context.metadata, "page_content": context.page_content}
+                    batch.append(
+                        PointStruct(
+                            id=str(uuid.uuid4()),
+                            vector=embeddings_dict[context.page_content],
+                            payload=upload_metadata,
                         )
-                        if len(batch) >= self.qdrant_upsert_batch_size:
-                            try:
-                                self.qdrant_client.upsert(
-                                    collection_name=collection_name,
-                                    points=batch,  # type: ignore
-                                    wait=False,
-                                )
-                            except Exception as e:
-                                # Timeouts can be acceptable while server processes the request in background
-                                logging.warning("Batch upsert encountered an error (continuing): %s", e)
-                            finally:
-                                batch = []
+                    )
+                    if len(batch) >= self.qdrant_upsert_batch_size:
+                        try:
+                            self.qdrant_client.upsert(
+                                collection_name=collection_name,
+                                points=batch,  # type: ignore
+                                wait=False,
+                            )
+                        except Exception as e:
+                            # Timeouts can be acceptable while server processes the request in background
+                            logging.warning("Batch upsert encountered an error (continuing): %s", e)
+                        finally:
+                            batch = []
 
-                        if len(batch) > 0:
-                            try:
-                                self.qdrant_client.upsert(
-                                    collection_name=collection_name,
-                                    points=batch,  # type: ignore
-                                    wait=False,
-                                )
-                            except Exception as e:
-                                logging.warning("Final batch upsert encountered an error (continuing): %s", e)
-                finally:
-                    pass
+                # Flush the residual final batch after the loop completes.
+                if len(batch) > 0:
+                    try:
+                        self.qdrant_client.upsert(
+                            collection_name=collection_name,
+                            points=batch,  # type: ignore
+                            wait=False,
+                        )
+                    except Exception as e:
+                        logging.warning("Final batch upsert encountered an error (continuing): %s", e)
 
             else:
                 # Batched upload to pgvector
@@ -541,18 +611,6 @@ class Ingest:
                         )
                     except Exception as e:
                         logging.warning("Final batch upsert encountered an error (continuing): %s", e)
-                    finally:
-                        # Revert indexing threshold back to online value.
-                        # Disabled because concurrent workers can amplify temporary segment
-                        # and disk growth until Qdrant is restarted.
-                        # try:
-                        #     self.qdrant_client.update_collection(
-                        #         collection_name=collection_name,
-                        #         optimizer_config=models.OptimizersConfigDiff(indexing_threshold=self.qdrant_indexing_threshold_online),
-                        #     )
-                        # except Exception as e:
-                        #     logging.warning("Could not revert Qdrant indexing threshold after ingestion: %s", e)
-                        pass
 
             # Supabase SQL insertion
             # contexts_for_supa = [{
@@ -704,7 +762,7 @@ class Ingest:
                     print("Error in deleting file from s3:", e)
                     sentry_sdk.capture_exception(e)
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[
@@ -727,7 +785,7 @@ class Ingest:
                     sentry_sdk.capture_exception(e)
             elif source_url:
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[
@@ -760,7 +818,7 @@ class Ingest:
         try:
             if s3_path:
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[
@@ -783,7 +841,7 @@ class Ingest:
                     sentry_sdk.capture_exception(e)
             elif source_url:
                 try:
-                    if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                    if self.qdrant_client is not None:
                         self.qdrant_client.delete(
                             collection_name=self.qdrant_collection_name,
                             points_selector=models.Filter(must=[

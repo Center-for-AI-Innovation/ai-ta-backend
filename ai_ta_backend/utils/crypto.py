@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 import re
 
@@ -86,3 +87,30 @@ def encrypt_if_needed(key: str) -> str:
       print('Failed to encrypt key:', error)
       raise
   return key
+
+
+def _get_connection_encryption_key() -> str:
+  key = os.environ.get('ENCRYPTION_MASTER_KEY', '')
+  if not key:
+    raise ValueError('ENCRYPTION_MASTER_KEY environment variable is not set')
+  return key
+
+
+def decrypt_config(stored: dict) -> dict:
+  """Decrypt a config dict from project_external_connections.
+
+  This is the only entry point the backend needs into the
+  project-connection encryption envelope — the Next.js frontend is the
+  sole writer (see uiuc-chat-frontend
+  src/pages/api/UIUC-api/projectConnections*).
+
+  Expects {"encrypted": "v1.xxx.yyy"} as stored in the JSONB column.
+  Returns the original config dict.
+  """
+  if not stored:
+    return None
+  encrypted_str = stored.get("encrypted")
+  if not encrypted_str:
+    return None
+  plaintext = decrypt(encrypted_str, _get_connection_encryption_key())
+  return json.loads(plaintext)

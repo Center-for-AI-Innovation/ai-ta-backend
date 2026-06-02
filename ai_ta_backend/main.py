@@ -6,6 +6,10 @@ import logging
 from typing import List
 
 from dotenv import load_dotenv
+
+# Load .env before local imports so module-level code can access env vars
+load_dotenv()
+
 from flask import (
   Flask,
   Response,
@@ -20,6 +24,7 @@ from flask_injector import FlaskInjector, RequestScope
 from injector import Binder, SingletonScope
 
 from ai_ta_backend.database.aws import AWSStorage
+from ai_ta_backend.database.connection_manager import ConnectionManager
 from ai_ta_backend.database.graph import GraphDatabase
 from ai_ta_backend.database.sql import SQLDatabase
 from ai_ta_backend.database.vector import VectorDatabase
@@ -53,8 +58,6 @@ executor = Executor(app)
 # app.config['EXECUTOR_MAX_WORKERS'] = 5 nothing == picks defaults for me
 #app.config['SERVER_TIMEOUT'] = 1000  # seconds
 
-# load API keys from globally-availabe .env file
-load_dotenv()
 
 
 @app.route('/')
@@ -970,6 +973,12 @@ def getPrimeKGContexts(graph_db: GraphDatabase) -> Response:
   response.headers.add('Access-Control-Allow-Origin', '*')
   return response
 
+# External-connection CRUD lives in the Next.js frontend (see
+# uiuc-chat-frontend `src/pages/api/UIUC-api/projectConnections*`). The
+# backend only **reads** these rows via `ConnectionManager` for runtime
+# dispatch — there are no project-connections HTTP endpoints here.
+
+
 def configure(binder: Binder) -> None:
   binder.bind(ThreadPoolExecutorInterface, to=ThreadPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
   binder.bind(ProcessPoolExecutorInterface, to=ProcessPoolExecutorAdapter(max_workers=10), scope=SingletonScope)
@@ -982,6 +991,7 @@ def configure(binder: Binder) -> None:
   binder.bind(VectorDatabase, to=VectorDatabase, scope=SingletonScope)
   binder.bind(SQLDatabase, to=SQLDatabase, scope=SingletonScope)
   binder.bind(AWSStorage, to=AWSStorage, scope=SingletonScope)
+  binder.bind(ConnectionManager, to=ConnectionManager, scope=SingletonScope)
   binder.bind(ExecutorInterface, to=FlaskExecutorAdapter(executor), scope=SingletonScope)
   binder.bind(GraphDatabase, to=GraphDatabase, scope=SingletonScope)
 

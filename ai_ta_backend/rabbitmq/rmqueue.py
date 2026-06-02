@@ -7,9 +7,11 @@ import ssl
 
 try:
     from ai_ta_backend.rabbitmq.rmsql import SQLAlchemyIngestDB
+    from ai_ta_backend.rabbitmq.connection_resolver import WorkerConnectionResolver
     import ai_ta_backend.rabbitmq.models as models
 except ModuleNotFoundError:
     from rmsql import SQLAlchemyIngestDB
+    from connection_resolver import WorkerConnectionResolver
     import models
 
 logging.getLogger('pika').setLevel(logging.WARNING)
@@ -17,6 +19,10 @@ logging.getLogger('pika').setLevel(logging.WARNING)
 
 # TODO: Move into the class?
 sql_session = SQLAlchemyIngestDB()
+# Resolves a project's external documents DB so the in-progress status row lands
+# in the same DB the worker and frontend read from. Reuses the host session for
+# the (host-only) project_external_connections lookup.
+resolver = WorkerConnectionResolver(sql_session)
 
 class Queue:
 
@@ -75,7 +81,15 @@ class Queue:
             readable_filename=inputs['readable_filename'],
             course_name=inputs['course_name']
         )
-        new_doc = sql_session.insert_document_in_progress(doc_progress_payload)
+        # Route the status row to the project's documents DB (external when the
+        # project has database_config, else host) so the worker can fetch it by
+        # job_id and the frontend's "documents in progress" view finds it.
+        resolved = resolver.resolve(inputs.get('course_name', ''))
+        status_db = (
+            SQLAlchemyIngestDB(engine=resolved.documents_sql_engine)
+            if resolved.documents_sql_engine else sql_session
+        )
+        new_doc = status_db.insert_document_in_progress(doc_progress_payload)
         logging.info("Inserted new in-progress job ID: " + new_doc.get("beam_task_id"))
         new_job_id = new_doc.get("beam_task_id")
 

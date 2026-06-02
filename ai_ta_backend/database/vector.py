@@ -1,557 +1,643 @@
-import os
-from typing import List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+"""
+VectorDatabase: per-project vector store wrapper supporting Qdrant and pgvector.
 
-import requests
+Routing rule (resolved by ``ConnectionManager.get_vector_db``):
+    1. Project has an active non-null ``qdrant_config``  -> external Qdrant
+    2. Else                                              -> pgvector
+       (host pgvector by default; per-project external pg when the project
+       has a ``database_config``)
+
+When this instance is constructed with an explicit ``qdrant_client`` (case 1
+above) it behaves as a project-specific Qdrant wrapper. When constructed with
+an explicit ``pgvector_store`` (or with no args for the default-injected
+instance) the pgvector path is used; ``qdrant_client`` stays ``None``.
+
+The legacy direct-client special cases from main (cropwizard, vyriad, pubmed,
+patents) are no longer hardcoded against ad-hoc clients -- per-project Qdrant
+configuration drives them via the resolver. Convenience helpers are kept for
+backward compatibility but now operate on ``self.qdrant_client`` so the right
+client is used automatically.
+"""
+
+import json
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List
+
 from injector import inject
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import FieldCondition, MatchAny, MatchValue
 
-if os.environ['VECTOR_ENGINE'] == 'qdrant':
-  from langchain.embeddings.openai import OpenAIEmbeddings
-  from langchain.vectorstores import Qdrant
-else:
-  from ai_ta_backend.database.vector_store import get_vector_store
+logger = logging.getLogger(__name__)
 
 
-class VectorDatabase():
-  """
-  Contains all methods for building and using vector databases.
-  Main Illinois Chat collection uses pgvector. Vyriad and cropwizard use Qdrant.
-  """
+# ---------------------------------------------------------------------------
+# Result post-processors for multi-collection / specialty searches.
+# ---------------------------------------------------------------------------
 
-  @inject
-  def __init__(self):
-    """
-    Initialize pgvector (main collection), Qdrant (Vyriad/cropwizard only), and Supabase.
-    """
-    if os.environ['VECTOR_ENGINE'] == 'qdrant':
-      self.qdrant_client = QdrantClient(
-        url=os.environ['QDRANT_URL'],
-        api_key=os.environ['QDRANT_API_KEY'],
-        port=os.getenv('QDRANT_PORT') if os.getenv('QDRANT_PORT') else None,
-        timeout=20,  # default is 5 seconds. Getting timeout errors w/ document groups.
-      )
-    else:
-      self.pgvector_store = get_vector_store()
 
-    self.vyriad_qdrant_client = QdrantClient(url=os.environ['VYRIAD_QDRANT_URL'],
-                                             port=int(os.environ['VYRIAD_QDRANT_PORT']),
-                                             https=True,
-                                             api_key=os.environ['VYRIAD_QDRANT_API_KEY'])
-
-    try:
-      # No major uptime guarantees
-      self.cropwizard_qdrant_client = QdrantClient(url="https://cropwizard-qdrant.ncsa.ai",
-                                                   port=443,
-                                                   https=True,
-                                                   api_key=os.environ['QDRANT_API_KEY'])
-    except Exception as e:
-      print(f"Error in cropwizard_qdrant_client: {e}")
-      self.cropwizard_qdrant_client = None
-
-  def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                    disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-    """
-    Search the vector database for a given query.
-    """
-    # Search the vector database
-    search_results = self.qdrant_client.search(
-      collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-      query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
-      with_vectors=False,
-      query_vector=user_query_embedding,
-      limit=top_n,  # Return n closest points
-      # In a system with high disk latency, the re-scoring step may become a bottleneck: https://qdrant.tech/documentation/guides/quantization/
-      search_params=models.SearchParams(quantization=models.QuantizationSearchParams(rescore=False)))
-    # print(f"Search results: {search_results}")
-    return search_results
-
-  def cropwizard_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                               disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-    """
-    Search the vector database for a given query.
-    """
-    top_n = 120
-
-    search_results = self.cropwizard_qdrant_client.search(
-        collection_name='cropwizard',
-        query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
-        with_vectors=False,
-        query_vector=user_query_embedding,
-        limit=top_n,  # Return n closest points
-    )
-
-    return search_results
-
-  def patents_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                            disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-    """
-    Search the vector database for a given query.
-    """
-    top_n = 120
-
-    search_results = self.vyriad_qdrant_client.search(
-        collection_name='patents',  # Patents embeddings
-        with_vectors=False,
-        query_vector=user_query_embedding,
-        limit=top_n,  # Return n closest points
-    )
-
-    # Post-process the Qdrant results, format the results
-    try:
-      updated_results = []
-      for result in search_results:
-        result.payload['page_content'] = result.payload['text']
-        result.payload['readable_filename'] = "Patent: " + result.payload['s3_path'].split("/")[-1].replace('.txt', '')
-        result.payload['course_name'] = course_name
-        result.payload['url'] = result.payload['uspto_url']
-        result.payload['s3_path'] = result.payload['s3_path']
-        updated_results.append(result)
-      return updated_results
-
-    except Exception as e:
-      print(f"Error in patents_vector_search: {e}")
-      return []
-
-  def pubmed_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                           disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-    """
-    Search the vector database for a given query.
-    """
-    # Search the vector database
-    search_results = self.vyriad_qdrant_client.search(
-        collection_name='pubmed',  # Pubmed embeddings
-        with_vectors=False,
-        query_vector=user_query_embedding,
-        limit=120,  # Return n closest points
-    )
-
-    # Post process the Qdrant results, format the results
-    try:
-      updated_results = []
-      for result in search_results:
-        result.payload['page_content'] = result.payload['page_content']
-        result.payload['readable_filename'] = result.payload['readable_filename']
-        result.payload['s3_path'] = result.payload['s3_path']
-        result.payload['pagenumber'] = result.payload['pagenumber']
-        result.payload['course_name'] = course_name
-        updated_results.append(result)
-      return updated_results
-
-    except Exception as e:
-      print(f"Error in pubmed_vector_search: {e}")
-      return []
-
-  def vyriad_vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                           disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-    """
-    Search the vector database for a given query, combining results from both pubmed and patents collections.
-    """
-    top_n = 50
-
-    def search_pubmed():
-      """Search pubmed collection with error handling"""
-      try:
-        results = self.vyriad_qdrant_client.search(
-            collection_name='pubmed',
-            with_vectors=False,
-            query_vector=user_query_embedding,
-            limit=top_n,
-        )
-        print(f"Pubmed search completed successfully with {len(results)} results")
-        return ('pubmed', results, None)
-      except Exception as e:
-        error_msg = f"Error in pubmed vector search: {str(e)}"
-        print(error_msg)
-        return ('pubmed', [], error_msg)
-
-    def search_patents():
-      """Search patents collection with error handling"""
-      try:
-        results = self.vyriad_qdrant_client.search(
-            collection_name='patents',
-            with_vectors=False,
-            query_vector=user_query_embedding,
-            limit=top_n,
-        )
-        print(f"Patents search completed successfully with {len(results)} results")
-        return ('patents', results, None)
-      except Exception as e:
-        error_msg = f"Error in patents vector search: {str(e)}"
-        print(error_msg)
-        return ('patents', [], error_msg)
-
-    def search_ncbi_books():
-      """Search ncbi books collection with error handling"""
-      try:
-        results = self.vyriad_qdrant_client.search(
-            collection_name='ncbi_pdfs',
-            with_vectors=False,
-            query_vector=user_query_embedding,
-            limit=100,
-        )
-        print(f"NCBI books search completed successfully with {len(results)} results")
-        return ('ncbi_books', results, None)
-      except Exception as e:
-        error_msg = f"Error in NCBI books vector search: {str(e)}"
-        print(error_msg)
-        return ('ncbi_books', [], error_msg)
-
-    def search_clinicaltrials():
-      """Search clinicaltrials collection with error handling"""
-      try:
-        results = self.vyriad_qdrant_client.search(
-            collection_name='clinical-trials',
-            with_vectors=False,
-            query_vector=user_query_embedding,
-            limit=top_n,
-        )
-        print(f"Clinical trials search completed successfully with {len(results)} results")
-        return ('clinicaltrials', results, None)
-      except Exception as e:
-        error_msg = f"Error in clinical trials vector search: {str(e)}"
-        print(error_msg)
-        return ('clinicaltrials', [], error_msg)
-
-    # Execute all searches in parallel
-    search_functions = [search_pubmed, search_patents, search_ncbi_books, search_clinicaltrials]
-    search_results = {}
-    search_errors = []
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-      # Submit all search tasks
-      future_to_search = {executor.submit(func): func.__name__ for func in search_functions}
-
-      # Collect results as they complete
-      for future in as_completed(future_to_search):
-        search_name = future_to_search[future]
+def _process_pubmed_results(results, course_name):
+    """Normalize pubmed search results into the standard payload format."""
+    processed = []
+    for result in results:
         try:
-          search_type, results, error = future.result()
-          search_results[search_type] = results
-          if error:
-            search_errors.append(error)
-        except Exception as e:
-          error_msg = f"Unexpected error in {search_name}: {str(e)}"
-          print(error_msg)
-          search_errors.append(error_msg)
-          search_results[search_name.replace('search_', '')] = []
-
-    # Extract results from the dictionary
-    pubmed_results = search_results.get('pubmed', [])
-    patents_results = search_results.get('patents', [])
-    ncbi_books_results = search_results.get('ncbi_books', [])
-    clinicaltrials_results = search_results.get('clinicaltrials', [])
-
-    # Log any errors that occurred
-    if search_errors:
-      print(f"Search errors encountered: {search_errors}")
-
-    print(
-        f"Total results - Pubmed: {len(pubmed_results)}, Patents: {len(patents_results)}, NCBI Books: {len(ncbi_books_results)}, Clinical Trials: {len(clinicaltrials_results)}"
-    )
-
-    def process_pubmed_results(results):
-      """Process pubmed results with error handling"""
-      try:
-        updated_results = []
-        for result in results:
-          result.payload['page_content'] = result.payload.get('page_content', '')
-          result.payload['readable_filename'] = "Pubmed: " + result.payload.get('readable_filename',
-                                                                                'Unknown Pubmed Document')
-          result.payload['s3_path'] = 'pubmed/' + result.payload.get('s3_path', '')
-          result.payload['pagenumber'] = result.payload.get('pagenumber', 0)
-          result.payload['course_name'] = course_name
-          updated_results.append(result)
-        print(f"Processed {len(updated_results)} pubmed results successfully")
-        return ('pubmed', updated_results, None)
-      except Exception as e:
-        error_msg = f"Error processing pubmed results: {str(e)}"
-        print(error_msg)
-        return ('pubmed', [], error_msg)
-
-    def process_patents_results(results):
-      """Process patents results with error handling"""
-      try:
-        updated_results = []
-        for result in results:
-          result.payload['page_content'] = result.payload.get('text', '')
-          s3_path = 'patents/' + result.payload.get('s3_path', 'unknown.txt')
-          result.payload['readable_filename'] = "Patent: " + s3_path.split("/")[-1].replace('.txt', '')
-          result.payload['course_name'] = course_name
-          result.payload['url'] = result.payload.get('uspto_url', '')
-          result.payload['s3_path'] = s3_path
-          updated_results.append(result)
-        print(f"Processed {len(updated_results)} patents results successfully")
-        return ('patents', updated_results, None)
-      except Exception as e:
-        error_msg = f"Error processing patents results: {str(e)}"
-        print(error_msg)
-        return ('patents', [], error_msg)
-
-    def process_ncbi_books_results(results):
-      """Process ncbi books results with error handling"""
-      try:
-        updated_results = []
-        for result in results:
-          result.payload['page_content'] = result.payload.get('page_content', '')
-          result.payload['readable_filename'] = "NCBI Book: " + result.payload.get('readable_filename',
-                                                                                   'Unknown NCBI Document')
-          result.payload['s3_path'] = 'ncbi-output/' + result.payload.get('s3_path', '')
-          result.payload['course_name'] = course_name
-          result.payload['pagenumber'] = result.payload.get('page_number', 0)
-          # Use .get() to safely access 'url' field with None as default
-          result.payload['url'] = result.payload.get('url', None)
-          updated_results.append(result)
-        print(f"Processed {len(updated_results)} NCBI books results successfully")
-        return ('ncbi_books', updated_results, None)
-      except Exception as e:
-        error_msg = f"Error processing NCBI books results: {str(e)}"
-        print(error_msg)
-        return ('ncbi_books', [], error_msg)
-
-    def process_clinicaltrials_results(results):
-      """Process clinicaltrials results with error handling"""
-      try:
-        updated_results = []
-        for result in results:
-          result.payload['page_content'] = result.payload.get('text', '')
-          s3_path = 'clinical-trials/' + result.payload.get('s3_path', 'unknown.txt')
-          filename = os.path.basename(s3_path)
-          readable_name = os.path.splitext(filename)[0] if filename else 'Unknown Clinical Trial'
-          result.payload['readable_filename'] = f"Clinical Trial: {readable_name}"
-          result.payload['url'] = result.payload.get('url') or ''
-          result.payload['s3_path'] = s3_path
-          result.payload['course_name'] = course_name
-          updated_results.append(result)
-        print(f"Processed {len(updated_results)} clinical trials results successfully")
-        return ('clinicaltrials', updated_results, None)
-      except Exception as e:
-        error_msg = f"Error processing clinical trials results: {str(e)}"
-        print(error_msg)
-        return ('clinicaltrials', [], error_msg)
-
-    # Process all results in parallel
-    processing_functions_and_data = [(process_pubmed_results, pubmed_results),
-                                     (process_patents_results, patents_results),
-                                     (process_ncbi_books_results, ncbi_books_results),
-                                     (process_clinicaltrials_results, clinicaltrials_results)]
-
-    processed_results = {}
-    processing_errors = []
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-      # Submit all processing tasks
-      future_to_processor = {executor.submit(func, data): func.__name__ for func, data in processing_functions_and_data}
-
-      # Collect processed results as they complete
-      for future in as_completed(future_to_processor):
-        processor_name = future_to_processor[future]
-        try:
-          result_type, processed_data, error = future.result()
-          processed_results[result_type] = processed_data
-          if error:
-            processing_errors.append(error)
-        except Exception as e:
-          error_msg = f"Unexpected error in {processor_name}: {str(e)}"
-          print(error_msg)
-          processing_errors.append(error_msg)
-          # Extract result type from processor name
-          result_type = processor_name.replace('process_', '').replace('_results', '')
-          processed_results[result_type] = []
-
-    # Extract processed results
-    updated_pubmed_results = processed_results.get('pubmed', [])
-    updated_patents_results = processed_results.get('patents', [])
-    updated_ncbi_books_results = processed_results.get('ncbi_books', [])
-    updated_clinicaltrials_results = processed_results.get('clinicaltrials', [])
-
-    # Log any processing errors
-    if processing_errors:
-      print(f"Processing errors encountered: {processing_errors}")
-
-    # Combine results
-    combined_results = updated_pubmed_results + updated_patents_results + updated_ncbi_books_results + updated_clinicaltrials_results
-
-    # Sort combined results by score (higher score = better match)
-    combined_results.sort(key=lambda x: x.score, reverse=True)
-
-    print(f"Final combined results: {len(combined_results)} total documents")
-
-    # Return combined results (remove the top_n limit to return all results)
-    return combined_results
-
-  def _create_search_filter(self, course_name: str, doc_groups: List[str], admin_disabled_doc_groups: List[str],
-                            public_doc_groups: List[dict]) -> models.Filter:
-    """
-    Create search conditions for regular searches (no conversation filtering).
-    Excludes chunks with any conversation_id.
-    
-    Args:
-        course_name: The course/project name to filter by
-        doc_groups: List of document groups to include
-        admin_disabled_doc_groups: List of document groups to exclude
-        public_doc_groups: List of public document groups that can be accessed
-    """
-
-    must_conditions = []
-    should_conditions = []
-
-    # Exclude admin-disabled doc_groups
-    must_not_conditions = []
-    if admin_disabled_doc_groups:
-      must_not_conditions.append(FieldCondition(key='doc_groups', match=MatchAny(any=admin_disabled_doc_groups)))
-
-    # For regular searches, only include chunks that have NO conversation_id field
-    # This ensures we only get regular course chunks and prevents cross-conversation leaks
-    must_conditions.append(models.IsEmptyCondition(
-        is_empty={"key": "conversation_id"}  # Only include chunks where conversation_id field is empty/missing
-    ))
-    
-    # Handle public_doc_groups
-    if public_doc_groups:
-      for public_doc_group in public_doc_groups:
-        if public_doc_group['enabled']:
-          # Create a combined condition for each public_doc_group
-          combined_condition = models.Filter(must=[
-              FieldCondition(key='course_name', match=MatchValue(value=public_doc_group['course_name'])),
-              FieldCondition(key='doc_groups', match=MatchAny(any=[public_doc_group['name']]))
-          ])
-          should_conditions.append(combined_condition)
-
-    # Handle user's own course documents
-    own_course_condition = models.Filter(must=[FieldCondition(key='course_name', match=MatchValue(value=course_name))])
-
-    # If specific doc_groups are specified
-    if doc_groups and 'All Documents' not in doc_groups:
-      own_course_condition.must.append(FieldCondition(key='doc_groups', match=MatchAny(any=doc_groups)))
-
-    # Add the own_course_condition to should_conditions
-    should_conditions.append(own_course_condition)
-
-    # Construct the final filter (apply must to enforce no conversation_id)
-    vector_search_filter = models.Filter(must=must_conditions, should=should_conditions, must_not=must_not_conditions)
-
-    print(f"Vector search filter: {vector_search_filter}")
-    return vector_search_filter
-
-  def _create_conversation_search_filter(self, conversation_id: str) -> models.Filter:
-    """
-    Create search conditions for conversation-specific chunks.
-    Only includes chunks with the specified conversation_id.
-    
-    Args:
-        conversation_id: The specific conversation ID to filter by
-    """
-
-    must_conditions = []
-
-    # Conversation ID filter - this is sufficient since conversation_id is unique
-    must_conditions.append(FieldCondition(
-        key='conversation_id', 
-        match=MatchValue(value=conversation_id)
-    ))
-    
-    return models.Filter(must=must_conditions)
-
-  def delete_data(self, collection_name: str, key: str, value: str):
-    """
-    Delete data from the vector database. Main collection uses pgvector only.
-    """
-    if os.environ['VECTOR_ENGINE'] == 'qdrant':
-      return self.qdrant_client.delete(
-        collection_name=collection_name,
-        wait=True,
-        points_selector=models.Filter(must=[
-          models.FieldCondition(
-            key=key,
-            match=models.MatchValue(value=value),
-          ),
-        ]),
-      )
-    else:
-      if collection_name != os.environ.get('QDRANT_COLLECTION_NAME'):
-        raise ValueError(f"delete_data only supports main collection, got: {collection_name}")
-      self.pgvector_store.delete_by_filter(key, value)
-      return None
-
-  def delete_data_cropwizard(self, key: str, value: str):
-    """
-    Delete data from the vector database.
-    """
-    return self.cropwizard_qdrant_client.delete(
-        collection_name='cropwizard',
-        wait=True,
-        points_selector=models.Filter(must=[
-            models.FieldCondition(
-                key=key,
-                match=models.MatchValue(value=value),
-            ),
-        ]),
-    )
-
-  def _create_conversation_filter(self, conversation_id: str) -> models.Filter:
-    """
-    Create a filter for conversation-specific documents.
-    """
-    return models.Filter(
-        must=[
-            FieldCondition(
-                key='conversation_id',
-                match=MatchValue(value=conversation_id)
+            result.payload["page_content"] = result.payload.get("page_content", "")
+            result.payload["readable_filename"] = (
+                "Pubmed: " + result.payload.get("readable_filename", "Unknown Pubmed Document")
             )
+            result.payload["s3_path"] = "pubmed/" + result.payload.get("s3_path", "")
+            result.payload["pagenumber"] = result.payload.get("pagenumber", 0)
+            result.payload["course_name"] = course_name
+            processed.append(result)
+        except Exception as e:
+            logger.warning("Error processing pubmed result: %s", e)
+    return processed
+
+
+def _process_patents_results(results, course_name):
+    """Normalize patents search results into the standard payload format."""
+    processed = []
+    for result in results:
+        try:
+            result.payload["page_content"] = result.payload.get("text", "")
+            s3_path = "patents/" + result.payload.get("s3_path", "unknown.txt")
+            result.payload["readable_filename"] = "Patent: " + s3_path.split("/")[-1].replace(".txt", "")
+            result.payload["course_name"] = course_name
+            result.payload["url"] = result.payload.get("uspto_url", "")
+            result.payload["s3_path"] = s3_path
+            processed.append(result)
+        except Exception as e:
+            logger.warning("Error processing patents result: %s", e)
+    return processed
+
+
+def _process_ncbi_books_results(results, course_name):
+    """Normalize NCBI books search results into the standard payload format."""
+    processed = []
+    for result in results:
+        try:
+            result.payload["page_content"] = result.payload.get("page_content", "")
+            result.payload["readable_filename"] = (
+                "NCBI Book: " + result.payload.get("readable_filename", "Unknown NCBI Document")
+            )
+            result.payload["s3_path"] = "ncbi-output/" + result.payload.get("s3_path", "")
+            result.payload["course_name"] = course_name
+            result.payload["pagenumber"] = result.payload.get("page_number", 0)
+            result.payload["url"] = result.payload.get("url", None)
+            processed.append(result)
+        except Exception as e:
+            logger.warning("Error processing NCBI books result: %s", e)
+    return processed
+
+
+def _process_clinical_trials_results(results, course_name):
+    """Normalize clinical-trials search results into the standard payload format."""
+    processed = []
+    for result in results:
+        try:
+            result.payload["page_content"] = result.payload.get("text", "")
+            s3_path = "clinical-trials/" + result.payload.get("s3_path", "unknown.txt")
+            filename = os.path.basename(s3_path)
+            readable_name = os.path.splitext(filename)[0] if filename else "Unknown Clinical Trial"
+            result.payload["readable_filename"] = f"Clinical Trial: {readable_name}"
+            result.payload["url"] = result.payload.get("url") or ""
+            result.payload["s3_path"] = s3_path
+            result.payload["course_name"] = course_name
+            processed.append(result)
+        except Exception as e:
+            logger.warning("Error processing clinical trials result: %s", e)
+    return processed
+
+
+RESULT_PROCESSORS = {
+    "pubmed": _process_pubmed_results,
+    "patents": _process_patents_results,
+    "ncbi_books": _process_ncbi_books_results,
+    "clinical_trials": _process_clinical_trials_results,
+}
+
+
+class _PgvectorScoredPoint:
+    """Qdrant-shaped wrapper around a pgvector row.
+
+    ``execute_search`` returns these so downstream ``_process_search_results``
+    in retrieval_service can treat Qdrant and pgvector results uniformly via
+    ``.payload`` and ``.score``.
+    """
+
+    __slots__ = ("score", "payload")
+
+    def __init__(self, score: float, payload: dict):
+        self.score = score
+        self.payload = payload
+
+
+def _pgvector_rows_to_scored_points(rows: list[dict]) -> list[_PgvectorScoredPoint]:
+    points: list[_PgvectorScoredPoint] = []
+    for row in rows:
+        raw_score = row.get("score")
+        score = 0.0 if raw_score is None else float(raw_score)
+        # `doc_groups` is JSONB; psycopg2 normally returns a Python list,
+        # but deployments with a custom adapter (or an older driver) may
+        # hand back a JSON string. Coerce defensively so downstream code
+        # always sees a list.
+        doc_groups = row.get("doc_groups")
+        if doc_groups is None:
+            doc_groups = []
+        elif isinstance(doc_groups, str):
+            try:
+                parsed = json.loads(doc_groups)
+                doc_groups = parsed if isinstance(parsed, list) else []
+            except Exception:
+                doc_groups = []
+        payload = {
+            "page_content": row.get("page_content") or "",
+            "readable_filename": row.get("readable_filename") or "",
+            "course_name": row.get("course_name") or "",
+            "s3_path": row.get("s3_path") or "",
+            "pagenumber": row.get("pagenumber") or "",
+            "url": row.get("url") or "",
+            "base_url": row.get("base_url") or "",
+            "doc_groups": doc_groups,
+            "conversation_id": row.get("conversation_id") or "",
+        }
+        points.append(_PgvectorScoredPoint(score, payload))
+    return points
+
+
+class VectorDatabase:
+    """
+    Contains all methods for building and using vector databases.
+
+    May be constructed three ways:
+      * Default injection (no args): a pgvector-default instance with no
+        Qdrant client and no eagerly-bound pgvector store. The store is
+        resolved lazily via ``ConnectionManager.get_pgvector_store`` on
+        first use, or injected explicitly via the constructor.
+      * Explicit per-project Qdrant:
+        ``VectorDatabase(qdrant_client=..., qdrant_config=...)`` — produced
+        by ``ConnectionManager.get_vector_db`` for projects with an
+        external Qdrant override.
+      * Explicit pgvector binding:
+        ``VectorDatabase(pgvector_store=...)`` — produced by
+        ``ConnectionManager.get_vector_db`` for pgvector projects;
+        ``pgvector_store`` may target host or per-project Postgres.
+    """
+
+    @inject
+    def __init__(
+        self,
+        qdrant_client: QdrantClient = None,
+        qdrant_config: dict = None,
+        pgvector_store=None,
+    ):
+        """Initialize with an explicit client/config or leave defaults blank.
+
+        Engine selection precedence handled here:
+          * Explicit ``qdrant_client``  -> Qdrant path.
+          * Explicit ``pgvector_store`` -> pgvector path bound to that store.
+          * Otherwise                   -> pgvector-default; the host
+            pgvector store is resolved lazily on first use.
+
+        Env-driven shared-Qdrant fallback has been removed — pure-Qdrant
+        deployments now go through per-project ``qdrant_config``.
+        """
+        self._pgvector_store = pgvector_store
+
+        if qdrant_client is not None:
+            self.qdrant_client = qdrant_client
+            self.qdrant_config = qdrant_config or {}
+            return
+
+        # pgvector-default. No env-based Qdrant construction.
+        self.qdrant_client = None
+        self.qdrant_config = {
+            "default_collection": os.environ.get("QDRANT_COLLECTION_NAME", ""),
+            "skip_quantization_rescore": True,
+        }
+
+    # ------------------------------------------------------------------
+    # pgvector helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def pgvector_store(self):
+        """Accessor for the pgvector store.
+
+        Falls back to the host singleton when no per-project store was
+        injected. Imported on first access so pure-Qdrant deployments don't
+        pay the psycopg2 import cost at startup.
+        """
+        if self._pgvector_store is None:
+            from ai_ta_backend.database.vector_store import get_vector_store
+            self._pgvector_store = get_vector_store()
+        return self._pgvector_store
+
+    def _using_pgvector(self) -> bool:
+        """True iff this instance has no Qdrant client and should fall back to pgvector."""
+        return self.qdrant_client is None
+
+    # ------------------------------------------------------------------
+    # Search (Qdrant-backed; the config drives single- vs multi-collection)
+    # ------------------------------------------------------------------
+
+    def execute_search(
+        self,
+        query_filter,
+        query_vector,
+        course_name: str,
+        top_n: int = 100,
+        *,
+        pgvector_args: dict | None = None,
+    ):
+        """Config-driven search entry point. Dispatches by engine.
+
+        Qdrant path: always searches ``default_collection``. If ``collections``
+        is also set, searches every entry too -- ``default_collection`` is
+        auto-prepended if its name is not already listed there.
+
+        Pgvector path: uses ``pgvector_args`` (doc_groups / disabled /
+        public / conversation_id) for filtering. ``query_filter`` is ignored
+        because pgvector builds filter SQL from the raw lists, not the
+        Qdrant ``models.Filter`` shape.
+        """
+        if self._using_pgvector():
+            args = pgvector_args or {}
+            rows = self.pgvector_store.search(
+                query_embedding=query_vector,
+                course_name=course_name,
+                doc_groups=args.get("doc_groups") or [],
+                disabled_doc_groups=args.get("disabled_doc_groups") or [],
+                public_doc_groups=args.get("public_doc_groups") or [],
+                conversation_id=args.get("conversation_id"),
+                top_n=top_n,
+            )
+            return _pgvector_rows_to_scored_points(rows)
+
+        default_name = self.qdrant_config.get("default_collection", "")
+        extras = self.qdrant_config.get("collections") or []
+
+        if not extras:
+            return self._single_collection_search(query_filter, query_vector, top_n)
+
+        listed_names = {c.get("name") for c in extras}
+        effective = list(extras)
+        if default_name and default_name not in listed_names:
+            effective.insert(0, {"name": default_name})
+
+        if len(effective) == 1:
+            return self._single_collection_search(query_filter, query_vector, top_n)
+        return self._multi_collection_search(
+            effective, query_filter, query_vector, course_name, top_n
+        )
+
+    def _single_collection_search(self, query_filter, query_vector, top_n: int):
+        """Standard search against the project's default collection."""
+        search_kwargs = dict(
+            collection_name=self.qdrant_config["default_collection"],
+            query_filter=query_filter,
+            with_vectors=False,
+            query_vector=query_vector,
+            limit=top_n,
+        )
+        if self.qdrant_config.get("skip_quantization_rescore"):
+            search_kwargs["search_params"] = models.SearchParams(
+                quantization=models.QuantizationSearchParams(rescore=False)
+            )
+        return self.qdrant_client.search(**search_kwargs)
+
+    def _multi_collection_search(self, collections: list[dict],
+                                  query_filter, query_vector, course_name: str,
+                                  top_n: int):
+        """Search multiple collections in parallel and combine results.
+
+        Each entry in *collections* is a dict with keys:
+            name (str): collection name
+            top_n (int, optional): override for limit
+            use_filter (bool, optional): whether to apply the course filter (default True)
+            processor (str, optional): key into RESULT_PROCESSORS for post-processing
+        """
+        all_results = []
+
+        def _search_one(col_cfg: dict):
+            col_name = col_cfg["name"]
+            col_top_n = col_cfg.get("top_n", top_n)
+            use_filter = col_cfg.get("use_filter", True)
+            effective_filter = query_filter if use_filter else None
+            try:
+                results = self.qdrant_client.search(
+                    collection_name=col_name,
+                    query_filter=effective_filter,
+                    with_vectors=False,
+                    query_vector=query_vector,
+                    limit=col_top_n,
+                )
+                processor_key = col_cfg.get("processor")
+                if processor_key and processor_key in RESULT_PROCESSORS:
+                    results = RESULT_PROCESSORS[processor_key](results, course_name)
+                return results
+            except Exception as e:
+                logger.warning("Error searching collection %s: %s", col_name, e)
+                return []
+
+        if self.qdrant_config.get("parallel", True) and len(collections) > 1:
+            with ThreadPoolExecutor(max_workers=len(collections)) as executor:
+                futures = {executor.submit(_search_one, cfg): cfg["name"] for cfg in collections}
+                for future in as_completed(futures):
+                    col_name = futures[future]
+                    try:
+                        all_results.extend(future.result())
+                    except Exception as e:
+                        logger.warning("Unexpected error searching %s: %s", col_name, e)
+        else:
+            for cfg in collections:
+                all_results.extend(_search_one(cfg))
+
+        if self.qdrant_config.get("sort_combined", True):
+            all_results.sort(key=lambda x: x.score, reverse=True)
+
+        return all_results
+
+    # ------------------------------------------------------------------
+    # Filter builders (Qdrant filter shape; reused by retrieval_service)
+    # ------------------------------------------------------------------
+
+    def _create_search_filter(
+        self,
+        course_name: str,
+        doc_groups: List[str],
+        admin_disabled_doc_groups: List[str],
+        public_doc_groups: List[dict],
+    ) -> models.Filter:
+        """
+        Create search conditions for regular searches (no conversation filtering).
+        Excludes chunks with any conversation_id.
+
+        Args:
+            course_name: The course/project name to filter by
+            doc_groups: List of document groups to include
+            admin_disabled_doc_groups: List of document groups to exclude
+            public_doc_groups: List of public document groups that can be accessed
+        """
+
+        must_conditions = []
+        should_conditions = []
+
+        # Exclude admin-disabled doc_groups
+        must_not_conditions = []
+        if admin_disabled_doc_groups:
+            must_not_conditions.append(
+                FieldCondition(
+                    key="doc_groups", match=MatchAny(any=admin_disabled_doc_groups)
+                )
+            )
+
+        # For regular searches, only include chunks that have NO conversation_id field
+        # This ensures we only get regular course chunks and prevents cross-conversation leaks
+        must_conditions.append(
+            models.IsEmptyCondition(
+                is_empty={
+                    "key": "conversation_id"
+                }  # Only include chunks where conversation_id field is empty/missing
+            )
+        )
+
+        # Handle public_doc_groups
+        if public_doc_groups:
+            for public_doc_group in public_doc_groups:
+                if public_doc_group["enabled"]:
+                    # Create a combined condition for each public_doc_group
+                    combined_condition = models.Filter(
+                        must=[
+                            FieldCondition(
+                                key="course_name",
+                                match=MatchValue(value=public_doc_group["course_name"]),
+                            ),
+                            FieldCondition(
+                                key="doc_groups",
+                                match=MatchAny(any=[public_doc_group["name"]]),
+                            ),
+                        ]
+                    )
+                    should_conditions.append(combined_condition)
+
+        # Handle user's own course documents
+        own_course_condition = models.Filter(
+            must=[
+                FieldCondition(key="course_name", match=MatchValue(value=course_name))
+            ]
+        )
+
+        # If specific doc_groups are specified
+        if doc_groups and "All Documents" not in doc_groups:
+            if own_course_condition.must:
+                own_course_condition.must.append(
+                    FieldCondition(key="doc_groups", match=MatchAny(any=doc_groups))
+                )
+
+        # Add the own_course_condition to should_conditions
+        should_conditions.append(own_course_condition)
+
+        # Construct the final filter (apply must to enforce no conversation_id)
+        vector_search_filter = models.Filter(
+            must=must_conditions, should=should_conditions, must_not=must_not_conditions
+        )
+
+        print(f"Vector search filter: {vector_search_filter}")
+        return vector_search_filter
+
+    def _create_conversation_search_filter(self, conversation_id: str) -> models.Filter:
+        """
+        Create search conditions for conversation-specific chunks.
+        Only includes chunks with the specified conversation_id.
+
+        Args:
+            conversation_id: The specific conversation ID to filter by
+        """
+
+        must_conditions = []
+
+        # Conversation ID filter - this is sufficient since conversation_id is unique
+        must_conditions.append(
+            FieldCondition(
+                key="conversation_id", match=MatchValue(value=conversation_id)
+            )
+        )
+
+        return models.Filter(must=must_conditions)
+
+    def _create_conversation_filter(self, conversation_id: str) -> models.Filter:
+        """
+        Create a filter for conversation-specific documents.
+        """
+        return models.Filter(
+            must=[
+                FieldCondition(
+                    key="conversation_id", match=MatchValue(value=conversation_id)
+                )
+            ]
+        )
+
+    def _combine_filters(
+        self, search_filter: models.Filter, conversation_filter: models.Filter = None
+    ) -> models.Filter:
+        """
+        Combine search filter with conversation filter using AND logic.
+
+        Args:
+            search_filter: The main search filter (course_name, doc_groups, etc.)
+            conversation_filter: The conversation-specific filter (optional)
+
+        Returns:
+            Combined filter using AND logic for security
+        """
+        combined_conditions = []
+
+        # Add conditions from search filter
+        if search_filter.must:
+            combined_conditions.extend(search_filter.must)
+
+        # Add conditions from conversation filter if provided
+        if conversation_filter and conversation_filter.must:
+            combined_conditions.extend(conversation_filter.must)
+
+        # Combine must_not conditions
+        combined_must_not = []
+        if search_filter.must_not:
+            combined_must_not.extend(search_filter.must_not)
+        if conversation_filter and conversation_filter.must_not:
+            combined_must_not.extend(conversation_filter.must_not)
+
+        return models.Filter(must=combined_conditions, must_not=combined_must_not)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible thin wrappers around qdrant_client.
+    # Previously dispatched to hardcoded shared clients
+    # (vyriad_qdrant_client, cropwizard_qdrant_client). With per-project
+    # routing they now always operate on ``self.qdrant_client`` -- the
+    # resolver hands back the right instance.
+    # ------------------------------------------------------------------
+
+    def vector_search(self, search_query, course_name, doc_groups: List[str],
+                      user_query_embedding, top_n, disabled_doc_groups: List[str],
+                      public_doc_groups: List[dict]):
+        """Standard course search against the default collection (Qdrant only)."""
+        if self._using_pgvector():
+            raise RuntimeError(
+                "vector_search() is Qdrant-only. Use execute_search(...) on a "
+                "pgvector VectorDatabase, or route via retrieval_service which "
+                "branches on engine."
+            )
+        return self.qdrant_client.search(
+            collection_name=self.qdrant_config.get(
+                "default_collection", os.environ.get("QDRANT_COLLECTION_NAME", "")
+            ),
+            query_filter=self._create_search_filter(
+                course_name, doc_groups, disabled_doc_groups, public_doc_groups
+            ),
+            with_vectors=False,
+            query_vector=user_query_embedding,
+            limit=top_n,
+            search_params=models.SearchParams(
+                quantization=models.QuantizationSearchParams(rescore=False)
+            ),
+        )
+
+    def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str],
+                                  user_query_embedding, top_n, disabled_doc_groups: List[str],
+                                  public_doc_groups: List[dict], custom_filter: models.Filter):
+        """Search the default collection with a caller-supplied filter (Qdrant only)."""
+        if self._using_pgvector():
+            raise RuntimeError(
+                "vector_search_with_filter() is Qdrant-only. Use execute_search(...) "
+                "with pgvector_args on a pgvector VectorDatabase."
+            )
+        return self.qdrant_client.search(
+            collection_name=self.qdrant_config.get(
+                "default_collection", os.environ.get("QDRANT_COLLECTION_NAME", "")
+            ),
+            query_filter=custom_filter,
+            with_vectors=False,
+            query_vector=user_query_embedding,
+            limit=top_n,
+            search_params=models.SearchParams(
+                quantization=models.QuantizationSearchParams(rescore=False)
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Mutations (engine-aware)
+    # ------------------------------------------------------------------
+
+    def delete(self, collection_name: str, key: str, value: str):
+        """Delete points matching a field condition.
+
+        On a Qdrant-backed instance this runs against the provided
+        ``collection_name``. On a pgvector-default instance this falls back to
+        ``PgVectorStore.delete_by_filter``; ``collection_name`` is ignored
+        because pgvector has a single embeddings table.
+        """
+        if self._using_pgvector():
+            return self.pgvector_store.delete_by_filter(key, value)
+        return self.qdrant_client.delete(
+            collection_name=collection_name,
+            wait=True,
+            points_selector=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key=key,
+                        match=models.MatchValue(value=value),
+                    ),
+                ]
+            ),
+        )
+
+    def delete_data(self, collection_name: str, key: str, value: str):
+        """Engine-aware delete by field condition.
+
+        Backward-compatible name for ``delete``. On pgvector, ``collection_name``
+        is ignored; the host main embeddings table is the only target.
+        """
+        return self.delete(collection_name, key, value)
+
+    def upsert(self, points: list):
+        """Upsert points into the default collection (Qdrant only).
+
+        For pgvector use ``upsert_main_collection``; this method requires a
+        Qdrant client.
+        """
+        if self._using_pgvector():
+            raise RuntimeError(
+                "upsert() requires a Qdrant client. For pgvector ingest use "
+                "upsert_main_collection(ids, vectors, payloads)."
+            )
+        return self.qdrant_client.upsert(
+            collection_name=self.qdrant_config["default_collection"],
+            points=points,
+            wait=True,
+        )
+
+    def upsert_main_collection(self, ids: List[str], vectors: List[List[float]],
+                                payloads: List[dict], wait: bool = True):
+        """Upsert points into the main collection.
+
+        Engine-aware: routes to pgvector when the host is configured for it,
+        otherwise to Qdrant.
+        """
+        if self._using_pgvector():
+            self.pgvector_store.upsert_batch(
+                ids=ids, vectors=vectors, payloads=payloads, wait=wait
+            )
+            return
+        points = [
+            models.PointStruct(id=pid, vector=vec, payload=pl)
+            for pid, vec, pl in zip(ids, vectors, payloads)
         ]
-    )
-
-  def _combine_filters(self, search_filter: models.Filter, conversation_filter: models.Filter = None) -> models.Filter:
-    """
-    Combine search filter with conversation filter using AND logic.
-    
-    Args:
-        search_filter: The main search filter (course_name, doc_groups, etc.)
-        conversation_filter: The conversation-specific filter (optional)
-    
-    Returns:
-        Combined filter using AND logic for security
-    """
-    combined_conditions = []
-    
-    # Add conditions from search filter
-    if search_filter.must:
-        combined_conditions.extend(search_filter.must)
-    
-    # Add conditions from conversation filter if provided
-    if conversation_filter and conversation_filter.must:
-        combined_conditions.extend(conversation_filter.must)
-    
-    # Combine must_not conditions
-    combined_must_not = []
-    if search_filter.must_not:
-        combined_must_not.extend(search_filter.must_not)
-    if conversation_filter and conversation_filter.must_not:
-        combined_must_not.extend(conversation_filter.must_not)
-    
-    return models.Filter(must=combined_conditions, must_not=combined_must_not)
-
-  def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str],
-                                user_query_embedding, top_n, disabled_doc_groups: List[str],
-                                public_doc_groups: List[dict], custom_filter: models.Filter):
-    """
-    Search the vector database with a custom filter.
-    Used for conversation-specific document filtering.
-    """
-    search_results = self.qdrant_client.search(
-      collection_name=os.environ['QDRANT_COLLECTION_NAME'],
-      query_filter=custom_filter,
-      with_vectors=False,
-      query_vector=user_query_embedding,
-      limit=top_n,
-      search_params=models.SearchParams(
-        quantization=models.QuantizationSearchParams(rescore=False)
-      )
-    )
-    return search_results
-
-  def upsert_main_collection(self, ids: List[str], vectors: List[List[float]], payloads: List[dict], wait: bool = True):
-    """Upsert points into the main Illinois Chat collection (pgvector)."""
-    self.pgvector_store.upsert_batch(ids=ids, vectors=vectors, payloads=payloads, wait=wait)
+        self.qdrant_client.upsert(
+            collection_name=self.qdrant_config.get(
+                "default_collection", os.environ.get("QDRANT_COLLECTION_NAME", "")
+            ),
+            points=points,
+            wait=wait,
+        )

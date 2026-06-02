@@ -1,9 +1,10 @@
+import functools
 import logging
 import os
 from contextlib import contextmanager
 from typing import List, TypedDict, TypeVar, Generic
 
-from sqlalchemy import create_engine, NullPool, func, insert, delete, select, update, desc, literal, ARRAY
+from sqlalchemy import create_engine, NullPool, func, insert, delete, select, update, desc, literal, ARRAY, or_
 from sqlalchemy.orm import sessionmaker, Session, aliased
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
@@ -11,6 +12,30 @@ from sqlalchemy.sql import text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from ..utils.datetime_utils import to_utc_datetime
+
+
+def _host_only(method):
+    """Decorator: refuse to run a method when the SQLDatabase is bound to a
+    project's external engine.
+
+    External SQL connections own only the document-related tables. Conversation,
+    project, stats, auth, and workflow data live on the host main DB. Marking
+    those methods with @_host_only prevents accidental routing through
+    ConnectionManager.get_documents_sql_db(project_name).
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self, "is_external", False):
+            raise RuntimeError(
+                f"SQLDatabase.{method.__name__} is host-only and must not be "
+                f"called on a project's external DB. Resolve via "
+                f"ConnectionManager.get_sql_db() (host) instead of "
+                f"get_documents_sql_db(project_name)."
+            )
+        return method(self, *args, **kwargs)
+
+    return wrapper
 
 try:
     import ai_ta_backend.rabbitmq.models as models
@@ -68,14 +93,39 @@ class ModelUsage(TypedDict):
 
 
 class SQLDatabase:
-    def __init__(self) -> None:
-        # Define supported database configurations and their required env vars
+    """SQL data access for both the host main DB and per-project external DBs.
+
+    External SQL connections are scoped to **document-related** data only:
+    `documents`, `documents_in_progress`, `documents_failed`, `doc_groups`,
+    `documents_doc_groups`. Conversation/project/stats/auth/workflow tables
+    always live on the host. Methods that touch those host-only tables are
+    marked with `@_host_only` and raise at runtime if called on an external
+    instance.
+
+    Resolution rules (see ConnectionManager):
+      * Documents-only methods → `get_documents_sql_db(project_name)`
+        (returns external if configured, else host).
+      * Host-only methods → `get_sql_db()` (always host).
+    """
+
+    def __init__(self, engine=None) -> None:
+        if engine is not None:
+            # Use a pre-built engine (for external project databases).
+            # `is_external` lets @_host_only refuse host-only methods on this
+            # instance.
+            self.engine = engine
+            self.Session = sessionmaker(bind=self.engine)
+            self.is_external = True
+            return
+
+        self.is_external = False
+
+        # Default: detect from environment variables
         DB_CONFIGS = {
             'sqlite': ['SQLITE_DB_NAME'],
             'postgres': ['POSTGRES_USERNAME', 'POSTGRES_PASSWORD', 'POSTGRES_ENDPOINT']
         }
 
-        # Detect which database configuration is available
         db_type = None
         for db, required_vars in DB_CONFIGS.items():
             if all(os.getenv(var) for var in required_vars):
@@ -85,14 +135,11 @@ class SQLDatabase:
         if not db_type:
             raise ValueError("No valid database configuration found in environment variables")
 
-        # Build the appropriate connection string
         if db_type == 'sqlite':
             db_uri = f"sqlite:///{os.getenv('SQLITE_DB_NAME')}"
         else:
-            # postgres
             db_uri = f"postgresql://{os.getenv('POSTGRES_USERNAME')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_ENDPOINT')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DATABASE')}"
 
-        # Create engine and session
         logging.info("About to connect to DB from IngestSQL.py.")
         self.engine = create_engine(db_uri, poolclass=NullPool)
         self.Session = sessionmaker(bind=self.engine)
@@ -192,6 +239,7 @@ class SQLDatabase:
 
         return result.rowcount  # Number of rows deleted
 
+    @_host_only
     def getProjectsMapForCourse(self, course_name: str):
         query = (
             select(models.Project.doc_map_id)
@@ -226,6 +274,7 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
     def getConversationsBetweenDates(self, course_name: str, from_date: str, to_date: str):
         query = (
             select(models.LlmConvoMonitor)
@@ -247,6 +296,7 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
     def getAllFromTableForDownloadType(self, course_name: str, download_type: str, first_id: int):
         if download_type == 'documents':
             query = (
@@ -271,6 +321,7 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
     def getAllConversationsBetweenIds(self, course_name: str, first_id: int, last_id: int, limit: int = 50):
         query = select(models.LlmConvoMonitor).where(
             models.LlmConvoMonitor.course_name == course_name
@@ -315,6 +366,18 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
+    def getProjectByName(self, project_name: str):
+        """Return a Project row by course_name, or None."""
+        query = (
+            select(models.Project)
+            .where(models.Project.course_name == project_name)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().first()
+            return orm_to_dict(result)
+
+    @_host_only
     def insertProject(self, project_info):
         with self.get_session() as session:
             try:
@@ -325,6 +388,7 @@ class SQLDatabase:
                 logging.error(f"Insertion failed: {e}")
                 return False  # Insertion failed
 
+    @_host_only
     def getLLMConvo(self):
         query = (
             select(models.LlmConvoMonitor.convo)
@@ -336,6 +400,7 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
     def getAllFromLLMConvoMonitor(self, course_name: str):
         query = (
             select(models.LlmConvoMonitor)
@@ -349,6 +414,7 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
     def getCountFromLLMConvoMonitor(self, course_name: str, last_id: int):
         if last_id == 0:
             query = (
@@ -391,6 +457,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getDocMapFromProjects(self, course_name: str):
         query = (
             select(models.Project.doc_map_id)
@@ -403,6 +470,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getConvoMapFromProjects(self, course_name: str):
         query = (
             select(models.Project)
@@ -415,6 +483,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def updateProjects(self, course_name: str, data: dict):
         query = (
             select(models.Project)
@@ -427,6 +496,7 @@ class SQLDatabase:
         return result
 
 
+    @_host_only
     def getLatestWorkflowId(self):
         query = (
             select(models.N8nWorkflows)
@@ -439,6 +509,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def lockWorkflow(self, id: int):
         with self.get_session() as session:
             try:
@@ -450,6 +521,7 @@ class SQLDatabase:
                 return False  # Insertion failed
 
 
+    @_host_only
     def deleteLatestWorkflowId(self, id: int):
         query = (
             delete(models.N8nWorkflows)
@@ -463,6 +535,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def unlockWorkflow(self, id: int):
         query = (
             update(models.N8nWorkflows)
@@ -475,11 +548,13 @@ class SQLDatabase:
         return result
 
 
+    @_host_only
     def check_and_lock_flow(self, id):
         with self.get_session() as session:
             return session.query(func.check_and_lock_flows_v2(id)).all()
 
 
+    @_host_only
     def getConversation(self, course_name: str, key: str, value: str):
         query = (
             select(models.LlmConvoMonitor)
@@ -516,14 +591,11 @@ class SQLDatabase:
         )
         with Session(self.engine) as session:
             result = session.execute(query).mappings().all()
-            if os.environ['VECTOR_ENGINE'] == 'qdrant':
-                response = DatabaseResponse(data=result, count=len(result)).to_dict()
-            else:
-                data = [dict(row) for row in result]
-                response = DatabaseResponse(data=data, count=len(result)).to_dict()
-            return response
+            data = [dict(row) for row in result]
+            return DatabaseResponse(data=data, count=len(result)).to_dict()
 
 
+    @_host_only
     def getAllConversationsForUserAndProject(self, user_email: str, project_name: str, curr_count: int = 0):
         C, M = models.Conversations, models.Messages
         conv_page = (
@@ -581,6 +653,7 @@ class SQLDatabase:
 
         return response
 
+    @_host_only
     def getPreAssignedAPIKeys(self, email: str):
         query = (
             select(models.PreAuthAPIKeys)
@@ -594,6 +667,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getConversationsCreatedAtByCourse(
             self, course_name: str, from_date: str = "", to_date: str = ""
     ):
@@ -627,6 +701,7 @@ class SQLDatabase:
             return [], 0
 
 
+    @_host_only
     def getProjectStats(self, project_name: str) -> ProjectStats:
         try:
             query = (
@@ -680,6 +755,7 @@ class SQLDatabase:
                                 avg_messages_per_conversation=0.0)
 
 
+    @_host_only
     def getWeeklyTrends(self, project_name: str) -> List[WeeklyMetric]:
         with self.get_session() as session:
             response = session.query(func.calculate_weekly_trends(project_name)).all()
@@ -694,6 +770,7 @@ class SQLDatabase:
         return []
 
 
+    @_host_only
     def getModelUsageCounts(self, project_name: str) -> List[ModelUsage]:
         with self.get_session() as session:
             response = session.query(func.count_models_by_project(project_name)).all()
@@ -712,6 +789,7 @@ class SQLDatabase:
         return []
 
 
+    @_host_only
     def getAllProjects(self):
         query = (
             select(models.Project.course_name,
@@ -728,16 +806,19 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getConvoMapDetails(self):
         with self.get_session() as session:
             return session.query(func.get_convo_maps()).all()
 
 
+    @_host_only
     def getDocMapDetails(self):
         with self.get_session() as session:
             return session.query(func.get_doc_map_details()).all()
 
 
+    @_host_only
     def getProjectsWithConvoMaps(self):
         query = (
             select(models.Project.course_name,
@@ -753,6 +834,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getProjectsWithDocMaps(self):
         query = (
             select(models.Project.course_name,
@@ -769,6 +851,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getProjectMapName(self, course_name, field_name):
         query = text(f"""
                         SELECT {field_name} FROM projects 
@@ -781,6 +864,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def getMessagesFromConvoID(self, convo_id):
         query = (
             select(models.Messages)
@@ -794,6 +878,7 @@ class SQLDatabase:
         return response
 
 
+    @_host_only
     def updateMessageFromLlmMonitor(self, message_id, llm_monitor_tags):
         query = (
             select(models.Message)
@@ -805,3 +890,39 @@ class SQLDatabase:
             response = DatabaseResponse(data=result, count=len(result)).to_dict()
 
         return response
+
+    # ── External Connection Config CRUD ──────────────────────────────
+
+    # NOTE: external-connection writes (upsert / delete / set_active) live in
+    # the Next.js frontend (uiuc-chat-frontend
+    # src/pages/api/UIUC-api/projectConnections*). The backend only reads.
+    @_host_only
+    def getExternalConnection(self, project_name: str):
+        query = (
+            select(models.ProjectExternalConnection)
+            .where(models.ProjectExternalConnection.project_name == project_name)
+            .where(models.ProjectExternalConnection.is_active == True)
+        )
+        with self.get_session() as session:
+            result = session.execute(query).scalars().first()
+            return orm_to_dict(result)
+
+    @staticmethod
+    def get_session_for_engine(engine):
+        """Create a session context manager for an arbitrary engine."""
+        from contextlib import contextmanager
+        SessionFactory = sessionmaker(bind=engine)
+
+        @contextmanager
+        def _session():
+            session = SessionFactory()
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        return _session()

@@ -13,6 +13,7 @@ from sqlalchemy import VARCHAR
 from sqlalchemy import Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from uuid import uuid4
@@ -178,6 +179,8 @@ class Project(Base):
     description = Column(Text)
     metadata_schema = Column(JSON)
 
+    external_connection = relationship('ProjectExternalConnection', back_populates='project', uselist=False)
+
     __table_args__ = (
         Index('projects_course_name_key', 'course_name', postgresql_using='btree'),
         # Index('projects_pkey', 'id', postgresql_using='btree'),
@@ -334,6 +337,52 @@ class Messages(Base):
             "updated_at": self.updated_at,
             "content_image_url": self.content_image_url,
             "image_description": self.image_description
+        }
+
+
+class ProjectExternalConnection(Base):
+    """Read-only mirror of the `project_external_connections` table.
+
+    The Next.js frontend is the sole writer (uiuc-chat-frontend
+    `src/pages/api/UIUC-api/projectConnections*`). The Drizzle schema in
+    that repo is the source of truth for the column set and constraints;
+    this SQLAlchemy class exists so the backend's read path
+    (`ConnectionManager`, `WorkerConnectionResolver`) can use ORM queries.
+
+    Each *_config column holds an AES-256-GCM-encrypted JSON blob shaped
+    as ``{"encrypted": "v1.<ct+tag>.<iv>"}``. None means "use default
+    infrastructure".
+    """
+    __tablename__ = 'project_external_connections'
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    project_id = Column(BigInteger, ForeignKey('projects.id', ondelete='CASCADE'), unique=True, nullable=False)
+    project_name = Column(Text, unique=True, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    s3_config = Column(JSONB, nullable=True)
+    database_config = Column(JSONB, nullable=True)
+    qdrant_config = Column(JSONB, nullable=True)
+    embedding_config = Column(JSONB, nullable=True)
+    is_active = Column(Boolean, default=True)
+
+    project = relationship('Project', back_populates='external_connection')
+
+    __table_args__ = (
+        Index('pec_project_name_idx', 'project_name', postgresql_using='hash'),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "project_name": self.project_name,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "s3_config": self.s3_config,
+            "database_config": self.database_config,
+            "qdrant_config": self.qdrant_config,
+            "embedding_config": self.embedding_config,
+            "is_active": self.is_active,
         }
 
 
