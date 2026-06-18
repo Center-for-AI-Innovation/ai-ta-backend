@@ -1,31 +1,40 @@
 #!/bin/bash
-# Two-stage daily updatefiles pipeline
-# Stage 1 (this script): Download new articles with high parallelism, skip vectorization
-# Stage 2 (batch_vectorize.py): Vectorize in background, keeps backlog clear
+# Two-stage daily updatefiles pipeline — Stage 1 (download-only).
+# main.py never embeds; Stage 2 (batch_vectorize.py) handles all Qdrant work.
 #
-# Strategy: Decouple I/O-bound download (can use 16 workers) from CPU-bound embedding (4 workers).
-# New articles download in 0.5-3 hours, vectorize in 0.5-2 hours independently.
+# I/O-bound: MAX_WORKERS=16 saturates the OA API 10 req/s window plus parallel
+# PDF downloads. No Ollama dependency in this script.
 
-# Resolve script directory so this script can be called from anywhere (e.g. cron)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 source ~/miniforge3/bin/activate
-set -a; source /home/dadams/pub-med-daily/.env.production; set +a
 
-# Stage 1: Download with aggressive worker count (I/O bound - OA API + PDF downloads)
-# MAX_WORKERS = 16: Justified by OA API 10 req/s limit + network I/O parallelism
-# --skip-vectorization: Let Stage 2 handle embedding (decoupled, can run independently)
-export MAX_WORKERS=16
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting Stage 1: download new articles (MAX_WORKERS=16, skip vectorization)"
-
-# Ensure Ollama is running (needed for Stage 1 vectorization path if skip-vectorization is removed)
-if ! curl -s --max-time 3 http://localhost:11434/ > /dev/null 2>&1; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Ollama not running, starting it..."
-    OLLAMA_HOST=0.0.0.0:11434 nohup ~/bin/ollama serve >> /tmp/ollama.log 2>&1 &
-    sleep 8
+# Env resolution: $ENV_FILE override, else .env / .env.production next to this script
+ENV_FILE="${ENV_FILE:-}"
+if [[ -z "$ENV_FILE" ]]; then
+    for candidate in "$SCRIPT_DIR/.env" "$SCRIPT_DIR/.env.production"; do
+        if [[ -e "$candidate" ]]; then ENV_FILE="$candidate"; break; fi
+    done
+fi
+if [[ -n "$ENV_FILE" && -e "$ENV_FILE" ]]; then
+    set -a; source "$ENV_FILE"; set +a
+else
+    echo "WARNING: no env file resolved (ENV_FILE unset, no .env or .env.production in $SCRIPT_DIR)" >&2
 fi
 
-python3 main.py --source updatefiles --skip-vectorization
+export MAX_WORKERS=16
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Stage 1 complete. Articles downloaded to MinIO."
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Stage 2 (vectorization) will run as background job."
+# Guard against concurrent runs: if a previous Stage 1 is still downloading,
+# exit cleanly so an overlapping cron tick can't double-process update files.
+# Distinct lockfile from Stage 2 (/tmp/pubmed_vectorize.lock) so the two stages
+# may run concurrently.
+LOCKFILE="/tmp/pubmed_stage1.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "$(date '+%Y-%m-%d %H:%M:%S') - Another Stage 1 run is already in progress. Exiting."; exit 0; }
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting Stage 1: download new articles (MAX_WORKERS=16, download-only)"
+
+python3 main.py --source updatefiles
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Stage 1 complete. Articles downloaded to MinIO; rows recorded in Postgres with vector_indexed=false."
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Stage 2 (batch_vectorize.py / vectorize_pg_driven.py) drains the backlog separately."

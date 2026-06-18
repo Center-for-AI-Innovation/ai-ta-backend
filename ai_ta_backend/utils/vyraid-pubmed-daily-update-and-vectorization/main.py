@@ -1,5 +1,7 @@
-# oa_minio_qdrant_pipeline.py
-# Unified pipeline: OA PDF -> MinIO -> Qdrant -> Postgres (Supabase)
+# oa_minio_pg_pipeline.py
+# Stage 1 (download-only): OA PDF -> MinIO -> Postgres (Supabase).
+# Vectorization is handled by Stage 2 (batch_vectorize.py / vectorize_pg_driven.py)
+# which reads pdf_location from vyraid.articles where vector_indexed=false.
 from __future__ import annotations
 
 import argparse
@@ -9,7 +11,6 @@ import os
 import re
 import time
 import tempfile
-import uuid
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,6 @@ from urllib.parse import urlparse
 from datetime import datetime
 
 import requests
-import pymupdf  # PyMuPDF
 import psycopg2
 from psycopg2 import sql, OperationalError as PgOperationalError
 import gzip
@@ -28,12 +28,8 @@ from lxml import etree
 from minio import Minio
 from http.client import RemoteDisconnected
 from requests.exceptions import ConnectionError, ChunkedEncodingError, HTTPError
-from dotenv import load_dotenv
-
-# Load .env file if present
-load_dotenv()
-
-from qdrant_client import QdrantClient, models
+from shared.env import load_project_env
+load_project_env(__file__)
 
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -253,17 +249,6 @@ class Settings:
     minio_secure: bool
     file_location_prefix: Optional[str]  # optional "folder" prefix inside the bucket
 
-    # Embeddings / Qdrant
-    embedding_base_url: str
-    qdrant_url: str
-    qdrant_port: int
-    qdrant_api_key: Optional[str]
-    qdrant_collection: str
-    vector_size: int
-    chunk_size: int
-    chunk_overlap: int
-    embed_batch_upsert: int
-
 def get_settings() -> Settings:
     return Settings(
         log_level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -280,17 +265,6 @@ def get_settings() -> Settings:
         minio_bucket=os.getenv("MINIO_BUCKET", "pubmed"),
         minio_secure=_to_bool("MINIO_SECURE", False),
         file_location_prefix=os.getenv("FILE_LOCATION", "").strip() or None,
-
-        embedding_base_url=os.environ["EMBEDDING_BASE_URL"],
-
-        qdrant_url=os.environ["QDRANT_URL"],
-        qdrant_port=_to_int("QDRANT_PORT", 6333),
-        qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
-        qdrant_collection=os.getenv("QDRANT_COLLECTION", "ncbi_pdfs"),
-        vector_size=_to_int("VECTOR_SIZE", 768),
-        chunk_size=_to_int("CHUNK_SIZE", 7000),
-        chunk_overlap=_to_int("CHUNK_OVERLAP", 200),
-        embed_batch_upsert=_to_int("EMBED_BATCH_UPSERT", 1000),
     )
 
 # -----------------------------
@@ -343,9 +317,13 @@ def normalize_pmcid(pmcid: str) -> str:
     return pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
 
 def ftp_to_https(url: str) -> str:
+    # NCBI moved /pub/pmc/oa_pdf/ to /pub/pmc/deprecated/oa_pdf/ on 2026-04-10
+    # and will remove it entirely in August 2026 — migrate to pmc-oa-opendata S3
+    # before then. See https://ncbiinsights.ncbi.nlm.nih.gov/2026/02/12/.
     p = urlparse(url)
     if p.scheme == "ftp" and p.netloc == "ftp.ncbi.nlm.nih.gov":
-        return "https://" + url[len("ftp://") :]
+        https = "https://" + url[len("ftp://") :]
+        return https.replace("/pub/pmc/oa_pdf/", "/pub/pmc/deprecated/oa_pdf/", 1)
     return url
 
 def ftp_relative_path(url: str) -> str:
@@ -516,15 +494,16 @@ class DB:
             return (row[0], bool(row[1]))
 
     @pg_retry(max_attempts=3)
-    def upsert_article_after_vectorize(self, row: ArticleRow, pdf_location: str) -> None:
-        """
-        Upsert basic fields AND set vector_indexed = true after successful vectorization.
-        """
+    def upsert_article_after_retrieval(self, row: ArticleRow, pdf_location: str) -> None:
+        # Stage 1 records the row with vector_indexed=false so Stage 2
+        # (batch_vectorize.py / vectorize_pg_driven.py) picks it up. If a
+        # PMID already exists we still set vector_indexed=false because the
+        # pdf_location may have changed and old chunks are no longer valid.
         tbl = self._tbl("articles")
         q = sql.SQL(
             """
             INSERT INTO {tbl} (pmid, pmcid, doi, title, abstract, publication_date, pdf_location, vector_indexed, last_updated)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,true,NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,false,NOW())
             ON CONFLICT (pmid) DO UPDATE SET
                 pmcid = EXCLUDED.pmcid,
                 doi = EXCLUDED.doi,
@@ -532,7 +511,7 @@ class DB:
                 abstract = EXCLUDED.abstract,
                 publication_date = EXCLUDED.publication_date,
                 pdf_location = EXCLUDED.pdf_location,
-                vector_indexed = true,
+                vector_indexed = false,
                 last_updated = NOW()
             """
         ).format(tbl=tbl)
@@ -657,195 +636,6 @@ class MinioClient:
         except Exception as e:
             self._log.warning("MinIO delete failed for %s: %s", object_name, e)
 
-# -----------------------------
-# Qdrant helper
-# -----------------------------
-
-class QdrantHelper:
-    def __init__(self, cfg: Settings):
-        self.cfg = cfg
-        # Be careful not to leak secrets in logs
-        masked_key = None
-        if cfg.qdrant_api_key:
-            masked_key = cfg.qdrant_api_key[:4] + "..." + cfg.qdrant_api_key[-4:]
-        print("cfg.qdrant_url:", cfg.qdrant_url)
-        print("cfg.qdrant_api_key:", masked_key)
-
-        # If a full URL with scheme is provided, parse it to extract host/port/https explicitly.
-        # The qdrant_client library doesn't infer port from URL scheme, so we must do it manually.
-        # This avoids forcing port 6333 when the service is reachable only over HTTPS:443 (e.g., behind Cloudflare).
-        raw_url = (cfg.qdrant_url or "").rstrip("/")
-        if raw_url.startswith("http://") or raw_url.startswith("https://"):
-            u = urlparse(raw_url)
-            host = u.hostname or "localhost"
-            use_https = (u.scheme == "https")
-            # Infer port: use URL port if specified, otherwise 443 for https, 6333 for http
-            port = u.port or (443 if use_https else 6333)
-            self.client = QdrantClient(host=host, port=port, https=use_https, api_key=cfg.qdrant_api_key, timeout=100, check_compatibility=False)
-        else:
-            # Fallback: treat qdrant_url as host and infer https from port 443
-            use_https = (cfg.qdrant_port == 443)
-            self.client = QdrantClient(host=raw_url or "localhost", port=cfg.qdrant_port, https=use_https, api_key=cfg.qdrant_api_key, timeout=100, check_compatibility=False)
-        self._log = logging.getLogger("pipeline.qdrant")
-        # Ensure index on s3_path for fast filtered deletes (idempotent)
-        try:
-            self.client.create_payload_index(
-                collection_name=self.cfg.qdrant_collection,
-                field_name="s3_path",
-                field_schema=models.KeywordIndexParams(),  # Keyword index for equality filter
-            )
-        except Exception:
-            # Index may already exist; ignore
-            pass
-    
-    def set_indexing_threshold(self, threshold: int) -> None:
-        """
-        Update the collection's indexing_threshold parameter.
-        Use 0 for bulk ingestion, 1000 for normal operation.
-        """
-        try:
-            self.client.update_collection(
-                collection_name=self.cfg.qdrant_collection,
-                optimizer_config=models.OptimizersConfigDiff(indexing_threshold=threshold)
-            )
-            self._log.info("Set indexing_threshold to %d for collection %s", threshold, self.cfg.qdrant_collection)
-        except Exception as e:
-            self._log.warning("Failed to set indexing_threshold to %d: %s", threshold, e)
-
-    def delete_by_s3_path(self, s3_path_key: str) -> None:
-        """
-        Delete ALL points whose payload has s3_path == s3_path_key in the target collection.
-        """
-        filt = models.Filter(must=[models.FieldCondition(key="s3_path", match=models.MatchValue(value=s3_path_key))])
-        self.client.delete(collection_name=self.cfg.qdrant_collection, points_selector=filt, wait=False)
-        # small pause after delete to give Qdrant a short breather for eventual consistency
-        time.sleep(5)
-
-    def upsert_chunks(self, points: List[models.PointStruct]) -> None:
-        if not points or len(points) < 1:
-            return
-        # Retry transient failures (network/read timeouts) a few times with backoff.
-        max_attempts = 4
-        delay = 1.0
-        for attempt in range(1, max_attempts + 1):
-            try:
-                self.client.upsert(collection_name=self.cfg.qdrant_collection, points=points, wait=False)
-                # small pause after upsert to reduce pressure on Qdrant for bulk operations
-                time.sleep(5)
-                return
-            except Exception as e:
-                self._log.warning("Qdrant upsert attempt %d/%d failed: %s", attempt, max_attempts, e)
-                if attempt == max_attempts:
-                    self._log.exception("Qdrant upsert failed after %d attempts", max_attempts)
-                    raise
-                time.sleep(delay)
-                delay = min(delay * 2, 10)
-    
-    def __enter__(self):
-        """Context manager entry: set indexing threshold to 0 for bulk operations."""
-        self.set_indexing_threshold(0)
-        time.sleep(2)  # Give Qdrant time to apply setting
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit: reset indexing threshold to normal operation value."""
-        try:
-            self.set_indexing_threshold(10_000)
-        except Exception as e:
-            self._log.warning("Failed to reset indexing_threshold on exit: %s", e)
-        return False  # Don't suppress exceptions
-
-# -----------------------------
-# Embedding & Chunking
-# -----------------------------
-
-# Use the same splitter as your vector_ingestion
-from langchain_text_splitters.character import RecursiveCharacterTextSplitter
-
-def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", " ", ""],
-    )
-    return splitter.split_text(text)
-
-def get_embedding(embedding_base_url: str, text: str) -> List[float]:
-    """
-    Call your Ollama embedding endpoint (nomic-embed-text:v1.5) with retries.
-    """
-    url = embedding_base_url
-    max_retries = 30
-    for attempt in range(max_retries):
-        try:
-            resp = requests.post(url, json={"model": "nomic-embed-text:v1.5", "prompt": text}, timeout=300)
-            resp.raise_for_status()
-            return resp.json()["embedding"]
-        except Exception:
-            time.sleep(min(0.25 * (attempt + 1), 5))
-    raise RuntimeError("Embedding failed after retries")
-
-def extract_text_per_page(local_pdf_path: str) -> List[Tuple[int, str]]:
-    """
-    Returns list of (page_number, text).
-    """
-    doc = pymupdf.open(local_pdf_path)
-    out: List[Tuple[int, str]] = []
-    for idx, page in enumerate(doc, start=1):
-        raw = page.get_text().encode("utf8", errors="ignore").decode("utf8", errors="ignore")
-        out.append((idx, raw))
-    return out
-
-def vectorize_pdf_to_qdrant(
-    cfg: Settings,
-    qdrant: QdrantHelper,
-    pmid: int,
-    bucket: str,
-    key: str,
-    local_pdf_path: str
-) -> int:
-    """
-    Read PDF pages, chunk, embed, and upsert to Qdrant.
-    Returns total chunk count.
-    """
-    page_chunks: list[tuple[int, str]] = []
-    doc = pymupdf.open(local_pdf_path)
-    for page_num, page in enumerate(doc, start=1):
-        raw = page.get_text().encode("utf8", errors="ignore").decode("utf8", errors="ignore")
-        for chunk in chunk_text(raw, cfg.chunk_size, cfg.chunk_overlap):
-            page_chunks.append((page_num, chunk))
-    total_chunks = len(page_chunks)
-    if total_chunks == 0:
-        return 0
-
-    # 2) Embed + upsert with explicit UUIDs and original payload keys (+ we keep pmid/s3_bucket as extra context)
-    batch: list[models.PointStruct] = []
-    for i, (page_num, chunk) in enumerate(page_chunks):
-        emb = get_embedding(cfg.embedding_base_url, chunk)
-        batch.append(
-            models.PointStruct(
-                id=str(uuid.uuid4()),  # explicit UUID like the original script
-                vector=emb,
-                payload={
-                    # original keys
-                    "page_content":      chunk,
-                    "s3_path":           key,
-                    "readable_filename": os.path.basename(key),
-                    "pagenumber":        page_num,
-                    "chunk_index":       i,
-                    "total_chunks":      total_chunks,
-                    "pmid":              pmid,
-                },
-            )
-        )
-        if len(batch) >= cfg.embed_batch_upsert:
-            qdrant.upsert_chunks(batch)
-            batch = []
-    if batch:
-        qdrant.upsert_chunks(batch)
-
-    return total_chunks
-
 
 # -----------------------------
 # Open Access API (PMC)
@@ -867,7 +657,7 @@ def oa_fetch_pdf(session: requests.Session, pmcid: str) -> Optional[Tuple[str, s
     api_key = os.getenv("NCBI_API_KEY") or os.getenv("OA_API_KEY")
     if api_key:
         params["api_key"] = api_key
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             r = session.get(OA_API, params=params, timeout=8)
         except (ConnectionError, ChunkedEncodingError, RemoteDisconnected):
@@ -875,10 +665,19 @@ def oa_fetch_pdf(session: requests.Session, pmcid: str) -> Optional[Tuple[str, s
                 raise
             time.sleep(0.5 * (2 ** attempt))
             continue
-        if r.status_code == 500:
-            return None
+        # Transient server errors: retry, then RAISE so the caller records a
+        # failure (status="error") instead of silently treating it as "no PDF".
+        # Returning None here is what let a brief OA 5xx blip mark whole update
+        # files "done" with 0 articles (the silent zero-ingest regression).
+        if r.status_code in (500, 502, 503, 504):
+            if attempt == 2:
+                raise RuntimeError(f"OA API {r.status_code} for {pmcid}")
+            time.sleep(0.5 * (2 ** attempt))
+            continue
         if r.status_code == 429:
-            time.sleep(0.5)
+            if attempt == 2:
+                raise RuntimeError(f"OA API 429 (rate limited) for {pmcid}")
+            time.sleep(0.5 * (2 ** attempt))
             continue
         r.raise_for_status()
         break
@@ -890,9 +689,10 @@ def oa_fetch_pdf(session: requests.Session, pmcid: str) -> Optional[Tuple[str, s
     for err in root.findall(".//error"):
         code = err.attrib.get("code", "")
         if code in {"idIsNotOpenAccess", "idDoesNotExist"}:
-            return None
-        # Other error? treat as None to skip, caller logs explicit failures elsewhere where relevant
-        return None
+            return None  # genuinely not open-access — legitimate skip
+        # Unknown/unexpected error code: RAISE so it's recorded as a transient
+        # failure (status="error") rather than silently dropped as "no PDF".
+        raise RuntimeError(f"OA API error code={code!r} for {pmcid}")
 
     link = None
     for rec in root.findall(".//record"):
@@ -1024,7 +824,7 @@ class ProcessStateLogger:
 # Orchestrator
 # -----------------------------
 
-def run_pipeline(limit: Optional[int] = None, source: str = "updatefiles", baseline_start: Optional[str] = None, baseline_end: Optional[str] = None, skip_vectorization: bool = False) -> None:
+def run_pipeline(limit: Optional[int] = None, source: str = "updatefiles", baseline_start: Optional[str] = None, baseline_end: Optional[str] = None) -> None:
     cfg = get_settings()
     logging.basicConfig(level=cfg.log_level, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     if not _to_bool("HTTP_DEBUG", False):
@@ -1047,16 +847,12 @@ def run_pipeline(limit: Optional[int] = None, source: str = "updatefiles", basel
         "oa": 0.0,
         "download": 0.0,
         "upload": 0.0,
-        "qdrant_delete": 0.0,
-        "vectorize": 0.0,
     }
     metrics_total = {
         "count": 0,
         "oa": 0.0,
         "download": 0.0,
         "upload": 0.0,
-        "qdrant_delete": 0.0,
-        "vectorize": 0.0,
     }
 
     # Initialize process state logger
@@ -1088,520 +884,495 @@ def run_pipeline(limit: Optional[int] = None, source: str = "updatefiles", basel
     db = DB(cfg.db_dsn, cfg.db_schema)
     minio_client = MinioClient(cfg)
 
-    # Use Qdrant as context manager to guarantee threshold reset
-    with QdrantHelper(cfg) as qdrant:
+    # Stage 1 is download-only — no Qdrant interaction in this process.
+    try:
         try:
+            # List files based on source
+            if source == "updatefiles":
+                files = list_update_files(http_session)  # ascending
+                file_source_url = UPDATE_URL
+                log.info("Loading updatefiles (daily pipeline)")
+            elif source == "baseline":
+                files = list_baseline_files(http_session, start=baseline_start, end=baseline_end)
+                file_source_url = BASELINE_URL
+                log.info("Loading baseline files (historical catalog, files %s to %s)", baseline_start or "0001", baseline_end or "END")
+            else:  # both
+                baseline_files = list_baseline_files(http_session, start=baseline_start, end=baseline_end)
+                update_files = list_update_files(http_session)
+                files = sorted(set(baseline_files + update_files))
+                log.info("Loading both baseline and updatefiles (%d total files)", len(files))
+            
+            # Main processing logic goes here (all indented inside try block)
+        except Exception as e:
+            if source == "updatefiles":
+                error_msg = f"Failed to list update files: {e}"
+            else:
+                error_msg = f"Failed to list files (source={source}): {e}"
+            log.error(error_msg)
+            state_logger.mark_failed(error_msg)
+            return
+
+        processed_global = 0
+        total_files = len(files)
+
+        # Process each XML file (ascending). We always resume within an XML using the last_processed_pmcid.
+        for idx, xml_fname in enumerate(files, start=1):
+            if limit is not None and processed_global >= limit:
+                break
+
+            log.info("Starting XML %s (%d/%d, processed so far=%d)", xml_fname, idx, total_files, processed_global)
+
+            db.ensure_xml_log_row(xml_fname)
+            last_done_pmcid, file_completed = db.get_xml_log_progress(xml_fname)
+            if file_completed:
+                log.info("Skipping XML %s (already fully processed)", xml_fname)
+                continue
+
+            # download this XML.gz to a tempdir and keep it alive while processing
+            tmpdir_obj = tempfile.TemporaryDirectory()
             try:
-                # List files based on source
-                if source == "updatefiles":
-                    files = list_update_files(http_session)  # ascending
-                    file_source_url = UPDATE_URL
-                    log.info("Loading updatefiles (daily pipeline)")
-                elif source == "baseline":
-                    files = list_baseline_files(http_session, start=baseline_start, end=baseline_end)
-                    file_source_url = BASELINE_URL
-                    log.info("Loading baseline files (historical catalog, files %s to %s)", baseline_start or "0001", baseline_end or "END")
-                else:  # both
-                    baseline_files = list_baseline_files(http_session, start=baseline_start, end=baseline_end)
-                    update_files = list_update_files(http_session)
-                    files = sorted(set(baseline_files + update_files))
-                    log.info("Loading both baseline and updatefiles (%d total files)", len(files))
-                
-                # Main processing logic goes here (all indented inside try block)
-            except Exception as e:
-                if source == "updatefiles":
-                    error_msg = f"Failed to list update files: {e}"
-                else:
-                    error_msg = f"Failed to list files (source={source}): {e}"
-                log.error(error_msg)
-                state_logger.mark_failed(error_msg)
-                return
-
-            processed_global = 0
-            total_files = len(files)
-
-            # Process each XML file (ascending). We always resume within an XML using the last_processed_pmcid.
-            for idx, xml_fname in enumerate(files, start=1):
-                if limit is not None and processed_global >= limit:
-                    break
-
-                log.info("Starting XML %s (%d/%d, processed so far=%d)", xml_fname, idx, total_files, processed_global)
-
-                db.ensure_xml_log_row(xml_fname)
-                last_done_pmcid, file_completed = db.get_xml_log_progress(xml_fname)
-                if file_completed:
-                    log.info("Skipping XML %s (already fully processed)", xml_fname)
+                tmpdir = tmpdir_obj.name
+                gz_path = Path(tmpdir) / xml_fname
+                try:
+                    # Determine correct URL source based on source mode and filename
+                    # In "both" mode: baseline files are 0001-1274, updatefiles are 1275+
+                    current_file_url = file_source_url
+                    if source == "both":
+                        try:
+                            match = re.search(r"n(\d+)\.xml", xml_fname)
+                            if match:
+                                file_num = int(match.group(1))
+                                if file_num <= 1274:
+                                    current_file_url = BASELINE_URL
+                                else:
+                                    current_file_url = UPDATE_URL
+                        except Exception:
+                            pass  # Fall back to default file_source_url
+                    
+                    # Download XML file itself
+                    for attempt in range(5):
+                        try:
+                            with http_session.get(current_file_url + xml_fname, stream=True, timeout=60) as r:
+                                r.raise_for_status()
+                                with open(gz_path, "wb") as f:
+                                    for chunk in r.iter_content(1024 * 512):
+                                        if chunk:
+                                            f.write(chunk)
+                            break
+                        except (ConnectionError, ChunkedEncodingError, RemoteDisconnected):
+                            if attempt == 4:
+                                raise
+                            time.sleep(0.5 * (2 ** attempt))
+                            continue
+                except Exception as e:
+                    # This is a meta failure (XML download), log at file-level and continue to next file.
+                    db.record_xml_failure(xml_fname, "XML_FILE", f"xml download failed: {e}")
+                    log.warning("Failed to download XML %s: %s", xml_fname, e)
+                    tmpdir_obj.cleanup()
                     continue
 
-                # download this XML.gz to a tempdir and keep it alive while processing
-                tmpdir_obj = tempfile.TemporaryDirectory()
+                # Verify the downloaded file exists and log its size for debugging
+                if not gz_path.exists():
+                    db.record_xml_failure(xml_fname, "XML_FILE", "xml download missing on disk")
+                    log.error("Downloaded XML missing on disk: %s", gz_path)
+                    tmpdir_obj.cleanup()
+                    continue
                 try:
-                    tmpdir = tmpdir_obj.name
-                    gz_path = Path(tmpdir) / xml_fname
+                    gz_size = gz_path.stat().st_size
+                    log.info("Downloaded XML %s (%0.2f MB)", xml_fname, gz_size / 1024 / 1024)
+                except Exception:
+                    pass
+
+                # Prepare per-file progress aggregation
+                successes_since_log = 0
+                batch_t0 = time.perf_counter()
+                last_success_pmcid = last_done_pmcid
+
+                # Define processing function for a single article row
+                def process_row(row: ArticleRow):
+                    nonlocal last_success_pmcid
+
+                    if not row.pmcid:
+                        return ("skip", row.pmid, row.pmcid, "no_pmcid")
+
+                    # Respect resume: if we had a last_processed_pmcid, skip until greater (string compare on normalized)
+                    if last_done_pmcid:
+                        if normalize_pmcid(row.pmcid) <= normalize_pmcid(last_done_pmcid):
+                            return ("skip", row.pmid, row.pmcid, "resume_skip")
+
+                    # Wrap entire processing logic in try-except to ensure no exceptions escape and crash the pipeline
                     try:
-                        # Determine correct URL source based on source mode and filename
-                        # In "both" mode: baseline files are 0001-1274, updatefiles are 1275+
-                        current_file_url = file_source_url
-                        if source == "both":
-                            try:
-                                match = re.search(r"n(\d+)\.xml", xml_fname)
-                                if match:
-                                    file_num = int(match.group(1))
-                                    if file_num <= 1274:
-                                        current_file_url = BASELINE_URL
-                                    else:
-                                        current_file_url = UPDATE_URL
-                            except Exception:
-                                pass  # Fall back to default file_source_url
-                        
-                        # Download XML file itself
+                        return _process_row_inner(row)
+                    except Exception as e:
+                        # Final safety net: catch ANY exception that escaped from inner processing
+                        pmcid_normalized = normalize_pmcid(row.pmcid) if row.pmcid else "UNKNOWN"
+                        logging.getLogger("pipeline").exception(
+                            "Unexpected exception processing PMCID %s (pmid=%s): %s",
+                            pmcid_normalized, row.pmid, e
+                        )
+                        try:
+                            db.record_xml_failure(xml_fname, pmcid_normalized, f"unexpected_error: {type(e).__name__}: {str(e)}")
+                        except Exception:
+                            pass  # Even logging the failure failed; just continue
+                        return ("error", row.pmid, row.pmcid, "unexpected_exception")
+
+                def _process_row_inner(row: ArticleRow):
+                    nonlocal last_success_pmcid
+
+                    try:
+                        t_oa0 = time.perf_counter()
+                        oa_result = oa_fetch_pdf(http_session, row.pmcid)
+                        t_oa1 = time.perf_counter()
+                    except Exception as e:
+                        # OA API call-level failure should be logged
+                        db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"oa_api_error: {e}")
+                        logging.getLogger("pipeline.oa").warning("OA API error for %s: %s", row.pmcid, e)
+                        return ("error", row.pmid, row.pmcid, "oa_api_error")
+
+                    if not oa_result:
+                        # No OA PDF for this PMCID, skip quietly
+                        return ("skip", row.pmid, row.pmcid, "no_pdf")
+
+                    download_url, rel_key_under_oa_pdf = oa_result
+                    # Start with the deterministic OA relative path (optionally prefixed)
+                    base_object_key = rel_key_under_oa_pdf
+                    if cfg.file_location_prefix:
+                        base_object_key = f"{cfg.file_location_prefix.strip('/')}/{base_object_key}"
+                    object_key = base_object_key  # may be versioned later if existing pdf
+
+                    # Determine existing article status
+                    try:
+                        current_pdf_location, already_indexed = db.get_article_status(row.pmid)
+                    except Exception as e:
+                        db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"db_read_error: {e}")
+                        return ("error", row.pmid, row.pmcid, "db_read_error")
+
+                    # Determine old bucket/key from stored pdf_location (if any)
+                    old_bucket, old_key = (None, None)
+                    if current_pdf_location:
+                        try:
+                            old_bucket, old_key = parse_pdf_location_for_key(current_pdf_location, minio_client.bucket)
+                        except Exception:
+                            pass
+
+                    # Use the OA-relative path (optionally prefixed) as the object key.
+                    # Do not generate timestamps or extra suffixes — keep the key "as is".
+                    object_key = base_object_key
+
+                    key_changed = (old_key != object_key)
+
+                    # Skip if PDF already at the same key — Stage 1 is download-only.
+                    if current_pdf_location and not key_changed:
+                        return ("skip", row.pmid, row.pmcid, "pdf_already_exists")
+
+                    # Download PDF to local temp, then upload to MinIO
+                    with tempfile.TemporaryDirectory() as file_tmp:
+                        local_pdf = Path(file_tmp) / Path(object_key).name
+                        # Download PDF with retries
+                        t_dl0 = time.perf_counter()
                         for attempt in range(5):
                             try:
-                                with http_session.get(current_file_url + xml_fname, stream=True, timeout=60) as r:
+                                with http_session.get(download_url, stream=True, timeout=25) as r:
+                                    if r.status_code == 404:
+                                        reason = "pdf_not_found_http_404"
+                                        db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), reason)
+                                        return ("skip", row.pmid, row.pmcid, reason)
                                     r.raise_for_status()
-                                    with open(gz_path, "wb") as f:
+                                    with open(local_pdf, "wb") as f:
                                         for chunk in r.iter_content(1024 * 512):
                                             if chunk:
                                                 f.write(chunk)
                                 break
                             except (ConnectionError, ChunkedEncodingError, RemoteDisconnected):
                                 if attempt == 4:
-                                    raise
+                                    db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), "pdf_download_fail")
+                                    return ("error", row.pmid, row.pmcid, "pdf_download_fail")
                                 time.sleep(0.5 * (2 ** attempt))
                                 continue
-                    except Exception as e:
-                        # This is a meta failure (XML download), log at file-level and continue to next file.
-                        db.record_xml_failure(xml_fname, "XML_FILE", f"xml download failed: {e}")
-                        log.warning("Failed to download XML %s: %s", xml_fname, e)
-                        tmpdir_obj.cleanup()
-                        continue
-
-                    # Verify the downloaded file exists and log its size for debugging
-                    if not gz_path.exists():
-                        db.record_xml_failure(xml_fname, "XML_FILE", "xml download missing on disk")
-                        log.error("Downloaded XML missing on disk: %s", gz_path)
-                        tmpdir_obj.cleanup()
-                        continue
-                    try:
-                        gz_size = gz_path.stat().st_size
-                        log.info("Downloaded XML %s (%0.2f MB)", xml_fname, gz_size / 1024 / 1024)
-                    except Exception:
-                        pass
-
-                    # Prepare per-file progress aggregation
-                    successes_since_log = 0
-                    batch_t0 = time.perf_counter()
-                    last_success_pmcid = last_done_pmcid
-
-                    # Define processing function for a single article row
-                    def process_row(row: ArticleRow):
-                        nonlocal last_success_pmcid, skip_vectorization
-
-                        if not row.pmcid:
-                            return ("skip", row.pmid, row.pmcid, "no_pmcid")
-
-                        # Respect resume: if we had a last_processed_pmcid, skip until greater (string compare on normalized)
-                        if last_done_pmcid:
-                            if normalize_pmcid(row.pmcid) <= normalize_pmcid(last_done_pmcid):
-                                return ("skip", row.pmid, row.pmcid, "resume_skip")
-
-                        # Wrap entire processing logic in try-except to ensure no exceptions escape and crash the pipeline
-                        try:
-                            return _process_row_inner(row)
-                        except Exception as e:
-                            # Final safety net: catch ANY exception that escaped from inner processing
-                            pmcid_normalized = normalize_pmcid(row.pmcid) if row.pmcid else "UNKNOWN"
-                            logging.getLogger("pipeline").exception(
-                                "Unexpected exception processing PMCID %s (pmid=%s): %s",
-                                pmcid_normalized, row.pmid, e
-                            )
-                            try:
-                                db.record_xml_failure(xml_fname, pmcid_normalized, f"unexpected_error: {type(e).__name__}: {str(e)}")
-                            except Exception:
-                                pass  # Even logging the failure failed; just continue
-                            return ("error", row.pmid, row.pmcid, "unexpected_exception")
-
-                    def _process_row_inner(row: ArticleRow):
-                        nonlocal last_success_pmcid
-
-                        try:
-                            t_oa0 = time.perf_counter()
-                            oa_result = oa_fetch_pdf(http_session, row.pmcid)
-                            t_oa1 = time.perf_counter()
-                        except Exception as e:
-                            # OA API call-level failure should be logged
-                            db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"oa_api_error: {e}")
-                            logging.getLogger("pipeline.oa").warning("OA API error for %s: %s", row.pmcid, e)
-                            return ("error", row.pmid, row.pmcid, "oa_api_error")
-
-                        if not oa_result:
-                            # No OA PDF for this PMCID, skip quietly
-                            return ("skip", row.pmid, row.pmcid, "no_pdf")
-
-                        download_url, rel_key_under_oa_pdf = oa_result
-                        # Start with the deterministic OA relative path (optionally prefixed)
-                        base_object_key = rel_key_under_oa_pdf
-                        if cfg.file_location_prefix:
-                            base_object_key = f"{cfg.file_location_prefix.strip('/')}/{base_object_key}"
-                        object_key = base_object_key  # may be versioned later if existing pdf
-
-                        # Determine existing article status
-                        try:
-                            current_pdf_location, already_indexed = db.get_article_status(row.pmid)
-                        except Exception as e:
-                            db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"db_read_error: {e}")
-                            return ("error", row.pmid, row.pmcid, "db_read_error")
-
-                        # Determine old bucket/key from stored pdf_location (if any)
-                        old_bucket, old_key = (None, None)
-                        if current_pdf_location:
-                            try:
-                                old_bucket, old_key = parse_pdf_location_for_key(current_pdf_location, minio_client.bucket)
-                            except Exception:
-                                pass
-
-                        # Use the OA-relative path (optionally prefixed) as the object key.
-                        # Do not generate timestamps or extra suffixes — keep the key "as is".
-                        object_key = base_object_key
-
-                        key_changed = (old_key != object_key)
-
-                        # Skip if PDF already exists with same key (no need to re-download)
-                        if current_pdf_location and not key_changed and not skip_vectorization:
-                            # PDF already stored, just skip unless we need to re-vectorize
-                            return ("skip", row.pmid, row.pmcid, "pdf_already_exists")
-                        
-                        # For skip_vectorization mode, also skip if PDF exists (focus on missing PDFs only)
-                        if skip_vectorization and current_pdf_location and not key_changed:
-                            return ("skip", row.pmid, row.pmcid, "pdf_already_exists")
-
-                        # Download PDF to local temp, then upload to MinIO
-                        with tempfile.TemporaryDirectory() as file_tmp:
-                            local_pdf = Path(file_tmp) / Path(object_key).name
-                            # Download PDF with retries
-                            t_dl0 = time.perf_counter()
-                            for attempt in range(5):
-                                try:
-                                    with http_session.get(download_url, stream=True, timeout=25) as r:
-                                        if r.status_code == 404:
-                                            reason = "pdf_not_found_http_404"
-                                            db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), reason)
-                                            return ("skip", row.pmid, row.pmcid, reason)
-                                        r.raise_for_status()
-                                        with open(local_pdf, "wb") as f:
-                                            for chunk in r.iter_content(1024 * 512):
-                                                if chunk:
-                                                    f.write(chunk)
-                                    break
-                                except (ConnectionError, ChunkedEncodingError, RemoteDisconnected):
-                                    if attempt == 4:
-                                        db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), "pdf_download_fail")
-                                        return ("error", row.pmid, row.pmcid, "pdf_download_fail")
-                                    time.sleep(0.5 * (2 ** attempt))
-                                    continue
-                                except HTTPError as e:
-                                    status = getattr(e.response, "status_code", None)
-                                    if status == 404:
-                                        reason = "pdf_not_found_http_404"
-                                        db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), reason)
-                                        return ("skip", row.pmid, row.pmcid, reason)
-                                    if attempt == 4:
-                                        db.record_xml_failure(
-                                            xml_fname,
-                                            normalize_pmcid(row.pmcid),
-                                            f"pdf_http_error:{status or 'unknown'}",
-                                        )
-                                        return ("error", row.pmid, row.pmcid, "pdf_http_error")
-                                    time.sleep(0.5 * (2 ** attempt))
-                                    continue
-                            t_dl1 = time.perf_counter()
-
-                            # Upload (new) file into MinIO
-                            try:
-                                t_ul0 = time.perf_counter()
-                                minio_client.upload_file(object_key, str(local_pdf))
-                                t_ul1 = time.perf_counter()
-                            except Exception as e:
-                                db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"minio_upload_fail: {e}")
-                                return ("error", row.pmid, row.pmcid, "minio_upload_fail")
-
-                            # If vector_indexed is True (step #2) OR the key changed (step #3), delete old chunks first
-                            try:
-                                t_del0 = time.perf_counter()
-                                if already_indexed and old_key:
-                                    qdrant.delete_by_s3_path(old_key)
-                                t_del1 = time.perf_counter()
-                            except Exception as e:
-                                # don't abort the whole item; record and continue (we’ll overwrite with new vectors)
-                                db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"qdrant_delete_fail: {e}")
-                                t_del1 = time.perf_counter()
-
-                            # Vectorize into Qdrant
-                            t_vec0 = time.perf_counter()
-                            if skip_vectorization:
-                                # Skip vectorization, just mark as stored
-                                logging.getLogger("pipeline.vectorize").info(
-                                    "Skipping vectorization for %s (skip_vectorization=True)", normalize_pmcid(row.pmcid)
-                                )
-                                t_vec1 = time.perf_counter()
-                            else:
-                                try:
-                                    total_chunks = vectorize_pdf_to_qdrant(cfg, qdrant, row.pmid, minio_client.bucket, object_key, str(local_pdf))
-                                    if total_chunks <= 0:
-                                        raise RuntimeError("no_chunks_produced")
-                                    t_vec1 = time.perf_counter()
-                                except pymupdf.EmptyFileError:
-                                    db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), "empty_pdf")
-                                    return ("error", row.pmid, row.pmcid, "empty_pdf")
-                                except Exception as e:
-                                    # Log full traceback to help identify whether the timeout came from
-                                    # embedding generation, Qdrant upsert, or another step inside vectorization.
-                                    logging.getLogger("pipeline.vectorize").exception(
-                                        "Vectorize failed for %s (pmid=%s)", normalize_pmcid(row.pmcid), row.pmid
+                            except HTTPError as e:
+                                status = getattr(e.response, "status_code", None)
+                                if status == 404:
+                                    reason = "pdf_not_found_http_404"
+                                    db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), reason)
+                                    return ("skip", row.pmid, row.pmcid, reason)
+                                if attempt == 4:
+                                    db.record_xml_failure(
+                                        xml_fname,
+                                        normalize_pmcid(row.pmcid),
+                                        f"pdf_http_error:{status or 'unknown'}",
                                     )
-                                    db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"vectorize_fail: {e}")
-                                    t_vec1 = time.perf_counter()
-                                    return ("error", row.pmid, row.pmcid, "vectorize_fail")
+                                    return ("error", row.pmid, row.pmcid, "pdf_http_error")
+                                time.sleep(0.5 * (2 ** attempt))
+                                continue
+                        t_dl1 = time.perf_counter()
 
-                        # Delete old MinIO object if the key changed (step #3)
-                        if key_changed and old_key:
-                            minio_client.remove_object_safe(old_key)
-
-                        # Upsert DB row with pdf_location & set vector_indexed=true
+                        # Upload (new) file into MinIO
                         try:
-                            db.upsert_article_after_vectorize(row, object_key)
+                            t_ul0 = time.perf_counter()
+                            minio_client.upload_file(object_key, str(local_pdf))
+                            t_ul1 = time.perf_counter()
                         except Exception as e:
-                            db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"db_upsert_fail: {e}")
-                            return ("error", row.pmid, row.pmcid, "db_upsert_fail")
+                            db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"minio_upload_fail: {e}")
+                            return ("error", row.pmid, row.pmcid, "minio_upload_fail")
 
-                        last_success_pmcid = normalize_pmcid(row.pmcid)
+                    # Delete old MinIO object if the key changed. Old Qdrant chunks
+                    # for old_key (if any) become orphaned; Stage 2 will re-vectorize
+                    # the new pdf_location and old payloads stay queryable only by
+                    # their stale s3_path. Periodic cleanup is handled separately.
+                    if key_changed and old_key:
+                        minio_client.remove_object_safe(old_key)
 
-                        # Aggregate metrics
-                        if metrics_enabled:
-                            try:
-                                with metrics_lock:
-                                    metrics["count"] += 1
-                                    metrics["oa"] += (t_oa1 - t_oa0)
-                                    metrics["download"] += (t_dl1 - t_dl0)
-                                    metrics["upload"] += max(0.0, (t_ul1 - t_ul0))
-                                    metrics["qdrant_delete"] += max(0.0, (t_del1 - t_del0))
-                                    metrics["vectorize"] += (t_vec1 - t_vec0)
-                                    metrics_total["count"] += 1
-                                    metrics_total["oa"] += (t_oa1 - t_oa0)
-                                    metrics_total["download"] += (t_dl1 - t_dl0)
-                                    metrics_total["upload"] += max(0.0, (t_ul1 - t_ul0))
-                                    metrics_total["qdrant_delete"] += max(0.0, (t_del1 - t_del0))
-                                    metrics_total["vectorize"] += (t_vec1 - t_vec0)
-                            except Exception:
-                                pass
-                        return ("ok", row.pmid, row.pmcid, object_key)
-
-                    # Consume the XML file with a thread pool (efficient parallelism)
-                    rows_iter = iter_pubmed_articles(gz_path)
-                    futures = []
-                    processed_in_file_ok = 0
-                    aborted_early = False
-                    skip_counts = {
-                        "no_pmcid": 0,
-                        "no_pdf": 0,
-                        "pdf_already_exists": 0,
-                        "resume_skip": 0,
-                        "other": 0,
-                    }
-
-                    with ThreadPoolExecutor(max_workers=max(1, cfg.max_workers)) as ex:
-                        try:
-                            for row in rows_iter:
-                                # Optional overall limit
-                                if limit is not None and (processed_global + len(futures)) >= limit:
-                                    aborted_early = True
-                                    break
-                                futures.append(ex.submit(process_row, row))
-
-                            for fut in as_completed(futures):
-                                try:
-                                    status, pmid, pmcid, info = fut.result()
-                                except Exception as e:
-                                    # Catch any unexpected exceptions that escaped from process_row
-                                    # This ensures individual PDF failures don't crash the entire pipeline
-                                    logging.getLogger("pipeline").exception("Unexpected exception in process_row: %s", e)
-                                    # Try to extract some context if possible
-                                    try:
-                                        # The future might have some context, but we can't reliably get pmcid here
-                                        # Just log and continue
-                                        pass
-                                    except Exception:
-                                        pass
-                                    continue
-                            
-                                if status == "ok":
-                                    processed_global += 1
-                                    processed_in_file_ok += 1
-                                    successes_since_log += 1
-
-                                    if successes_since_log >= cfg.xml_log_every_n:
-                                        delta = time.perf_counter() - batch_t0
-                                        try:
-                                            db.update_xml_log_progress(xml_fname, last_success_pmcid, delta, successes_since_log)
-                                        except Exception as e:
-                                            logging.getLogger("pipeline.db").warning("xml_log update failed: %s", e)
-                                        log.info(
-                                            "Progress %s: +%d ok (file ok=%d, total ok=%d, last pmcid=%s, %.1fs)",
-                                            xml_fname,
-                                            successes_since_log,
-                                            processed_in_file_ok,
-                                            processed_global,
-                                            last_success_pmcid,
-                                            delta,
-                                        )
-                                        # If metrics are enabled, log rolling averages and reset
-                                        if metrics_enabled:
-                                            try:
-                                                with metrics_lock:
-                                                    c = max(1, metrics["count"])
-                                                    log.info(
-                                                        "Averages (last %d): oa=%.2fs, download=%.2fs, upload=%.2fs, qdrant_delete=%.2fs, vectorize=%.2fs",
-                                                        metrics["count"],
-                                                        metrics["oa"] / c,
-                                                        metrics["download"] / c,
-                                                        metrics["upload"] / c,
-                                                        metrics["qdrant_delete"] / c,
-                                                        metrics["vectorize"] / c,
-                                                    )
-                                                    # reset
-                                                    metrics.update({
-                                                        "count": 0,
-                                                        "oa": 0.0,
-                                                        "download": 0.0,
-                                                        "upload": 0.0,
-                                                        "qdrant_delete": 0.0,
-                                                        "vectorize": 0.0,
-                                                    })
-                                            except Exception:
-                                                pass
-                                        successes_since_log = 0
-                                        batch_t0 = time.perf_counter()
-
-                                elif status == "skip":
-                                    reason = info or "unknown"
-                                    if reason in {"no_pdf", "pdf_not_found_http_404"}:
-                                        skip_counts["no_pdf"] += 1
-                                    elif reason == "no_pmcid":
-                                        skip_counts["no_pmcid"] += 1
-                                    elif reason == "pdf_already_exists":
-                                        skip_counts["pdf_already_exists"] += 1
-                                    elif reason == "resume_skip":
-                                        skip_counts["resume_skip"] += 1
-                                    else:
-                                        skip_counts["other"] += 1
-
-                                elif status == "error":
-                                    # already logged in xml_failed_downloads
-                                    pass
-                        finally:
-                            # Ensure all futures complete before executor closes
-                            # This prevents premature shutdown and resource cleanup
-                            for fut in futures:
-                                if not fut.done():
-                                    try:
-                                        fut.result(timeout=30)  # Give stragglers 30s to finish
-                                    except Exception:
-                                        pass  # Already handled in main loop
-
-                    # Flush remaining partial progress for this XML
-                    if successes_since_log > 0 and last_success_pmcid:
-                        delta = time.perf_counter() - batch_t0
-                        try:
-                            db.update_xml_log_progress(xml_fname, last_success_pmcid, delta, successes_since_log)
-                        except Exception as e:
-                            logging.getLogger("pipeline.db").warning("xml_log update failed (final): %s", e)
-
-                    # If we did not abort early due to global limit, mark XML as fully processed.
-                    if not aborted_early:
-                        try:
-                            db.mark_xml_completed(xml_fname, last_success_pmcid)
-                        except Exception as e:
-                            logging.getLogger("pipeline.db").warning("failed to mark xml completed: %s", e)
-
-                    log.info(
-                        "Finished XML %s: %d ok, skips: no_pmcid=%d, no_pdf=%d, pdf_exists=%d, resume_skip=%d, other=%d%s",
-                        xml_fname,
-                        processed_in_file_ok,
-                        skip_counts["no_pmcid"],
-                        skip_counts["no_pdf"],
-                        skip_counts["pdf_already_exists"],
-                        skip_counts["resume_skip"],
-                        skip_counts["other"],
-                        " (aborted early)" if aborted_early else "",
-                    )
-                
-                    # Break if limit reached
-                    if limit is not None and processed_global >= limit:
-                        log.info("Reached global limit of %d items. Stopping.", limit)
-                        break
-                finally:
-                    # Always clean up the temp directory for this XML
+                    # Record/refresh the article row with pdf_location and
+                    # vector_indexed=false so Stage 2 will pick it up.
                     try:
-                        tmpdir_obj.cleanup()
+                        db.upsert_article_after_retrieval(row, object_key)
+                    except Exception as e:
+                        db.record_xml_failure(xml_fname, normalize_pmcid(row.pmcid), f"db_upsert_fail: {e}")
+                        return ("error", row.pmid, row.pmcid, "db_upsert_fail")
+
+                    last_success_pmcid = normalize_pmcid(row.pmcid)
+
+                    # Aggregate metrics
+                    if metrics_enabled:
+                        try:
+                            with metrics_lock:
+                                metrics["count"] += 1
+                                metrics["oa"] += (t_oa1 - t_oa0)
+                                metrics["download"] += (t_dl1 - t_dl0)
+                                metrics["upload"] += max(0.0, (t_ul1 - t_ul0))
+                                metrics_total["count"] += 1
+                                metrics_total["oa"] += (t_oa1 - t_oa0)
+                                metrics_total["download"] += (t_dl1 - t_dl0)
+                                metrics_total["upload"] += max(0.0, (t_ul1 - t_ul0))
+                        except Exception:
+                            pass
+                    return ("ok", row.pmid, row.pmcid, object_key)
+
+                # Consume the XML file with a thread pool (efficient parallelism)
+                rows_iter = iter_pubmed_articles(gz_path)
+                futures = []
+                processed_in_file_ok = 0
+                errors_in_file = 0  # transient failures (OA/PDF/MinIO/DB) — zero-ingest guard signal
+                aborted_early = False
+                skip_counts = {
+                    "no_pmcid": 0,
+                    "no_pdf": 0,
+                    "pdf_404": 0,  # PDF download 404 — transient-mirror signal, NOT lumped with no_pdf
+                    "pdf_already_exists": 0,
+                    "resume_skip": 0,
+                    "other": 0,
+                }
+
+                with ThreadPoolExecutor(max_workers=max(1, cfg.max_workers)) as ex:
+                    try:
+                        for row in rows_iter:
+                            # Optional overall limit
+                            if limit is not None and (processed_global + len(futures)) >= limit:
+                                aborted_early = True
+                                break
+                            futures.append(ex.submit(process_row, row))
+
+                        for fut in as_completed(futures):
+                            try:
+                                status, pmid, pmcid, info = fut.result()
+                            except Exception as e:
+                                # Catch any unexpected exceptions that escaped from process_row
+                                # This ensures individual PDF failures don't crash the entire pipeline
+                                logging.getLogger("pipeline").exception("Unexpected exception in process_row: %s", e)
+                                # Try to extract some context if possible
+                                try:
+                                    # The future might have some context, but we can't reliably get pmcid here
+                                    # Just log and continue
+                                    pass
+                                except Exception:
+                                    pass
+                                continue
+                        
+                            if status == "ok":
+                                processed_global += 1
+                                processed_in_file_ok += 1
+                                successes_since_log += 1
+
+                                if successes_since_log >= cfg.xml_log_every_n:
+                                    delta = time.perf_counter() - batch_t0
+                                    try:
+                                        db.update_xml_log_progress(xml_fname, last_success_pmcid, delta, successes_since_log)
+                                    except Exception as e:
+                                        logging.getLogger("pipeline.db").warning("xml_log update failed: %s", e)
+                                    log.info(
+                                        "Progress %s: +%d ok (file ok=%d, total ok=%d, last pmcid=%s, %.1fs)",
+                                        xml_fname,
+                                        successes_since_log,
+                                        processed_in_file_ok,
+                                        processed_global,
+                                        last_success_pmcid,
+                                        delta,
+                                    )
+                                    # If metrics are enabled, log rolling averages and reset
+                                    if metrics_enabled:
+                                        try:
+                                            with metrics_lock:
+                                                c = max(1, metrics["count"])
+                                                log.info(
+                                                    "Averages (last %d): oa=%.2fs, download=%.2fs, upload=%.2fs",
+                                                    metrics["count"],
+                                                    metrics["oa"] / c,
+                                                    metrics["download"] / c,
+                                                    metrics["upload"] / c,
+                                                )
+                                                # reset
+                                                metrics.update({
+                                                    "count": 0,
+                                                    "oa": 0.0,
+                                                    "download": 0.0,
+                                                    "upload": 0.0,
+                                                })
+                                        except Exception:
+                                            pass
+                                    successes_since_log = 0
+                                    batch_t0 = time.perf_counter()
+
+                            elif status == "skip":
+                                reason = info or "unknown"
+                                if reason == "pdf_not_found_http_404":
+                                    skip_counts["pdf_404"] += 1
+                                elif reason == "no_pdf":
+                                    skip_counts["no_pdf"] += 1
+                                elif reason == "no_pmcid":
+                                    skip_counts["no_pmcid"] += 1
+                                elif reason == "pdf_already_exists":
+                                    skip_counts["pdf_already_exists"] += 1
+                                elif reason == "resume_skip":
+                                    skip_counts["resume_skip"] += 1
+                                else:
+                                    skip_counts["other"] += 1
+
+                            elif status == "error":
+                                # already logged in xml_failed_downloads; count as a
+                                # transient-failure signal for the zero-ingest guard
+                                errors_in_file += 1
+                    finally:
+                        # Ensure all futures complete before executor closes
+                        # This prevents premature shutdown and resource cleanup
+                        for fut in futures:
+                            if not fut.done():
+                                try:
+                                    fut.result(timeout=30)  # Give stragglers 30s to finish
+                                except Exception:
+                                    pass  # Already handled in main loop
+
+                # Flush remaining partial progress for this XML
+                if successes_since_log > 0 and last_success_pmcid:
+                    delta = time.perf_counter() - batch_t0
+                    try:
+                        db.update_xml_log_progress(xml_fname, last_success_pmcid, delta, successes_since_log)
+                    except Exception as e:
+                        logging.getLogger("pipeline.db").warning("xml_log update failed (final): %s", e)
+
+                # Zero-ingest guard: if this file ingested 0 articles but we saw
+                # transient-failure signals (errors, or a wave of PDF 404s from the
+                # deprecated OA mirror), DO NOT mark it complete — a brief OA/mirror
+                # blip otherwise marks a whole update file "done" with 0 articles
+                # (the silent zero-ingest regression). Leaving processed_all_pmcid
+                # false lets the next run retry it. A genuinely OA-empty file (only
+                # no_pmcid / no_pdf skips, no transient signals) still completes, so
+                # there is no infinite retry.
+                transient_signals = errors_in_file + skip_counts["pdf_404"]
+                zero_ingest_blocked = (
+                    not aborted_early
+                    and processed_in_file_ok == 0
+                    and transient_signals > 0
+                )
+                if zero_ingest_blocked:
+                    msg = (
+                        f"zero_ingest_guard: 0 ok with {transient_signals} transient "
+                        f"failures (errors={errors_in_file}, pdf_404={skip_counts['pdf_404']})"
+                    )
+                    log.error(
+                        "ZERO-INGEST GUARD tripped for %s: %s — NOT marking complete; will retry next run",
+                        xml_fname, msg,
+                    )
+                    try:
+                        db.record_xml_failure(xml_fname, "ZERO_INGEST_GUARD", msg)
                     except Exception:
                         pass
+                elif not aborted_early:
+                    # Normal completion (ingested >0, or genuinely empty with no transient signals)
+                    try:
+                        db.mark_xml_completed(xml_fname, last_success_pmcid)
+                    except Exception as e:
+                        logging.getLogger("pipeline.db").warning("failed to mark xml completed: %s", e)
 
-            db.close()
+                log.info(
+                    "Finished XML %s: %d ok, skips: no_pmcid=%d, no_pdf=%d, pdf_404=%d, pdf_exists=%d, resume_skip=%d, other=%d, errors=%d%s%s",
+                    xml_fname,
+                    processed_in_file_ok,
+                    skip_counts["no_pmcid"],
+                    skip_counts["no_pdf"],
+                    skip_counts["pdf_404"],
+                    skip_counts["pdf_already_exists"],
+                    skip_counts["resume_skip"],
+                    skip_counts["other"],
+                    errors_in_file,
+                    " (aborted early)" if aborted_early else "",
+                    " (ZERO-INGEST GUARD: not completed)" if zero_ingest_blocked else "",
+                )
             
-            # Mark as completed and include aggregate metrics if enabled
-            if metrics_enabled and metrics_total["count"] > 0:
-                c = max(1, metrics_total["count"])
-                metrics_payload = {
-                    "totals": metrics_total,
-                    "averages": {
-                        "oa": metrics_total["oa"] / c,
-                        "download": metrics_total["download"] / c,
-                        "upload": metrics_total["upload"] / c,
-                        "qdrant_delete": metrics_total["qdrant_delete"] / c,
-                        "vectorize": metrics_total["vectorize"] / c,
-                    }
+                # Break if limit reached
+                if limit is not None and processed_global >= limit:
+                    log.info("Reached global limit of %d items. Stopping.", limit)
+                    break
+            finally:
+                # Always clean up the temp directory for this XML
+                try:
+                    tmpdir_obj.cleanup()
+                except Exception:
+                    pass
+
+        db.close()
+        
+        # Mark as completed and include aggregate metrics if enabled
+        if metrics_enabled and metrics_total["count"] > 0:
+            c = max(1, metrics_total["count"])
+            metrics_payload = {
+                "totals": metrics_total,
+                "averages": {
+                    "oa": metrics_total["oa"] / c,
+                    "download": metrics_total["download"] / c,
+                    "upload": metrics_total["upload"] / c,
                 }
-                state_logger.mark_completed(processed_global, metrics=metrics_payload)
-            else:
-                state_logger.mark_completed(processed_global)
-            log.info("All done. processed=%s", processed_global)
-        finally:
-            # Cleanup HTTP session
-            try:
-                http_session.close()
-            except Exception:
-                pass
+            }
+            state_logger.mark_completed(processed_global, metrics=metrics_payload)
+        else:
+            state_logger.mark_completed(processed_global)
+        log.info("All done. processed=%s", processed_global)
+    finally:
+        # Cleanup HTTP session
+        try:
+            http_session.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="PMC OA -> MinIO -> Qdrant -> Postgres pipeline")
+    ap = argparse.ArgumentParser(description="PMC OA -> MinIO -> Postgres (Stage 1, download-only)")
     ap.add_argument("--limit", type=int, default=None, help="Hard stop after processing this many successful items")
-    ap.add_argument("--source", choices=["updatefiles", "baseline", "both"], default="updatefiles", 
+    ap.add_argument("--source", choices=["updatefiles", "baseline", "both"], default="updatefiles",
                     help="File source: updatefiles (daily), baseline (historical), or both")
-    ap.add_argument("--baseline-start", default=None, 
+    ap.add_argument("--baseline-start", default=None,
                     help="Baseline file number to start from (e.g., 0001, inclusive)")
-    ap.add_argument("--baseline-end", default=None, 
+    ap.add_argument("--baseline-end", default=None,
                     help="Baseline file number to end at (e.g., 0100, inclusive)")
-    ap.add_argument("--skip-vectorization", action="store_true", default=False,
-                    help="Skip vectorization step (focus on MinIO PDF downloads only)")
     args = ap.parse_args()
-    
+
     try:
-        run_pipeline(limit=args.limit, source=args.source, baseline_start=args.baseline_start, baseline_end=args.baseline_end, skip_vectorization=args.skip_vectorization)
+        run_pipeline(limit=args.limit, source=args.source, baseline_start=args.baseline_start, baseline_end=args.baseline_end)
     except KeyboardInterrupt:
         log = logging.getLogger("pipeline")
         log.warning("Pipeline interrupted by user")
         state_log_path = os.getenv("PIPELINE_STATE_LOG", "pipeline_state/pipeline_state.json")
         state_logger = ProcessStateLogger(state_log_path)
         state_logger.mark_failed("Pipeline interrupted by user (KeyboardInterrupt)")
-        # Try to reset Qdrant threshold
-        try:
-            cfg = get_settings()
-            qdrant = QdrantHelper(cfg)
-            qdrant.set_indexing_threshold(10_000)
-            print("Reset Qdrant indexing threshold to 10,000")
-        except Exception:
-            pass
         raise
     except Exception as e:
         log = logging.getLogger("pipeline")
@@ -1609,11 +1380,4 @@ if __name__ == "__main__":
         state_log_path = os.getenv("PIPELINE_STATE_LOG", "pipeline_state/pipeline_state.json")
         state_logger = ProcessStateLogger(state_log_path)
         state_logger.mark_failed(f"Unexpected error: {type(e).__name__}: {str(e)}")
-        # Try to reset Qdrant threshold
-        try:
-            cfg = get_settings()
-            qdrant = QdrantHelper(cfg)
-            qdrant.set_indexing_threshold(10_000)
-        except Exception:
-            pass
         raise

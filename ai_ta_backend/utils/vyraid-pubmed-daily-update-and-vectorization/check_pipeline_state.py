@@ -14,9 +14,9 @@ import json
 import os
 import sys
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
+from shared.env import load_project_env
+load_project_env(__file__)
 
 def main():
     state_log_path = os.getenv("PIPELINE_STATE_LOG", "pipeline_state/pipeline_state.json")

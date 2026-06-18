@@ -1,5 +1,8 @@
-# Secrets
+# Secrets — including local symlinks pointing at off-tree env files
 .env
+.env.production
+.env.testing
+.env.local
 
 # Runtime state & checkpoints (generated at runtime)
 pipeline_state/*

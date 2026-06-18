@@ -1,81 +1,110 @@
 # PubMed Daily Update & Vectorization Pipeline
 
-Automates continuous ingestion and vectorization of Open Access PubMed Central (PMC) articles for use in UIUC.chat RAG retrieval.
+Continuously ingests and vectorizes Open Access PubMed Central (PMC) articles for
+UIUC.chat RAG retrieval.
 
 Each daily run:
 - Fetches PubMed XML update files from NCBI
-- Queries the PMC OA Web Service to discover freely downloadable PDFs
-- Uploads PDFs to MinIO preserving the `oa_pdf/` directory structure
-- Embeds text chunks via Ollama (`nomic-embed-text:v1.5`) and upserts to Qdrant
-- Records article metadata and progress in Supabase Postgres
+- Queries the PMC OA Web Service to find freely downloadable PDFs
+- Uploads PDFs to MinIO, preserving the `oa_pdf/` layout
+- Records article metadata in Supabase Postgres with `vector_indexed=false`
+- (Separately) embeds text chunks via Ollama `nomic-embed-text:v1.5` and upserts to Qdrant
 
 ---
 
-## Architecture
-
-### Two-Stage Daily Pipeline (primary workflow)
+## Architecture — two stages
 
 ```
-Stage 1 — Download (I/O bound, 16 workers)       Stage 2 — Vectorize (CPU/GPU bound, 4 workers)
-  run_daily_updates.sh → main.py                    run_vectorization.sh → batch_vectorize.py
-  ┌──────────────────────────────┐                  ┌──────────────────────────────────────┐
-  │ 1. Pull NCBI XML updates     │                  │ 1. Query Postgres for articles with  │
-  │ 2. OA API → PDF download URL │                  │    pdf_location but vector_indexed=F │
-  │ 3. Fetch PDF → MinIO upload  │    ──────────→   │ 2. Download PDF from MinIO           │
-  │ 4. Upsert Postgres row       │                  │ 3. Chunk (7000 chars, 200 overlap)   │
-  │    (skip vectorization)      │                  │ 4. Embed via Ollama, upsert Qdrant   │
-  └──────────────────────────────┘                  │ 5. Mark vector_indexed=true          │
-                                                    └──────────────────────────────────────┘
+Stage 1 — Download (I/O bound)                  Stage 2 — Vectorize (GPU bound)
+  run_daily_updates.sh → main.py                  run_vectorization.sh → batch_vectorize.py
+  ┌──────────────────────────────┐                ┌──────────────────────────────────────┐
+  │ 1. Pull NCBI XML updates     │                │ 1. Query Postgres: pdf_location set, │
+  │ 2. OA API → PDF download URL │                │    vector_indexed=false (keyset page)│
+  │ 3. Fetch PDF → MinIO upload  │   ─────────→   │ 2. Download PDF from MinIO           │
+  │ 4. Upsert Postgres row,      │                │ 3. Chunk (1000 chars, 200 overlap)   │
+  │    vector_indexed=false      │                │ 4. Embed via Ollama, upsert Qdrant   │
+  └──────────────────────────────┘                │ 5. Mark vector_indexed=true          │
+                                                  └──────────────────────────────────────┘
 ```
 
-Stage 1 runs once daily; Stage 2 runs continuously (every 30 min via cron) to drain the backlog.
+Stage 1 (`main.py`) is **download-only** — it never touches Qdrant or any embedding
+endpoint. Stage 2 (`batch_vectorize.py`) drains whatever Stage 1 leaves behind.
+Stage 1 runs once daily; Stage 2 runs every 30 min to keep the backlog drained.
 
-### Supporting Workflows
+### Catch-up / backfill (preserved alongside the daily cron)
 
-| Script | Purpose | When to use |
-|--------|---------|-------------|
-| `vectorize_minio_direct.py` | Bulk vectorize existing MinIO PDFs without Postgres dependency | Large catch-up runs |
-| `ftp/ftp_reconciliation_workflow.sh` | Full FTP→MinIO gap recovery (3-phase) | Periodic reconciliation |
-| `check_pipeline_state.py` | Prevent duplicate `main.py` runs | Called by `cron_wrapper.sh` |
+These tools re-vectorize or backfill outside the incremental daily flow:
+
+| Tool | Use |
+|------|-----|
+| `batch_vectorize.py --limit 0` | Drain an arbitrarily large Postgres backlog (also the Stage 2 cron) |
+| `vectorize_pg_driven.py` | **Primary catch-up** — Postgres-driven, O(1) memory, no bucket scan, shardable via `--from-pmid/--to-pmid` |
+| `vectorize_minio_direct.py` | **Deprecated** — legacy full-MinIO-scan, kept as the vetting baseline; remove once `vectorize_pg_driven.py` is vetted |
+| `scripts/postgres_vs_minio_audit.py` | Read-only two-way audit: is Postgres a faithful index of MinIO? Run before retiring the legacy tool |
+| `external-embedding-run/` | HPC/SLURM multi-GPU **bulk** re-embed of the whole corpus (see its README) |
+
+### Embedding endpoint configuration
+
+Stage 2 reads `EMBEDDING_URLS` (comma-separated, linear fallback); if unset it
+falls back to a single `EMBEDDING_BASE_URL`. Stage 1 ignores both.
+
+```bash
+# localhost first (reliable); secret-ollama only as last resort.
+EMBEDDING_URLS=http://localhost:11434/api/embeddings,https://secret-ollama.ncsa.ai/api/embeddings
+```
+
+> `secret-ollama.ncsa.ai` is unreliable — it can return HTTP 200 with an empty
+> embedding. `shared/vectorize.py:get_embedding` rejects any vector whose length
+> isn't `VECTOR_SIZE` (768) and falls through to the next URL, so keep localhost first.
+
+Verify any endpoint:
+```bash
+curl -X POST $URL -H 'Content-Type: application/json' \
+  -d '{"model":"nomic-embed-text:v1.5","prompt":"hi"}' | jq '.embedding | length'   # expect 768
+```
 
 ---
 
 ## Setup
 
-### 1. Clone & Install
-
+### 1. Install
 ```bash
-cd /home/dadams/pub-med-daily/ai-ta-backend
-pip install -r ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization/requirements.txt
+pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
-
+### 2. Configure environment
 ```bash
-cp .env-example .env
-# Edit .env with your values (see below)
+cp .env-example .env     # then edit values
 ```
 
-Key environment variables:
+Both the shell wrappers and the Python entrypoints resolve the env file the same
+way (`shared/env.py:load_project_env`, zero-dep, idempotent):
+
+1. `$ENV_FILE` if set (absolute/relative, honors `~`)
+2. `.env` next to the script
+3. `.env.production` next to the script
+
+If none resolve, the env is assumed pre-exported. On the production host,
+`.env.production` is a gitignored symlink to `/home/dadams/pub-med-daily/.env.production`.
+
+Key variables (see `.env-example` for the full list):
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `POSTGRES_DSN` | Supabase Postgres connection string | `postgresql://user:pass@host:5432/db` |
 | `DB_SCHEMA` | Postgres schema | `vyraid` |
-| `MINIO_ENDPOINT` | MinIO API endpoint | `minio-api.ncsa.ai` |
-| `MINIO_BUCKET` | Bucket name | `pubmed` |
-| `MINIO_SECURE` | Use HTTPS | `true` |
-| `EMBEDDING_BASE_URL` | Ollama embeddings endpoint | `http://localhost:11434/api/embeddings` |
-| `QDRANT_URL` | Qdrant host | `http://localhost` |
-| `QDRANT_PORT` | Qdrant port | `6333` |
-| `QDRANT_COLLECTION` | Collection name | `ncbi_pdfs` |
-| `VECTOR_SIZE` | Embedding dimensions | `768` |
-| `CHUNK_SIZE` | Characters per chunk | `7000` |
-| `CHUNK_OVERLAP` | Overlap between chunks | `200` |
-| `MAX_WORKERS` | Parallel download threads | `16` (Stage 1), `4` (Stage 2) |
+| `MINIO_ENDPOINT` / `MINIO_SECURE` | MinIO API host / use HTTPS | `minio-api.ncsa.ai` / `true` |
+| `MINIO_BUCKET` | Bucket | `pubmed` |
+| `EMBEDDING_URLS` | Stage 2 embedding endpoints (fallback order) | see above |
+| `QDRANT_URL` / `QDRANT_COLLECTION` | Qdrant host / collection | `https://qdrant.ncsa.ai` / `pubmed_v2`* |
+| `VECTOR_SIZE` | Embedding dims | `768` |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | Chunking | `1000` / `200` |
+| `MAX_WORKERS` | Parallel workers | `16` (Stage 1) / `4` (Stage 2) |
 
-### 3. Database Tables (if not yet created)
+\* `.env-example` defaults the collection to `ncbi_pdfs`; production uses `pubmed_v2`.
+`CHUNK_SIZE=1000` is required by `nomic-embed-text:v1.5` — changing it means re-vectorizing.
 
+### 3. Database tables (if not already present)
 ```sql
 CREATE TABLE vyraid.xml_processing_log (
   xml_filename          VARCHAR(20) UNIQUE PRIMARY KEY,
@@ -99,200 +128,127 @@ CREATE TABLE vyraid.xml_failed_downloads (
 
 ---
 
-## Running Manually
-
-### Stage 1 — Download new articles
+## Running manually
 
 ```bash
-cd ai-ta-backend/ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization
-export $(grep -v '^#' /home/dadams/pub-med-daily/.env.production | xargs)
+# Stage 1 — download new articles (no embedding dependency)
+python main.py --source updatefiles            # daily update files (primary)
+python main.py --source updatefiles --limit 10 # quick test
 
-# Daily update files (primary use)
-python main.py --source updatefiles --skip-vectorization
-
-# Test with a limit
-python main.py --source updatefiles --skip-vectorization --limit 10
-```
-
-### Stage 2 — Vectorize the backlog
-
-```bash
-# Process all articles with pdf_location but vector_indexed=false
+# Stage 2 — vectorize the backlog
 python batch_vectorize.py --workers 4 --aggressive-mode
+python batch_vectorize.py --dry-run --limit 5  # no writes
 
-# Dry run (no writes)
-python batch_vectorize.py --dry-run --limit 5
+# Catch-up — Postgres-driven (primary)
+python vectorize_pg_driven.py --workers 4
+#   A/B into a temp collection:
+python vectorize_pg_driven.py --workers 2 --limit 100 --collection pubmed_v2_vet_pgdriven
 ```
 
-### Bulk MinIO vectorization (catch-up only)
-
-```bash
-# Vectorize PDFs already in MinIO without going through Postgres backlog
-python vectorize_minio_direct.py --local-qdrant --collection pubmed_v2 --workers 4
-```
+Stage 1 records each article in `vyraid.articles` with `vector_indexed=false` so
+Stage 2 picks it up. Stage 2 pages the backlog with **keyset** pagination
+(`pmid < cursor`), not OFFSET, so a shrinking result set never skips rows.
 
 ---
 
-## Cron Automation
+## Cron automation
 
-### Recommended crontab
-
-```crontab
-# Stage 1: Download new NCBI update files daily at 2:00 AM
-0 2 * * * /home/dadams/pub-med-daily/ai-ta-backend/ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization/run_daily_updates.sh >> /var/log/pubmed_daily.log 2>&1
-
-# Stage 2: Drain vectorization backlog every 30 minutes
-*/30 * * * * /home/dadams/pub-med-daily/ai-ta-backend/ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization/run_vectorization.sh >> /var/log/pubmed_vectorize.log 2>&1
-```
-
-### Using cron_wrapper.sh (safe overlap prevention)
-
-`cron_wrapper.sh` wraps `main.py` with:
-- Conda env activation
-- Duplicate run prevention (checks `pipeline_state.json` + live PID)
-- Auto-recovery from FAILED state (backs up and retries)
-
-```crontab
-# Alternative: run_daily with state protection
-0 2 * * * /home/dadams/pub-med-daily/ai-ta-backend/ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization/cron_wrapper.sh >> /var/log/pubmed_cron.log 2>&1
-```
-
-Make executable first:
-```bash
-chmod +x run_daily_updates.sh run_vectorization.sh cron_wrapper.sh
-```
-
----
-
-## FTP Reconciliation (Periodic)
-
-For recovering gaps between NCBI FTP, Postgres DB, and MinIO — see [ftp/README.md](ftp/README.md).
+The canonical schedule is checked in as **`crontab_pubmed.txt`**. Install it:
 
 ```bash
-# Full end-to-end (8-worker download)
-bash ftp/ftp_reconciliation_workflow.sh 8
+crontab crontab_pubmed.txt          # replaces the crontab
+crontab -l                          # verify
 ```
 
----
+It runs Stage 1 daily at **16:00 CDT** (safely after NCBI's ~14:03 ET posting; a
+missed day self-heals since each run catches up all missing files) and Stage 2
+every 30 minutes. Both runners are `flock`-guarded with distinct locks
+(`/tmp/pubmed_stage1.lock`, `/tmp/pubmed_vectorize.lock`), so ticks never overlap
+and the two stages may run concurrently.
 
-## Key Parameters
+`run_vectorization.sh` first calls **`ensure_embedding_endpoint.sh`**, a three-tier
+preflight: probe remote `secret-ollama` → probe local Ollama on
+`127.0.0.1:11434` (pull `nomic-embed-text:v1.5` if missing) → spawn a fresh
+`~/bin/ollama serve` (GPU auto-detected via `nvidia-smi -L`, else CPU). It always
+exits 0; `get_embedding` has its own per-URL retry/backoff for endpoints that
+recover mid-run.
 
-| Parameter | Value | Location |
-|-----------|-------|----------|
-| Chunk size | 7,000 chars | `CHUNK_SIZE` in `.env` |
-| Chunk overlap | 200 chars | `CHUNK_OVERLAP` in `.env` |
-| Embedding batch upsert | 125 chunks | `EMBED_BATCH_UPSERT` in `.env` |
-| Vector dimensions | 768 | `VECTOR_SIZE` in `.env` (nomic-embed-text:v1.5) |
-| Qdrant batch (Stage 2) | 5,000 chunks | `batch_vectorize.py --aggressive-mode` |
+**Optional state-guard alternative:** `cron_wrapper.sh` wraps Stage 1 with conda
+activation, duplicate-run prevention (`pipeline_state.json` + live PID via
+`check_pipeline_state.py`), and auto-recovery from a FAILED state. Swap it in for
+`run_daily_updates.sh` in the crontab if you want that extra protection.
 
 ---
 
 ## Monitoring
 
-### Quick status
-
 ```bash
-# Infrastructure health
-python scripts/inspect_qdrant.py
-python scripts/vectorize_status.py
-
-# Production summary (Postgres + MinIO + Qdrant)
-python scripts/quick_prod_summary.py
-
-# Recent MinIO activity
-python scripts/list_recent_minio.py
-
-# Live pipeline monitor (DB-backed)
-python scripts/monitor_pipeline.py
+python scripts/quick_prod_summary.py        # Postgres + MinIO + Qdrant snapshot
+python scripts/vectorize_status.py          # vectorized vs. pending backlog
+python scripts/monitor_pipeline.py          # live progress (article stats by date)
+python scripts/postgres_vs_minio_audit.py   # read-only Postgres↔MinIO audit
+python check_pipeline_state.py              # is Stage 1 running?
 ```
-
-### Pipeline state
-
-```bash
-# Check if main.py is running
-python check_pipeline_state.py
-
-# Tail state file
-tail -f pipeline_state/pipeline_state.json
-```
-
-### Useful SQL (run against Supabase)
 
 ```sql
--- Articles by PDF availability
-SELECT
-  COUNT(*) FILTER (WHERE pdf_location IS NOT NULL) AS has_pdf,
-  COUNT(*) FILTER (WHERE vector_indexed = true)     AS vectorized,
-  COUNT(*)                                           AS total
+-- PDF availability & backlog
+SELECT COUNT(*) FILTER (WHERE pdf_location IS NOT NULL) AS has_pdf,
+       COUNT(*) FILTER (WHERE vector_indexed) AS vectorized,
+       COUNT(*) AS total
 FROM vyraid.articles;
 
--- Recent additions (last 24h)
-SELECT COUNT(*) FROM vyraid.articles
-WHERE created_at > NOW() - INTERVAL '24 hours';
-
 -- Vectorization backlog
-SELECT COUNT(*) FROM vyraid.articles
-WHERE pdf_location IS NOT NULL AND vector_indexed = false;
+SELECT COUNT(*) FROM vyraid.articles WHERE pdf_location IS NOT NULL AND NOT vector_indexed;
+
+-- Recent failed downloads
+SELECT * FROM vyraid.xml_failed_downloads ORDER BY failure_timestamp DESC LIMIT 50;
 ```
-
-See `scripts/failure_analysis.sql`, `scripts/quick_prod_summary.sql`, and `scripts/prod_index_setup.sql` for more queries.
-
----
-
-## Scripts Reference
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/quick_prod_summary.py` | Snapshot: article counts, recent XML files, MinIO/Qdrant stats |
-| `scripts/quick_test_summary.py` | Validate pipeline completeness from pipeline_state.json |
-| `scripts/vectorize_status.py` | Vectorization backlog: vectorized vs. pending PDFs |
-| `scripts/inspect_qdrant.py` | List Qdrant collections, point counts, sample payloads |
-| `scripts/list_recent_minio.py` | Show 25 most recently modified MinIO objects |
-| `scripts/minio_pdfgz_manifest.py` | Generate timestamped CSV manifests of MinIO PDFs; supports `--delete --yes` |
-| `scripts/oa_ftp_minio_mirror.sh` | Multi-phase FTP→MinIO ingestion orchestrator (`audit`, `stage`, `sync`, `cleanup`) |
-| `scripts/monitor_pipeline.py` | Real-time pipeline progress monitor (article stats by date) |
-| `scripts/failure_analysis.sql` | SQL queries for PDF download failure diagnostics |
-| `scripts/quick_prod_summary.sql` | Fast indexed queries: counts, recent additions, date ranges |
-| `scripts/prod_index_setup.sql` | Create performance indexes on Supabase (run once) |
 
 ---
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `pipeline_state.json` shows FAILED | Previous crash | `cron_wrapper.sh` auto-recovers; or manually delete the file |
-| MinIO 530/403 errors | Credentials or HTTPS mismatch | Check `MINIO_SECURE=true` for HTTPS endpoints |
-| Embedding timeout | Ollama overloaded | Reduce `--workers` or check Ollama health |
-| Qdrant upsert errors | Collection missing | Verify `QDRANT_COLLECTION` exists with `scripts/inspect_qdrant.py` |
-| `psycopg2 OperationalError` | Network / auth | Connection retries are built in; check DSN and Supabase status |
-| Stage 2 processes same article repeatedly | `vector_indexed` not updating | Check Postgres write permissions for the DSN user |
-
-For failed PMCIDs: `SELECT * FROM vyraid.xml_failed_downloads ORDER BY failure_timestamp DESC LIMIT 50;`
+|---------|--------------|-----|
+| `pipeline_state.json` shows FAILED | Previous crash | `cron_wrapper.sh` auto-recovers, or delete the file |
+| MinIO 530/403 errors | Credentials / HTTPS mismatch | Set `MINIO_SECURE=true` for HTTPS endpoints |
+| Embeddings empty or 768-len rejects | `secret-ollama` returning empty vectors | Ensure localhost Ollama is up and first in `EMBEDDING_URLS` |
+| Embedding timeout | Ollama overloaded | Lower `--workers`; check `nvidia-smi` |
+| Qdrant upsert errors | Collection missing | Verify `QDRANT_COLLECTION` exists / dims = 768 |
+| `psycopg2 OperationalError` | Network / auth | Retries are built in; check DSN + Supabase status |
+| Stage 2 reprocesses same article | `vector_indexed` not updating | Check Postgres write perms for the DSN user |
 
 ---
 
-## File Layout
+## Known caveats
+
+- **NCBI FTP deprecation (deadline Aug 2026):** `main.py` fetches PDFs from NCBI's
+  `/pub/pmc/deprecated/oa_pdf/` HTTPS path, which NCBI removes in **August 2026**.
+  This is a stopgap — migrate Stage 1 to the `pmc-oa-opendata` AWS S3 bucket before then.
+- **`secret-ollama` empty embeddings:** see the embedding-endpoint note above; keep
+  localhost first in `EMBEDDING_URLS`.
+
+---
+
+## File layout
 
 ```
 vyraid-pubmed-daily-update-and-vectorization/
-├── main.py                    # Core Stage 1 pipeline
-├── batch_vectorize.py         # Stage 2: backlog vectorizer
-├── vectorize_minio_direct.py  # Bulk MinIO vectorizer (catch-up)
-├── check_pipeline_state.py    # Readiness check (used by cron_wrapper)
-├── run_daily_updates.sh       # Stage 1 cron entry point
-├── run_vectorization.sh       # Stage 2 cron entry point
-├── cron_wrapper.sh            # Safe wrapper with state management
+├── main.py                     # Stage 1: download (NCBI → OA API → MinIO → Postgres)
+├── batch_vectorize.py          # Stage 2: incremental backlog vectorizer
+├── vectorize_pg_driven.py      # Catch-up: Postgres-driven (primary)
+├── vectorize_minio_direct.py   # Catch-up: legacy MinIO-scan (deprecated baseline)
+├── check_pipeline_state.py     # Readiness check (used by cron_wrapper.sh)
+├── run_daily_updates.sh        # Stage 1 cron entry point (flock-guarded)
+├── run_vectorization.sh        # Stage 2 cron entry point (flock-guarded)
+├── ensure_embedding_endpoint.sh# Stage 2 embedding-endpoint preflight
+├── cron_wrapper.sh             # Optional state-guard wrapper for Stage 1
+├── crontab_pubmed.txt          # Canonical, installable crontab
+├── .env-example                # Copy to .env
 ├── requirements.txt
-├── .env-example               # Copy to .env and fill in values
-├── shared/                    # Shared modules (config, DB, models, state)
-├── ftp/                       # FTP reconciliation suite (periodic use)
-│   ├── README.md
-│   ├── ftp_reconciliation.py
-│   ├── ftp_download_missing.py
-│   ├── ftp_ingest_missing_db.py
-│   └── ftp_reconciliation_workflow.sh
-├── scripts/                   # Diagnostic & operational tools
-│   └── (see Scripts Reference above)
-└── pipeline_state/            # Runtime state files (not committed)
+├── shared/                     # config, database, vectorize, env, state_logger, models
+├── scripts/                    # Diagnostics: quick_prod_summary, vectorize_status,
+│                               #   monitor_pipeline, postgres_vs_minio_audit
+├── external-embedding-run/     # Separate HPC/SLURM bulk re-vectorization toolkit
+└── pipeline_state/             # Runtime state files (gitignored)
 ```

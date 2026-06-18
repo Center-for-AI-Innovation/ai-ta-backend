@@ -1,0 +1,20 @@
+# PubMed daily pipeline crontab — prepared 2026-06-18 (server TZ: CDT / UTC-5)
+#
+# Install:   crontab crontab_pubmed.txt      (replaces current crontab — it is empty)
+#   or merge: (crontab -l 2>/dev/null; cat crontab_pubmed.txt) | crontab -
+# Verify:    crontab -l
+#
+# Both runners are flock-guarded (distinct locks: /tmp/pubmed_stage1.lock,
+# /tmp/pubmed_vectorize.lock) so ticks never overlap themselves, and Stage 1
+# and Stage 2 may run concurrently. Each runner auto-resolves env via the
+# .env.production symlink next to it and activates ~/miniforge3.
+
+# Stage 1 — download new PubMed update files (download-only, MAX_WORKERS=16).
+# Catches up ALL missing files each run, so a missed day self-heals next run.
+# 16:00 CDT is safely after NCBI's ~14:03 ET daily posting.
+0 16 * * * /home/dadams/pub-med-daily/ai-ta-backend/ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization/run_daily_updates.sh >> /home/dadams/pub-med-daily/logs/stage1_cron.log 2>&1
+
+# Stage 2 — drain the vectorization backlog every 30 min (no-op when idle or
+# when a prior run still holds the lock). Picks up Stage 1's new articles plus
+# any standing backlog.
+*/30 * * * * /home/dadams/pub-med-daily/ai-ta-backend/ai_ta_backend/utils/vyraid-pubmed-daily-update-and-vectorization/run_vectorization.sh >> /home/dadams/pub-med-daily/logs/pubmed_vectorize.log 2>&1

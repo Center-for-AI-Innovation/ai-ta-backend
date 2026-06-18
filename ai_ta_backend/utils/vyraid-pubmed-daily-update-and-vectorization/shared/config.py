@@ -6,6 +6,8 @@ from typing import Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
+from .vectorize import parse_embedding_urls
+
 # Load .env file if present
 load_dotenv()
 
@@ -97,14 +99,17 @@ def get_settings() -> Settings:
         minio_secure=_to_bool("MINIO_SECURE", False),
         file_location_prefix=os.getenv("FILE_LOCATION", "").strip() or None,
 
-        embedding_base_url=os.environ["EMBEDDING_BASE_URL"],
+        embedding_base_url=(
+            os.environ.get("EMBEDDING_BASE_URL")
+            or (parse_embedding_urls()[0] if parse_embedding_urls() else "")
+        ),
 
         qdrant_url=os.environ["QDRANT_URL"],
         qdrant_port=_to_int("QDRANT_PORT", 6333),
         qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
         qdrant_collection=os.getenv("QDRANT_COLLECTION", "ncbi_pdfs"),
         vector_size=_to_int("VECTOR_SIZE", 768),
-        chunk_size=_to_int("CHUNK_SIZE", 7000),
+        chunk_size=_to_int("CHUNK_SIZE", 1000),
         chunk_overlap=_to_int("CHUNK_OVERLAP", 200),
         embed_batch_upsert=_to_int("EMBED_BATCH_UPSERT", 1000),
     )

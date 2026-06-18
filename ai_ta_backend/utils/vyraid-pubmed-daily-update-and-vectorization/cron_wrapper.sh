@@ -45,11 +45,19 @@ else
     fi
 fi
 
-# Load environment variables (properly handle inline comments)
-if [ -f .env ]; then
+# Env resolution: $ENV_FILE override, else .env / .env.production next to this script
+ENV_FILE="${ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+    for candidate in "$SCRIPT_DIR/.env" "$SCRIPT_DIR/.env.production"; do
+        if [ -e "$candidate" ]; then ENV_FILE="$candidate"; break; fi
+    done
+fi
+if [ -n "$ENV_FILE" ] && [ -e "$ENV_FILE" ]; then
     set -a
-    source <(grep -v '^#' .env | sed 's/#.*$//' | sed '/^[[:space:]]*$/d')
+    source <(grep -v '^#' "$ENV_FILE" | sed 's/#.*$//' | sed '/^[[:space:]]*$/d')
     set +a
+else
+    echo "WARNING: no env file resolved (ENV_FILE unset, no .env or .env.production in $SCRIPT_DIR)" >&2
 fi
 
 echo "=== Pipeline Cron Job Started at $(date) ==="
