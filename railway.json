@@ -2,7 +2,7 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "nixpacksVersion": "1.15.0",
+    "nixpacksVersion": "1.41.0",
     "nixpacksPlan": {
       "phases": {
         "install": {
@@ -19,6 +19,8 @@
   },
   "deploy": {
     "numReplicas": 1,
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 1
   }
