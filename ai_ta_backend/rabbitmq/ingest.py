@@ -1074,7 +1074,7 @@ class Ingest:
                     success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 else:
                     print("⚠️ PDF IS EMPTY -- OCR-ing the PDF.")
-                    success_or_failure = self._ocr_pdf(s3_path=s3_path, course_name=course_name, **kwargs)
+                    success_or_failure = self._ocr_pdf(s3_path=s3_path, course_name=course_name, force_embeddings=force_embeddings, **kwargs)
 
                 return success_or_failure
         except Exception as e:
