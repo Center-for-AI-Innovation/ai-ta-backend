@@ -6,7 +6,9 @@ from typing import List, Optional
 import pika
 import logging
 import json
+import sys
 import threading
+import multiprocessing as mp
 
 from rmsql import SQLAlchemyIngestDB
 from ingest import Ingest
@@ -23,6 +25,40 @@ worker_running = threading.Event()
 
 
 logging.getLogger('pika').setLevel(logging.WARNING)
+
+INGEST_TIMEOUT = int(os.getenv('INGEST_SUBPROCESS_TIMEOUT', '300'))  # seconds; per-doc OCR watchdog cap
+
+
+def _ingest_child(job_id, inputs):
+    """Runs in a spawned subprocess: fresh Ingest() (no inherited fds/threads), do the work."""
+    try:
+        from ingest import Ingest as _Ingest
+        _Ingest().main_ingest(job_id=job_id, **inputs)
+        sys.exit(0)
+    except Exception:
+        logging.error("Ingest child exception:\n%s", traceback.format_exc())
+        sys.exit(3)
+
+
+def run_ingest_isolated(job_id, inputs):
+    """Run main_ingest in a spawned child with a hard timeout so a hung/huge OCR can't block the
+    consumer thread (RabbitMQ heartbeats) or the Flask ALB health check, and a native segfault in
+    the OCR libs kills only the child. Returns None on clean completion, else an error string."""
+    ctx = mp.get_context('spawn')  # spawn, NOT fork: worker is multithreaded (Flask) -> fork can deadlock
+    p = ctx.Process(target=_ingest_child, args=(job_id, inputs))
+    p.start()
+    p.join(INGEST_TIMEOUT)
+    if p.is_alive():
+        p.kill()
+        p.join(10)
+        return (f"OCR/ingest exceeded {INGEST_TIMEOUT}s limit and was killed "
+                f"(likely a very large/complex PDF OCR).")
+    if p.exitcode is not None and p.exitcode < 0:
+        return (f"OCR/ingest subprocess crashed: killed by signal {-p.exitcode} "
+                f"(e.g. segfault in the PDF/OCR native libraries).")
+    if p.exitcode not in (0, None):
+        return f"OCR/ingest subprocess exited abnormally (exit {p.exitcode}); see worker logs."
+    return None
 
 
 class Worker:
@@ -48,6 +84,10 @@ class Worker:
 
     def connect(self):
         parameters = pika.URLParameters(self.rabbitmq_url)
+        # Keep the connection alive across the long (up to INGEST_TIMEOUT) subprocess wait so
+        # RabbitMQ doesn't drop us mid-OCR and redeliver the message (which the redelivery guard
+        # would then mislabel as "worker crashed").
+        parameters.heartbeat = max(900, INGEST_TIMEOUT * 3)
         if self.rabbitmq_ssl:
             # Necessary for AWS AmazonMQ
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
@@ -117,8 +157,22 @@ class Worker:
                     prog_doc["error"] = 'Attempting ingest'
                     self.sql_session.update_document_in_progress(prog_doc)
 
-                    ingester = Ingest()
-                    ingester.main_ingest(job_id=job_id, **inputs)
+                    # Run ingest (incl. OCR) in an isolated, time-boxed subprocess so a hung/huge
+                    # OCR can't block RabbitMQ heartbeats or the ALB health check, and a native
+                    # segfault kills only the child. On timeout/crash: record a clear failure and
+                    # ack (no requeue -> no redelivery-guard mislabel).
+                    failure = run_ingest_isolated(job_id, inputs)
+                    if failure is not None:
+                        self.sql_session.insert_failed_document({
+                            "s3_path": str(prog_doc["s3_path"]),
+                            "readable_filename": prog_doc["readable_filename"],
+                            "course_name": prog_doc["course_name"],
+                            "url": prog_doc["url"],
+                            "base_url": prog_doc["base_url"],
+                            "doc_groups": prog_doc["doc_groups"],
+                            "error": failure,
+                        })
+                        self.sql_session.delete_document_in_progress(job_id)
                     channel.basic_ack(delivery_tag=method.delivery_tag)
         except Exception as e:
             if retry_count < MAX_JOB_RETRIES:
