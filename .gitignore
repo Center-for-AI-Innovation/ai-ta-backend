@@ -169,5 +169,7 @@ pip-selfcheck.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 .aider*
 
+# Cursor workspace files
+*.code-workspace
 # cursor
 *.workspace

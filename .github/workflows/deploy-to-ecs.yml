@@ -2,7 +2,7 @@ name: Redeploy to AWS ECS Fargate
 
 on:
   push:
-    branches: [ illinois-chat, main ]
+    branches: [ restore-qdrant-endpoints ]
     paths:
       - 'ai_ta_backend/**'
       - 'requirements.txt'

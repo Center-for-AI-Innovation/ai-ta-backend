@@ -39,7 +39,7 @@ from qdrant_client.http import models
 # Docs are embedded without instruction during ingest; only queries get this prefix.
 DEFAULT_QWEN_QUERY_INSTRUCTION = (
     "Given a user search query, retrieve the most relevant passages from the Illinois Chat knowledge "
-    "base stored in Qdrant to answer the query accurately. Prioritize authoritative course materials, "
+    "base stored in the vector store to answer the query accurately. Prioritize authoritative course materials, "
     "syllabi, FAQs, official documentation, web pages, and other relevant sources. Ignore boilerplate/navigation text."
 )
 
@@ -100,108 +100,109 @@ class RetrievalService:
                            doc_groups: List[str] | None = None,
                            top_n: int = 100,
                            conversation_id: str = '') -> Union[List[Dict], str]:
-    """Here's a summary of the work.
+      """Here's a summary of the work.
 
-        /GET arguments
-        course name (optional) str: A json response with TBD fields.
+          /GET arguments
+          course name (optional) str: A json response with TBD fields.
 
-        Returns
-        JSON: A json response with TBD fields. See main.py:getTopContexts docs.
-        or
-        String: An error message with traceback.
-        """
-    if doc_groups is None:
-      doc_groups = []
-    try:
-      start_time_overall = time.monotonic()
-      # Improvement of performance by parallelizing independent operations:
+          Returns
+          JSON: A json response with TBD fields. See main.py:getTopContexts docs.
+          or
+          String: An error message with traceback.
+          """
+      if doc_groups is None:
+          doc_groups = []
+      try:
+          start_time_overall = time.monotonic()
+          # Improvement of performance by parallelizing independent operations:
 
-      # Old:
-      # time to fetch disabledDocGroups: 0.2 seconds
-      # time to fetch publicDocGroups: 0.2 seconds
-      # time to embed query: 0.4 seconds
-      # Total time: 0.8 seconds
-      # time to vector search: 0.48 seconds
-      # Total time: 1.5 seconds
+          # Old:
+          # time to fetch disabledDocGroups: 0.2 seconds
+          # time to fetch publicDocGroups: 0.2 seconds
+          # time to embed query: 0.4 seconds
+          # Total time: 0.8 seconds
+          # time to vector search: 0.48 seconds
+          # Total time: 1.5 seconds
 
-      # New:
-      # time to fetch disabledDocGroups: 0.2 seconds
-      # time to fetch publicDocGroups: 0.2 seconds
-      # time to embed query: 0.4 seconds
-      # Total time: 0.5 seconds
-      # time to vector search: 0.48 seconds
-      # Total time: 0.9 seconds
+          # New:
+          # time to fetch disabledDocGroups: 0.2 seconds
+          # time to fetch publicDocGroups: 0.2 seconds
+          # time to embed query: 0.4 seconds
+          # Total time: 0.5 seconds
+          # time to vector search: 0.48 seconds
+          # Total time: 0.9 seconds
 
-      if course_name == "vyriad":
-        embedding_client = self.nomic_embeddings
-      elif course_name == "pubmed" or course_name == "patents":
-        embedding_client = self.nomic_embeddings
-      else:
-        embedding_client = self.embeddings
+          if course_name == "vyriad":
+              embedding_client = self.nomic_embeddings
+          elif course_name == "pubmed" or course_name == "patents":
+              embedding_client = self.nomic_embeddings
+          else:
+              embedding_client = self.embeddings
 
-      # Create tasks for parallel execution
-      with self.thread_pool_executor as executor:
-        loop = asyncio.get_event_loop()
-        tasks = [
-            loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
-            loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
-            loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client, self.qwen_query_instruction)
-        ]
+          # Create tasks for parallel execution
+          with self.thread_pool_executor as executor:
+              loop = asyncio.get_event_loop()
+              tasks = [
+                  loop.run_in_executor(executor, self.sqlDb.getDisabledDocGroups, course_name),
+                  loop.run_in_executor(executor, self.sqlDb.getPublicDocGroups, course_name),
+                  loop.run_in_executor(executor, self._embed_query_and_measure_latency, search_query, embedding_client,
+                                       self.qwen_query_instruction)
+              ]
 
-      disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
+          disabled_doc_groups_response, public_doc_groups_response, user_query_embedding = await asyncio.gather(*tasks)
 
-      disabled_doc_groups = [doc_group for doc_group in disabled_doc_groups_response["data"]]
-      public_doc_groups = public_doc_groups_response["data"]
+          disabled_doc_groups = [doc_group for doc_group in disabled_doc_groups_response["data"]]
+          public_doc_groups = public_doc_groups_response["data"]
 
-      time_for_parallel_operations = time.monotonic() - start_time_overall
-      start_time_vector_search = time.monotonic()
+          time_for_parallel_operations = time.monotonic() - start_time_overall
+          start_time_vector_search = time.monotonic()
 
-      # Perform vector search with conversation filter
-      found_docs: list[Document] = self.vector_search(
-          search_query=search_query,
-          course_name=course_name,
-          doc_groups=doc_groups,
-          user_query_embedding=user_query_embedding,
-          disabled_doc_groups=disabled_doc_groups,
-          public_doc_groups=public_doc_groups,
-          top_n=top_n,
-          conversation_id=conversation_id
-      )
+          # Perform vector search with conversation filter
+          found_docs: list[Document] = self.vector_search(
+              search_query=search_query,
+              course_name=course_name,
+              doc_groups=doc_groups,
+              user_query_embedding=user_query_embedding,
+              disabled_doc_groups=disabled_doc_groups,
+              public_doc_groups=public_doc_groups,
+              top_n=top_n,
+              conversation_id=conversation_id
+          )
 
-      time_to_retrieve_docs = time.monotonic() - start_time_vector_search
+          time_to_retrieve_docs = time.monotonic() - start_time_vector_search
 
-      valid_docs = []
-      for doc in found_docs:
-        valid_docs.append(doc)
+          valid_docs = []
+          for doc in found_docs:
+              valid_docs.append(doc)
 
-      print(f"Course: {course_name} ||| search_query: {search_query}\n"
-            f"⏰ Runtime of getTopContexts: {(time.monotonic() - start_time_overall):.2f} seconds\n"
-            f"Runtime for parallel operations: {time_for_parallel_operations:.2f} seconds, "
-            f"Runtime to complete vector_search: {time_to_retrieve_docs:.2f} seconds")
-      if len(valid_docs) == 0:
-        return []
+          print(f"Course: {course_name} ||| search_query: {search_query}\n"
+                f"⏰ Runtime of getTopContexts: {(time.monotonic() - start_time_overall):.2f} seconds\n"
+                f"Runtime for parallel operations: {time_for_parallel_operations:.2f} seconds, "
+                f"Runtime to complete vector_search: {time_to_retrieve_docs:.2f} seconds")
+          if len(valid_docs) == 0:
+              return []
 
-      self.posthog.capture(
-          event_name="getTopContexts_success_DI",
-          properties={
-              "user_query": search_query,
-              "course_name": course_name,
-              # "total_tokens_used": token_counter,
-              "total_contexts_used": len(valid_docs),
-              "total_unique_docs_retrieved": len(found_docs),
-              "getTopContext_total_latency_sec": time.monotonic() - start_time_overall,
-          },
-      )
+          self.posthog.capture(
+              event_name="getTopContexts_success_DI",
+              properties={
+                  "user_query": search_query,
+                  "course_name": course_name,
+                  # "total_tokens_used": token_counter,
+                  "total_contexts_used": len(valid_docs),
+                  "total_unique_docs_retrieved": len(found_docs),
+                  "getTopContext_total_latency_sec": time.monotonic() - start_time_overall,
+              },
+          )
 
-      return self.format_for_json(valid_docs)
-    except Exception as e:
-      # return full traceback to front end
-      # err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:\n{e}"  # type: ignore
-      err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.print_exc} \n{e}"  # type: ignore
-      traceback.print_exc()
-      print(err)
-      self.sentry.capture_exception(e)
-      return err
+          return self.format_for_json(valid_docs)
+      except Exception as e:
+          # return full traceback to front end
+          # err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:\n{e}"  # type: ignore
+          err: str = f"ERROR: In /getTopContexts. Course: {course_name} ||| search_query: {search_query}\nTraceback: {traceback.print_exc} \n{e}"  # type: ignore
+          traceback.print_exc()
+          print(err)
+          self.sentry.capture_exception(e)
+          return err
 
   def getAll(
       self,
@@ -334,7 +335,7 @@ class RetrievalService:
     return "Success"
 
   def delete_data(self, course_name: str, s3_path: str, source_url: str):
-    """Delete file from S3, Qdrant, and Supabase."""
+    """Delete file from S3, vector store (pgvector), and Supabase."""
     print(f"Deleting data for course {course_name}")
     # add delete from doc map logic here
     try:
@@ -344,7 +345,7 @@ class RetrievalService:
         raise ValueError("S3_BUCKET_NAME environment variable is not set")
 
       identifier_key, identifier_value = ("s3_path", s3_path) if s3_path else ("url", source_url)
-      logging.info(f"Deleting {identifier_value} from S3, Qdrant, and Database using {identifier_key}")
+      logging.info(f"Deleting {identifier_value} from S3, vector store, and Database using {identifier_key}")
 
       # Delete from S3
       if identifier_key == "s3_path":
@@ -370,13 +371,13 @@ class RetrievalService:
 
   def delete_from_qdrant(self, identifier_key: str, identifier_value: str, course_name: str):
     try:
-      print("Deleting from Qdrant")
+      print("Deleting from vector store (pgvector / Qdrant cropwizard)")
       if course_name == 'cropwizard-1.5':
         # delete from cw db
         response = self.vdb.delete_data_cropwizard(identifier_key, identifier_value)
       else:
         response = self.vdb.delete_data(os.environ['QDRANT_COLLECTION_NAME'], identifier_key, identifier_value)
-      print(f"Qdrant response: {response}")
+      print(f"Vector store response: {response}")
     except Exception as e:
       if "timed out" in str(e):
         # Timed out is fine. Still deletes.
@@ -514,83 +515,87 @@ class RetrievalService:
                     public_doc_groups,
                     top_n: int = 100,
                     conversation_id: str = ''):
-    """
-    Search the vector database for a given query, course name, and document groups.
-    Now includes optional conversation-specific filtering.
-    """
-    if doc_groups is None:
-      doc_groups = []
+      """
+      Search the vector database for a given query, course name, and document groups.
+      Now includes optional conversation-specific filtering.
+      """
+      if doc_groups is None:
+          doc_groups = []
 
-    if disabled_doc_groups is None:
-      disabled_doc_groups = []
+      if disabled_doc_groups is None:
+          disabled_doc_groups = []
 
-    if public_doc_groups is None:
-      public_doc_groups = []
+      if public_doc_groups is None:
+          public_doc_groups = []
 
-    # Capture the search invoked event to PostHog
-    self._capture_search_invoked_event(search_query, course_name, doc_groups)
+      # Capture the search invoked event to PostHog
+      self._capture_search_invoked_event(search_query, course_name, doc_groups)
 
-    # Perform the vector search
-    start_time_vector_search = time.monotonic()
+      # Perform the vector search
+      start_time_vector_search = time.monotonic()
 
-    # ----------------------------
-    # SPECIAL CASE FOR VYRIAD, CROPWIZARD
-    # ----------------------------
-    if course_name == "vyriad":
-      search_results = self.vdb.vyriad_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                                     disabled_doc_groups, public_doc_groups)
-    elif course_name == "cropwizard":
-      search_results = self.vdb.cropwizard_vector_search(search_query, course_name, doc_groups, user_query_embedding,
-                                                         top_n, disabled_doc_groups, public_doc_groups)
-    elif course_name == "pubmed":
-      search_results = self.vdb.pubmed_vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                                     disabled_doc_groups, public_doc_groups)
-    elif course_name == "patents":
-      search_results = self.vdb.patents_vector_search(search_query, course_name, doc_groups, user_query_embedding,
-                                                      top_n, disabled_doc_groups, public_doc_groups)
-    else:
-      # Handle conversation filtering for normal courses
-      if conversation_id:
-          # For chat conversations: get BOTH regular course documents AND conversation-specific documents
-          
-          # Get regular course documents (course_name + no conversation_id)
-          regular_filter = self.vdb._create_search_filter(
-              course_name, doc_groups, disabled_doc_groups, public_doc_groups
-          )
-          
-          # Get conversation-specific documents (this conversation_id)
-          chat_filter = self.vdb._create_conversation_search_filter(conversation_id)
-          
-          # Combine both filters with OR logic to get both types of documents
-          combined_filter = models.Filter(
-              should=[regular_filter, chat_filter]
-          )
-          
-          search_results = self.vdb.vector_search_with_filter(
-              search_query, course_name, doc_groups, user_query_embedding, 
-              top_n, disabled_doc_groups, public_doc_groups, combined_filter
-          )
+      # ----------------------------
+      # SPECIAL CASE FOR VYRIAD, CROPWIZARD
+      # ----------------------------
+      if course_name == "vyriad":
+          search_results = self.vdb.vyriad_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                         top_n,
+                                                         disabled_doc_groups, public_doc_groups)
+      elif course_name == "cropwizard":
+          search_results = self.vdb.cropwizard_vector_search(search_query, course_name, doc_groups,
+                                                             user_query_embedding,
+                                                             top_n, disabled_doc_groups, public_doc_groups)
+      elif course_name == "pubmed":
+          search_results = self.vdb.pubmed_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                         top_n,
+                                                         disabled_doc_groups, public_doc_groups)
+      elif course_name == "patents":
+          search_results = self.vdb.patents_vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                          top_n, disabled_doc_groups, public_doc_groups)
       else:
-          # Normal course logic without conversation filtering
-          search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding, top_n,
-                                                 disabled_doc_groups, public_doc_groups)
-    self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
+          # Handle conversation filtering for normal courses
+          if conversation_id:
+              # For chat conversations: get BOTH regular course documents AND conversation-specific documents
 
-    # Process the search results by extracting the page content and metadata
-    start_time_process_search_results = time.monotonic()
-    found_docs = self._process_search_results(search_results, course_name)
-    time_for_process_search_results = time.monotonic() - start_time_process_search_results
+              # Get regular course documents (course_name + no conversation_id)
+              regular_filter = self.vdb._create_search_filter(
+                  course_name, doc_groups, disabled_doc_groups, public_doc_groups
+              )
 
-    # Capture the search succeeded event to PostHog with the vector scores
-    start_time_capture_search_succeeded_event = time.monotonic()
-    self._capture_search_succeeded_event(search_query, course_name, search_results)
-    time_for_capture_search_succeeded_event = time.monotonic() - start_time_capture_search_succeeded_event
+              # Get conversation-specific documents (this conversation_id)
+              chat_filter = self.vdb._create_conversation_search_filter(conversation_id)
 
-    print(f"Runtime for embedding query: {self.openai_embedding_latency:.2f} seconds\n"
-          f"Runtime for vector search: {self.qdrant_latency_sec:.2f} seconds\n"
-          f"Runtime for process search results: {time_for_process_search_results:.2f} seconds\n"
-          f"Runtime for capture search succeeded event: {time_for_capture_search_succeeded_event:.2f} seconds")
-    return found_docs
+              # Combine both filters with OR logic to get both types of documents
+              combined_filter = models.Filter(
+                  should=[regular_filter, chat_filter]
+              )
+
+              search_results = self.vdb.vector_search_with_filter(
+                  search_query, course_name, doc_groups, user_query_embedding,
+                  top_n, disabled_doc_groups, public_doc_groups, combined_filter
+              )
+          else:
+              # Normal course logic without conversation filtering
+              search_results = self.vdb.vector_search(search_query, course_name, doc_groups, user_query_embedding,
+                                                      top_n,
+                                                      disabled_doc_groups, public_doc_groups)
+      self.qdrant_latency_sec = time.monotonic() - start_time_vector_search
+
+      # Process the search results by extracting the page content and metadata
+      start_time_process_search_results = time.monotonic()
+      found_docs = self._process_search_results(search_results, course_name)
+      time_for_process_search_results = time.monotonic() - start_time_process_search_results
+
+      # Capture the search succeeded event to PostHog with the vector scores
+      start_time_capture_search_succeeded_event = time.monotonic()
+      self._capture_search_succeeded_event(search_query, course_name, search_results)
+      time_for_capture_search_succeeded_event = time.monotonic() - start_time_capture_search_succeeded_event
+
+      print(f"Runtime for embedding query: {self.openai_embedding_latency:.2f} seconds\n"
+            f"Runtime for vector search: {self.qdrant_latency_sec:.2f} seconds\n"
+            f"Runtime for process search results: {time_for_process_search_results:.2f} seconds\n"
+            f"Runtime for capture search succeeded event: {time_for_capture_search_succeeded_event:.2f} seconds")
+      return found_docs
 
   def _embed_query_and_measure_latency(self, search_query, embedding_client, query_instruction: str | None = None):
     openai_start_time = time.monotonic()
@@ -610,60 +615,60 @@ class RetrievalService:
     return user_query_embedding
 
   def _capture_search_invoked_event(self, search_query, course_name, doc_groups):
-    self.posthog.capture(
-        event_name="vector_search_invoked",
-        properties={
-            "user_query": search_query,
-            "course_name": course_name,
-            "doc_groups": doc_groups,
-        },
-    )
+      self.posthog.capture(
+          event_name="vector_search_invoked",
+          properties={
+              "user_query": search_query,
+              "course_name": course_name,
+              "doc_groups": doc_groups,
+          },
+      )
 
   def _process_search_results(self, search_results, course_name):
-    found_docs: list[Document] = []
-    for d in search_results:
-      try:
-        metadata = d.payload
-        # print(f"Metadata: {metadata}")
-        page_content = metadata["page_content"]
-        del metadata["page_content"]
-        if "pagenumber" not in metadata.keys() and "pagenumber_or_timestamp" in metadata.keys():
-          metadata["pagenumber"] = metadata["pagenumber_or_timestamp"]
+      found_docs: list[Document] = []
+      for d in search_results:
+          try:
+              metadata = d.payload
+              # print(f"Metadata: {metadata}")
+              page_content = metadata["page_content"]
+              del metadata["page_content"]
+              if "pagenumber" not in metadata.keys() and "pagenumber_or_timestamp" in metadata.keys():
+                  metadata["pagenumber"] = metadata["pagenumber_or_timestamp"]
 
-        found_docs.append(Document(page_content=page_content, metadata=metadata))
-      except Exception as e:
-        print(f"Error in vector_search(), for course: `{course_name}`. Error: {e}")
-        self.sentry.capture_exception(e)
-    return found_docs
+              found_docs.append(Document(page_content=page_content, metadata=metadata))
+          except Exception as e:
+              print(f"Error in vector_search(), for course: `{course_name}`. Error: {e}")
+              self.sentry.capture_exception(e)
+      return found_docs
 
   def _capture_search_succeeded_event(self, search_query, course_name, search_results):
-    vector_score_calc_latency_sec = time.monotonic()
-    # Removed because it takes 0.15 seconds to _calculate_vector_scores... not worth it rn.
-    # max_vector_score, min_vector_score, avg_vector_score = self._calculate_vector_scores(search_results)
-    self.posthog.capture(
-        event_name="vector_search_succeeded",
-        properties={
-            "user_query": search_query,
-            "course_name": course_name,
-            "qdrant_latency_sec": self.qdrant_latency_sec,
-            "openai_embedding_latency_sec": self.openai_embedding_latency,
-            # "max_vector_score": max_vector_score,
-            # "min_vector_score": min_vector_score,
-            # "avg_vector_score": avg_vector_score,
-            "vector_score_calculation_latency_sec": time.monotonic() - vector_score_calc_latency_sec,
-        },
-    )
+      vector_score_calc_latency_sec = time.monotonic()
+      # Removed because it takes 0.15 seconds to _calculate_vector_scores... not worth it rn.
+      # max_vector_score, min_vector_score, avg_vector_score = self._calculate_vector_scores(search_results)
+      self.posthog.capture(
+          event_name="vector_search_succeeded",
+          properties={
+              "user_query": search_query,
+              "course_name": course_name,
+              "qdrant_latency_sec": self.qdrant_latency_sec,
+              "openai_embedding_latency_sec": self.openai_embedding_latency,
+              # "max_vector_score": max_vector_score,
+              # "min_vector_score": min_vector_score,
+              # "avg_vector_score": avg_vector_score,
+              "vector_score_calculation_latency_sec": time.monotonic() - vector_score_calc_latency_sec,
+          },
+      )
 
   def _calculate_vector_scores(self, search_results):
-    max_vector_score = 0
-    min_vector_score = 0
-    total_vector_score = 0
-    for result in search_results:
-      max_vector_score = max(max_vector_score, result.score)
-      min_vector_score = min(min_vector_score, result.score)
-      total_vector_score += result.score
-    avg_vector_score = total_vector_score / len(search_results) if search_results else 0
-    return max_vector_score, min_vector_score, avg_vector_score
+      max_vector_score = 0
+      min_vector_score = 0
+      total_vector_score = 0
+      for result in search_results:
+          max_vector_score = max(max_vector_score, result.score)
+          min_vector_score = min(min_vector_score, result.score)
+          total_vector_score += result.score
+      avg_vector_score = total_vector_score / len(search_results) if search_results else 0
+      return max_vector_score, min_vector_score, avg_vector_score
 
   def format_for_json(self, found_docs: List[Document]) -> List[Dict]:
     """Format documents into JSON-serializable dictionaries.
@@ -1104,20 +1109,29 @@ class RetrievalService:
                 continue
         
         if documents:
-            # Store in Qdrant
-            from qdrant_client.http import models
-            
-            self.vdb.qdrant_client.upsert(
-                collection_name=os.environ.get('QDRANT_COLLECTION_NAME'),
-                points=[
-                    models.PointStruct(
-                        id=doc["id"],
-                        vector=doc["vector"],
-                        payload=doc["payload"]
-                    ) for doc in documents
-                ],
-                wait=True
-            )
+            if os.environ['VECTOR_ENGINE'] == 'qdrant':
+                # Store in Qdrant
+                from qdrant_client.http import models
+
+                self.vdb.qdrant_client.upsert(
+                    collection_name=os.environ.get('QDRANT_COLLECTION_NAME'),
+                    points=[
+                        models.PointStruct(
+                            id=doc["id"],
+                            vector=doc["vector"],
+                            payload=doc["payload"]
+                        ) for doc in documents
+                    ],
+                    wait=True
+                )
+            else:
+                # Store in pgvector (main collection)
+                self.vdb.upsert_main_collection(
+                    ids=[doc["id"] for doc in documents],
+                    vectors=[doc["vector"] for doc in documents],
+                    payloads=[doc["payload"] for doc in documents],
+                    wait=True,
+                )
             
             return {
                 'success': True,
@@ -1130,7 +1144,7 @@ class RetrievalService:
                 'chunks_created': 0,
                 'total_chunks_attempted': len(chunks)
             }
-            
+
     except Exception as e:
         import traceback
         traceback.print_exc()

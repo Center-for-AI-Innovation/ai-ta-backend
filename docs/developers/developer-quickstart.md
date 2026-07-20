@@ -17,7 +17,7 @@ description: Thanks for contributing to UIUC.chat ❤️
 
 * Google: `caiincsa@gmail.com`
 * Managed services: Vercel, Railway, Beam, Supabase, S3, Posthog, Sentry.
-* Self-hosted: Qdrant, Ollama.
+* Self-hosted: pgvector (Postgres), Ollama.
 * Task management via [our Github Projects board](https://github.com/orgs/Center-for-AI-Innovation/projects?query=is:open).
 
 </details>
