@@ -112,12 +112,7 @@ class SQLDatabase:
 
     def getAllMaterialsForCourse(self, course_name: str):
         query = (
-            select(models.Document.course_name,
-                   models.Document.s3_path,
-                   models.Document.readable_filename,
-                   models.Document.url,
-                   models.Document.base_url
-                   )
+            select(models.Document)
             .where(models.Document.course_name == course_name)
         )
         with self.get_session() as session:
