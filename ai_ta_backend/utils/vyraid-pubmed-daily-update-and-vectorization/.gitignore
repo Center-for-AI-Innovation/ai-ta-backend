@@ -1,0 +1,32 @@
+# Secrets — including local symlinks pointing at off-tree env files
+.env
+.env.production
+.env.testing
+.env.local
+
+# Runtime state & checkpoints (generated at runtime)
+pipeline_state/*
+!pipeline_state/.gitkeep
+pipeline_state.json
+pipeline_state.failed.*.json
+batch_vectorize_checkpoint.json
+minio_vectorize_checkpoint.json
+ftp_crawl_checkpoint.json
+ftp_download_checkpoint.json
+ftp_ingest_db_checkpoint.json
+ftp_reconciliation_result.json
+ftp_pmcid_paths.json
+
+# Data / manifests
+ftp_oa_file_list.csv
+*.manifest.csv
+failed_rerun_manifest.csv
+
+# Logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+pipeline_state.failed.*
